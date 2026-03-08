@@ -17,7 +17,7 @@ test:
     cargo test --workspace --all-targets --all-features
 
 ci:
-    nix flake check --no-update-lock-file --print-build-logs
+    nix flake check --no-update-lock-file
 
 doc:
     cargo doc --workspace --no-deps --open
