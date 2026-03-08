@@ -6,11 +6,9 @@ Implement a Rust library that provides **structured task supervision** on top of
 
 * supervised child tasks
 * restart strategies:
-
   * `OneForOne`
   * `OneForAll`
 * restart policies:
-
   * `Permanent`
   * `Transient`
   * `Temporary`
@@ -187,6 +185,8 @@ Semantics table:
 
 Restart policies only apply during normal supervisor operation. During shutdown, no restarts are scheduled regardless of policy.
 
+Default child restart policy: `Restart::Transient`.
+
 ---
 
 ### 3.5 Group strategy semantics
@@ -209,7 +209,9 @@ If child exit is restartable:
 * stop all currently running children
 * drain all old-generation tasks
 * create a fresh group generation context
-* restart all child specs
+* restart only child specs that are eligible to run in the next group generation
+
+For v0.1, group restart respawns `Permanent` and `Transient` specs and does not respawn `Temporary` specs.
 
 No overlapping generations during one-for-all restart.
 
@@ -239,11 +241,18 @@ Default:
 
 Semantics:
 
-* `Cooperative`: cancel token and wait; if timeout, shutdown returns error
-* `CooperativeThenAbort`: cancel token, wait, then abort if still running
+* `Cooperative`: cancel token and wait; if timeout, shutdown returns `SupervisorError::ShutdownTimedOut`
+* `CooperativeThenAbort`: cancel token, wait up to the grace deadline, then abort any still-running tasks and continue shutdown successfully
 * `Abort`: immediately abort
 
-For v0.1, graceful waiting may be group-oriented rather than per-child fine-grained, but the public type should still be per-child.
+For v0.1, graceful waiting is group-oriented rather than per-child fine-grained:
+
+* compute one shutdown deadline using the maximum `grace` among active children whose mode is `Cooperative` or `CooperativeThenAbort`
+* children in `Abort` mode may be aborted immediately
+* after the grace deadline, remaining `CooperativeThenAbort` children are aborted and shutdown continues
+* after the grace deadline, remaining `Cooperative` children cause shutdown to fail with `ShutdownTimedOut`
+
+These same drain rules also apply when `OneForAll` performs a group restart. If draining the old generation times out because of `Cooperative` children, the supervisor fails instead of starting a new generation.
 
 ---
 
@@ -305,6 +314,11 @@ impl ChildSpec {
 
 Internally, erase the closure into a trait object.
 
+Defaults for `ChildSpec::new()`:
+
+* restart policy: `Restart::Transient`
+* shutdown policy: `ShutdownPolicy::default()`
+
 ---
 
 ### 4.2 `SupervisorBuilder`
@@ -327,6 +341,12 @@ Validation at build time:
 * at least one child
 * valid restart intensity
 
+`RestartIntensity` validation for v0.1:
+
+* `within` must be non-zero
+* `BackoffPolicy::Fixed(delay)` requires `delay > 0`
+* `BackoffPolicy::Exponential { base, factor, max }` requires `base > 0`, `factor > 0`, and `max > 0`
+
 ---
 
 ### 4.3 `Supervisor`
@@ -344,6 +364,11 @@ Semantics:
 
 * `run(self)` runs inline and does not return until supervisor exits. Since it consumes `self`, there is no way to trigger shutdown or subscribe to events from the caller. Use `run()` only for fire-and-wait-for-natural-completion scenarios. Callers who need shutdown control or event subscriptions should use `spawn()` instead.
 * `spawn(self)` spawns the supervisor task and returns a handle
+
+Defaults used by `SupervisorBuilder::new()`:
+
+* `Strategy::OneForOne`
+* `RestartIntensity { max_restarts: 5, within: 30s, backoff: BackoffPolicy::None }`
 
 ---
 
@@ -363,6 +388,12 @@ impl SupervisorHandle {
 `shutdown()` must be idempotent.
 
 `wait()` may be implemented as a shared oneshot or watch-based completion future.
+
+`wait()` contract:
+
+* all clones of the same handle must observe the same terminal result
+* `wait()` resolves only after the supervisor task has finished and all child tasks have been joined/drained
+* after `wait()` resolves, there must be no child task lifetimes still owned by the supervisor runtime
 
 ---
 
@@ -391,6 +422,12 @@ pub enum SupervisorExit {
     Failed,
 }
 ```
+
+Exit semantics:
+
+* `Shutdown`: external shutdown was requested and the supervisor completed its shutdown path successfully
+* `Completed`: all children stopped naturally and no non-restartable failure-like exit was observed
+* `Failed`: all children stopped naturally, but at least one non-restartable child exited as `Failed`, `Panicked`, or `Aborted`
 
 ---
 
@@ -655,7 +692,9 @@ On child exit:
 4. if not restartable:
 
    * leave child stopped
-   * if no children remain running and no restarts pending, supervisor may complete
+   * if no children remain running and no restarts pending, supervisor exits naturally
+   * natural exit returns `SupervisorExit::Completed` if every non-restarted terminal status was `Completed`
+   * natural exit returns `SupervisorExit::Failed` if any non-restarted terminal status was `Failed`, `Panicked`, or `Aborted`
 5. if restartable:
 
    * intensity check
@@ -679,14 +718,14 @@ On restartable child exit:
 6. gracefully drain/abort all running children according to shutdown mode
 7. ensure `join_set` is empty
 8. create fresh group token
-9. respawn all children
+9. respawn all eligible children for the new group generation
 10. emit `ChildRestarted` or `ChildStarted` events for new generations
 
 Important:
 
 * do not start new group before old tasks are drained
 * all children use the fresh group token
-* Temporary children that had previously completed normally are **not** restarted during a group restart — skip them. Only Permanent and Transient children are respawned.
+* `Temporary` children are **not** restarted during a group restart — skip them. Only `Permanent` and `Transient` children are respawned.
 
 ---
 
@@ -712,6 +751,12 @@ Behavior:
 For v0.1, it is acceptable to use a conservative group-wide shutdown deadline equal to:
 
 * max grace among active children
+
+Additional shutdown guarantees:
+
+* if any remaining child is in `Cooperative` mode when the deadline expires, return `SupervisorError::ShutdownTimedOut` after aborting and draining the remaining tasks
+* `SupervisorStopped` is emitted only on successful shutdown, not on `ShutdownTimedOut`
+* `wait()` must not resolve until the drain in step 6 is complete
 
 Per-child precision can come later.
 
