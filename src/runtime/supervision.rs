@@ -23,14 +23,14 @@ use super::{
 };
 
 pub(crate) struct ChildEnvelope {
-    pub(crate) id: String,
+    pub(crate) idx: usize,
     pub(crate) generation: u64,
     pub(crate) result: crate::child::ChildResult,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct TaskMeta {
-    pub(crate) id: String,
+    pub(crate) idx: usize,
     pub(crate) generation: u64,
 }
 
@@ -46,12 +46,12 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) state: SupervisorState,
     pub(crate) group_token: CancellationToken,
     pub(crate) join_set: JoinSet<ChildEnvelope>,
-    pub(crate) child_order: Vec<String>,
-    pub(crate) children: HashMap<String, ChildRuntime>,
+    pub(crate) child_names: Vec<String>,
+    pub(crate) children: Vec<ChildRuntime>,
     pub(crate) events: broadcast::Sender<SupervisorEvent>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
-    terminal_statuses: HashMap<String, TerminalStatus>,
+    terminal_statuses: Vec<Option<TerminalStatus>>,
     pending_exit: Option<Result<SupervisorExit, SupervisorError>>,
 }
 
@@ -61,15 +61,9 @@ impl SupervisorRuntime {
         shutdown_rx: watch::Receiver<bool>,
         events: broadcast::Sender<SupervisorEvent>,
     ) -> Self {
-        let child_order: Vec<String> = config.children.iter().map(|s| s.id.clone()).collect();
-        let children = config
-            .children
-            .into_iter()
-            .map(|spec| {
-                let id = spec.id.clone();
-                (id, ChildRuntime::new(spec))
-            })
-            .collect();
+        let child_names: Vec<String> = config.children.iter().map(|s| s.id.clone()).collect();
+        let child_count = config.children.len();
+        let children = config.children.into_iter().map(ChildRuntime::new).collect();
 
         Self {
             strategy: config.strategy,
@@ -77,20 +71,20 @@ impl SupervisorRuntime {
             state: SupervisorState::Running,
             group_token: CancellationToken::new(),
             join_set: JoinSet::new(),
-            child_order,
+            child_names,
             children,
             events,
             shutdown_rx,
             task_map: HashMap::new(),
-            terminal_statuses: HashMap::new(),
+            terminal_statuses: vec![None; child_count],
             pending_exit: None,
         }
     }
 
     pub(crate) async fn run(&mut self) -> Result<SupervisorExit, SupervisorError> {
         self.send_event(SupervisorEvent::SupervisorStarted);
-        for id in self.child_order.clone() {
-            self.spawn_child(&id)?;
+        for idx in 0..self.children.len() {
+            self.spawn_child(idx)?;
         }
 
         loop {
@@ -124,8 +118,8 @@ impl SupervisorRuntime {
         self.send_event(SupervisorEvent::SupervisorStopped);
         if self
             .terminal_statuses
-            .values()
-            .any(TerminalStatus::is_failure)
+            .iter()
+            .any(|s| s.as_ref().is_some_and(TerminalStatus::is_failure))
         {
             Ok(SupervisorExit::Failed)
         } else {
@@ -138,30 +132,24 @@ impl SupervisorRuntime {
         joined: Result<(Id, ChildEnvelope), JoinError>,
     ) -> Result<(), SupervisorError> {
         let classified = self.classify_join(joined)?;
-        self.record_exit(&classified.id, classified.generation, &classified.status);
+        self.record_exit(classified.idx, classified.generation, &classified.status);
 
         if self.state == SupervisorState::Stopping {
             return Ok(());
         }
 
-        let restart_policy = self
-            .children
-            .get(&classified.id)
-            .map(|child| child.spec.restart)
-            .ok_or_else(|| {
-                SupervisorError::Internal(format!("missing child runtime for {}", classified.id))
-            })?;
+        let restart_policy = self.children[classified.idx].spec.restart;
 
         if restart_policy.should_restart(classified.status.is_failure()) {
             match self.strategy {
                 Strategy::OneForOne => {
-                    self.handle_one_for_one_restart(classified.id, classified.generation)
+                    self.handle_one_for_one_restart(classified.idx, classified.generation)
                         .await?
                 }
-                Strategy::OneForAll => self.handle_one_for_all_restart(classified.id).await?,
+                Strategy::OneForAll => self.handle_one_for_all_restart(classified.idx).await?,
             }
         } else {
-            self.record_terminal_status(&classified.id, classified.generation, &classified.status);
+            self.record_terminal_status(classified.idx, classified.generation, &classified.status);
         }
 
         Ok(())
@@ -173,11 +161,14 @@ impl SupervisorRuntime {
         reason: DrainReason,
     ) -> Result<(), SupervisorError> {
         let classified = self.classify_join(joined)?;
-        self.record_exit(&classified.id, classified.generation, &classified.status);
+        self.record_exit(classified.idx, classified.generation, &classified.status);
         if matches!(reason, DrainReason::GroupRestart)
-            && !self.should_respawn_on_group_restart(&classified.id)?
+            && matches!(
+                self.children[classified.idx].spec.restart,
+                Restart::Temporary
+            )
         {
-            self.record_terminal_status(&classified.id, classified.generation, &classified.status);
+            self.record_terminal_status(classified.idx, classified.generation, &classified.status);
         }
         Ok(())
     }
@@ -190,7 +181,7 @@ impl SupervisorRuntime {
             Ok((task_id, envelope)) => {
                 self.task_map.remove(&task_id);
                 Ok(ClassifiedExit {
-                    id: envelope.id,
+                    idx: envelope.idx,
                     generation: envelope.generation,
                     status: ExitStatus::from_child_result(envelope.result),
                 })
@@ -204,7 +195,7 @@ impl SupervisorRuntime {
                 };
                 let status = classify_join_error(err);
                 Ok(ClassifiedExit {
-                    id: meta.id,
+                    idx: meta.idx,
                     generation: meta.generation,
                     status,
                 })
@@ -212,59 +203,47 @@ impl SupervisorRuntime {
         }
     }
 
-    fn record_exit(&mut self, id: &str, generation: u64, status: &ExitStatus) {
-        if let Some(child) = self.children.get_mut(id) {
-            child.state = RuntimeChildState::Stopped;
-            child.active_token = None;
-            child.abort_handle = None;
-        }
+    fn record_exit(&mut self, idx: usize, generation: u64, status: &ExitStatus) {
+        let child = &mut self.children[idx];
+        child.state = RuntimeChildState::Stopped;
+        child.active_token = None;
+        child.abort_handle = None;
         self.send_event(SupervisorEvent::ChildExited {
-            id: id.to_owned(),
+            id: self.child_names[idx].clone(),
             generation,
             status: status.view(),
         });
     }
 
-    fn record_terminal_status(&mut self, id: &str, generation: u64, status: &ExitStatus) {
+    fn record_terminal_status(&mut self, idx: usize, generation: u64, status: &ExitStatus) {
         let terminal_status = TerminalStatus::new(generation, status.is_failure());
-        match self.terminal_statuses.get_mut(id) {
+        match &mut self.terminal_statuses[idx] {
             Some(current) if current.generation > generation => {}
-            Some(current) => *current = terminal_status,
-            None => {
-                self.terminal_statuses
-                    .insert(id.to_owned(), terminal_status);
-            }
+            slot => *slot = Some(terminal_status),
         }
     }
 
-    pub(crate) fn clear_terminal_status(&mut self, id: &str) {
-        self.terminal_statuses.remove(id);
-    }
-
-    fn should_respawn_on_group_restart(&self, id: &str) -> Result<bool, SupervisorError> {
-        self.children
-            .get(id)
-            .map(|child| !matches!(child.spec.restart, Restart::Temporary))
-            .ok_or_else(|| SupervisorError::Internal(format!("missing child runtime for {id}")))
+    pub(crate) fn clear_terminal_status(&mut self, idx: usize) {
+        self.terminal_statuses[idx] = None;
     }
 
     async fn handle_one_for_one_restart(
         &mut self,
-        id: String,
+        idx: usize,
         previous_generation: u64,
     ) -> Result<(), SupervisorError> {
-        let delay = self.schedule_restart(Some(&id))?;
+        let delay = self.schedule_restart(Some(idx))?;
         self.send_event(SupervisorEvent::ChildRestartScheduled {
-            id: id.clone(),
+            id: self.child_names[idx].clone(),
             generation: previous_generation,
             delay,
         });
         if !self.wait_for_restart_delay(delay).await? {
             return Ok(());
         }
-        let (old_generation, new_generation) = self.spawn_child(&id)?;
+        let (old_generation, new_generation) = self.spawn_child(idx)?;
         self.send_restart_event(
-            id,
+            idx,
             old_generation.unwrap_or(previous_generation),
             new_generation,
         );
@@ -273,7 +252,7 @@ impl SupervisorRuntime {
 
     async fn handle_one_for_all_restart(
         &mut self,
-        failing_id: String,
+        failing_idx: usize,
     ) -> Result<(), SupervisorError> {
         let delay = self.schedule_restart(None)?;
         self.send_event(SupervisorEvent::GroupRestartScheduled { delay });
@@ -281,20 +260,25 @@ impl SupervisorRuntime {
             return Ok(());
         }
 
-        debug!("restarting child group after exit from {}", failing_id);
+        debug!(
+            "restarting child group after exit from {}",
+            self.child_names[failing_idx]
+        );
         self.drain_for_group_restart().await?;
         self.group_token = CancellationToken::new();
-        let ids = self.respawnable_child_ids();
-        for id in ids {
-            let (old_generation, new_generation) = self.spawn_child(&id)?;
+        for idx in 0..self.children.len() {
+            if matches!(self.children[idx].spec.restart, Restart::Temporary) {
+                continue;
+            }
+            let (old_generation, new_generation) = self.spawn_child(idx)?;
             if let Some(old_generation) = old_generation {
-                self.send_restart_event(id, old_generation, new_generation);
+                self.send_restart_event(idx, old_generation, new_generation);
             }
         }
         Ok(())
     }
 
-    fn schedule_restart(&mut self, child_id: Option<&str>) -> Result<Duration, SupervisorError> {
+    fn schedule_restart(&mut self, child_idx: Option<usize>) -> Result<Duration, SupervisorError> {
         self.restart_tracker.record(Instant::now());
         if self.restart_tracker.exceeded() {
             self.send_event(SupervisorEvent::RestartIntensityExceeded);
@@ -302,6 +286,7 @@ impl SupervisorRuntime {
         }
 
         let delay = self.restart_tracker.backoff();
+        let child_id = child_idx.map(|i| &*self.child_names[i]);
         trace!(?child_id, ?delay, "scheduled child restart");
         Ok(delay)
     }
@@ -329,28 +314,14 @@ impl SupervisorRuntime {
     }
 
     fn no_running_children(&self) -> bool {
-        self.child_order.iter().all(|id| {
-            self.children
-                .get(id.as_str())
-                .is_some_and(|child| child.state == RuntimeChildState::Stopped)
-        })
-    }
-
-    fn respawnable_child_ids(&self) -> Vec<String> {
-        self.child_order
+        self.children
             .iter()
-            .filter(|id| {
-                self.children
-                    .get(id.as_str())
-                    .is_some_and(|child| !matches!(child.spec.restart, Restart::Temporary))
-            })
-            .cloned()
-            .collect()
+            .all(|child| child.state == RuntimeChildState::Stopped)
     }
 
-    fn send_restart_event(&self, id: String, old_generation: u64, new_generation: u64) {
+    fn send_restart_event(&self, idx: usize, old_generation: u64, new_generation: u64) {
         self.send_event(SupervisorEvent::ChildRestarted {
-            id,
+            id: self.child_names[idx].clone(),
             old_generation,
             new_generation,
         });
@@ -370,7 +341,7 @@ fn classify_join_error(err: JoinError) -> ExitStatus {
 }
 
 struct ClassifiedExit {
-    id: String,
+    idx: usize,
     generation: u64,
     status: ExitStatus,
 }

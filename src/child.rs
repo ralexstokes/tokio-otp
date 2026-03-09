@@ -87,7 +87,7 @@ impl ChildSpec {
         self.inner.restart
     }
 
-    pub fn shutdown_policy(&self) -> &ShutdownPolicy {
-        &self.inner.shutdown_policy
+    pub fn shutdown_policy(&self) -> ShutdownPolicy {
+        self.inner.shutdown_policy
     }
 }

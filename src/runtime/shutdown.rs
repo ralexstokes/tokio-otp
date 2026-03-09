@@ -4,7 +4,7 @@ use crate::{
     error::{SupervisorError, SupervisorExit},
     event::SupervisorEvent,
     runtime::{
-        child_runtime::RuntimeChildState,
+        child_runtime::{ChildRuntime, RuntimeChildState},
         supervision::{DrainReason, SupervisorState},
     },
     shutdown::ShutdownMode,
@@ -28,13 +28,11 @@ impl SupervisorRuntime {
     }
 
     fn cancel_running_children(&mut self) {
-        for id in self.child_order.iter().rev() {
-            if let Some(child) = self.children.get_mut(id.as_str())
-                && matches!(
-                    child.state,
-                    RuntimeChildState::Running | RuntimeChildState::Starting
-                )
-            {
+        for child in self.children.iter_mut().rev() {
+            if matches!(
+                child.state,
+                RuntimeChildState::Running | RuntimeChildState::Starting
+            ) {
                 child.state = RuntimeChildState::Stopping;
             }
         }
@@ -43,29 +41,25 @@ impl SupervisorRuntime {
     }
 
     async fn drain_children(&mut self, reason: DrainReason) -> Result<(), SupervisorError> {
-        let mut abort_now = Vec::new();
         let mut max_grace: Option<std::time::Duration> = None;
 
-        for id in &self.child_order {
-            let Some(child) = self.children.get(id.as_str()) else {
-                continue;
-            };
+        for child in &self.children {
             if !child.state.is_active() {
                 continue;
             }
 
             let grace = child.spec.shutdown_policy.grace;
             match child.spec.shutdown_policy.mode {
-                ShutdownMode::Abort => abort_now.push(id.clone()),
+                ShutdownMode::Abort => {}
                 ShutdownMode::Cooperative | ShutdownMode::CooperativeThenAbort => {
                     max_grace = Some(max_grace.map_or(grace, |current| current.max(grace)));
                 }
             }
         }
 
-        for id in abort_now {
-            self.abort_child(&id);
-        }
+        abort_matching_children(&self.children, |child| {
+            matches!(child.spec.shutdown_policy.mode, ShutdownMode::Abort)
+        });
 
         if let Some(grace) = max_grace {
             let deadline = Instant::now() + grace;
@@ -88,61 +82,26 @@ impl SupervisorRuntime {
             }
         }
 
-        let cooperative_timeouts = self.remaining_cooperative_ids();
-        if !cooperative_timeouts.is_empty() {
-            let ids = cooperative_timeouts.join(", ");
-            for id in &cooperative_timeouts {
-                self.abort_child(id);
-            }
-            self.abort_children_requiring_abort();
+        let timed_out = cooperative_timeout_names(&self.children, &self.child_names);
+        if !timed_out.is_empty() {
+            abort_matching_children(&self.children, |child| {
+                matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
+                    || matches!(
+                        child.spec.shutdown_policy.mode,
+                        ShutdownMode::CooperativeThenAbort | ShutdownMode::Abort
+                    )
+            });
             self.drain_join_set(reason).await?;
-            return Err(SupervisorError::ShutdownTimedOut(ids));
+            return Err(SupervisorError::ShutdownTimedOut(timed_out));
         }
 
-        self.abort_children_requiring_abort();
+        abort_matching_children(&self.children, |child| {
+            matches!(
+                child.spec.shutdown_policy.mode,
+                ShutdownMode::CooperativeThenAbort | ShutdownMode::Abort
+            )
+        });
         self.drain_join_set(reason).await
-    }
-
-    fn abort_children_requiring_abort(&mut self) {
-        let ids: Vec<String> = self
-            .child_order
-            .iter()
-            .filter(|id| {
-                self.children.get(id.as_str()).is_some_and(|child| {
-                    child.state.is_active()
-                        && matches!(
-                            child.spec.shutdown_policy.mode,
-                            ShutdownMode::CooperativeThenAbort | ShutdownMode::Abort
-                        )
-                })
-            })
-            .cloned()
-            .collect();
-
-        for id in &ids {
-            self.abort_child(id);
-        }
-    }
-
-    fn remaining_cooperative_ids(&self) -> Vec<String> {
-        self.child_order
-            .iter()
-            .filter(|id| {
-                self.children.get(id.as_str()).is_some_and(|child| {
-                    child.state.is_active()
-                        && matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
-                })
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn abort_child(&mut self, id: &str) {
-        if let Some(child) = self.children.get(id)
-            && let Some(abort_handle) = child.abort_handle.as_ref()
-        {
-            abort_handle.abort();
-        }
     }
 
     async fn drain_join_set(&mut self, reason: DrainReason) -> Result<(), SupervisorError> {
@@ -151,4 +110,28 @@ impl SupervisorRuntime {
         }
         Ok(())
     }
+}
+
+fn abort_matching_children(children: &[ChildRuntime], predicate: impl Fn(&ChildRuntime) -> bool) {
+    for child in children {
+        if child.state.is_active()
+            && predicate(child)
+            && let Some(abort_handle) = child.abort_handle.as_ref()
+        {
+            abort_handle.abort();
+        }
+    }
+}
+
+fn cooperative_timeout_names(children: &[ChildRuntime], child_names: &[String]) -> String {
+    let ids: Vec<&str> = children
+        .iter()
+        .zip(child_names)
+        .filter(|(child, _)| {
+            child.state.is_active()
+                && matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
+        })
+        .map(|(_, name)| name.as_str())
+        .collect();
+    ids.join(", ")
 }

@@ -9,12 +9,12 @@ use crate::{
 };
 
 impl SupervisorRuntime {
-    pub(crate) fn spawn_child(&mut self, id: &str) -> Result<(Option<u64>, u64), SupervisorError> {
-        self.clear_terminal_status(id);
-        let child = self
-            .children
-            .get_mut(id)
-            .ok_or_else(|| SupervisorError::Internal(format!("unknown child: {id}")))?;
+    pub(crate) fn spawn_child(
+        &mut self,
+        idx: usize,
+    ) -> Result<(Option<u64>, u64), SupervisorError> {
+        self.clear_terminal_status(idx);
+        let child = &mut self.children[idx];
 
         let old_generation = if child.has_started {
             Some(child.generation)
@@ -30,24 +30,20 @@ impl SupervisorRuntime {
         child.active_token = Some(child_token.clone());
         child.state = RuntimeChildState::Starting;
 
-        let owned_id = id.to_owned();
         let ctx = ChildContext {
-            id: owned_id.clone(),
+            id: self.child_names[idx].clone(),
             generation,
             token: child_token,
             supervisor_token: self.group_token.clone(),
         };
         let future = child.spec.factory.make(ctx);
 
-        let abort_handle = self.join_set.spawn({
-            let id = owned_id.clone();
-            async move {
-                let result = future.await;
-                ChildEnvelope {
-                    id,
-                    generation,
-                    result,
-                }
+        let abort_handle = self.join_set.spawn(async move {
+            let result = future.await;
+            ChildEnvelope {
+                idx,
+                generation,
+                result,
             }
         });
         let task_id = abort_handle.id();
@@ -55,15 +51,9 @@ impl SupervisorRuntime {
         child.has_started = true;
         child.state = RuntimeChildState::Running;
         child.abort_handle = Some(abort_handle);
-        self.task_map.insert(
-            task_id,
-            TaskMeta {
-                id: owned_id.clone(),
-                generation,
-            },
-        );
+        self.task_map.insert(task_id, TaskMeta { idx, generation });
         self.send_event(SupervisorEvent::ChildStarted {
-            id: owned_id,
+            id: self.child_names[idx].clone(),
             generation,
         });
 
