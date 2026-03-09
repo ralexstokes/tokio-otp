@@ -3,7 +3,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use tokio::sync::{Notify, mpsc};
+use tokio::{
+    sync::{Barrier, Notify, mpsc},
+    time::{Duration, timeout},
+};
 use tokio_supervisor::{
     ChildResult, ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorExit,
 };
@@ -194,4 +197,80 @@ async fn one_for_all_does_not_overlap_old_and_new_generations() {
     handle.shutdown();
     let exit = handle.wait().await.expect("shutdown should succeed");
     assert!(matches!(exit, SupervisorExit::Shutdown));
+}
+
+#[tokio::test]
+async fn drained_old_generation_failure_does_not_poison_later_completed_exit() {
+    let release_failure = Arc::new(Notify::new());
+    let finish_generation_one = Arc::new(Barrier::new(3));
+    let trigger_attempts = Arc::new(AtomicUsize::new(0));
+    let peer_attempts = Arc::new(AtomicUsize::new(0));
+
+    let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel();
+    let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
+
+    let release_failure_for_child = release_failure.clone();
+    let finish_generation_one_for_trigger = finish_generation_one.clone();
+    let trigger = ChildSpec::new("trigger", move |ctx| {
+        let release_failure = release_failure_for_child.clone();
+        let finish_generation_one = finish_generation_one_for_trigger.clone();
+        let trigger_attempts = trigger_attempts.clone();
+        let trigger_tx = trigger_tx.clone();
+        async move {
+            trigger_tx
+                .send(ctx.generation)
+                .expect("test receiver dropped");
+            if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                release_failure.notified().await;
+                return ChildResult::Failed(common::test_error("restart group"));
+            }
+
+            finish_generation_one.wait().await;
+            ChildResult::Completed
+        }
+    })
+    .restart(Restart::Transient);
+
+    let finish_generation_one_for_peer = finish_generation_one.clone();
+    let peer = ChildSpec::new("peer", move |ctx| {
+        let finish_generation_one = finish_generation_one_for_peer.clone();
+        let peer_attempts = peer_attempts.clone();
+        let peer_tx = peer_tx.clone();
+        async move {
+            peer_tx.send(ctx.generation).expect("test receiver dropped");
+            if peer_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                ctx.token.cancelled().await;
+                return ChildResult::Failed(common::test_error("drained old generation"));
+            }
+
+            finish_generation_one.wait().await;
+            ChildResult::Completed
+        }
+    })
+    .restart(Restart::Transient);
+
+    let supervisor = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .child(trigger)
+        .child(peer)
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+
+    assert_eq!(common::recv_event(&mut trigger_rx).await, 0);
+    assert_eq!(common::recv_event(&mut peer_rx).await, 0);
+
+    release_failure.notify_one();
+
+    assert_eq!(common::recv_event(&mut trigger_rx).await, 1);
+    assert_eq!(common::recv_event(&mut peer_rx).await, 1);
+
+    finish_generation_one.wait().await;
+
+    let exit = timeout(Duration::from_secs(1), handle.wait())
+        .await
+        .expect("supervisor should exit after generation one completes")
+        .expect("supervisor should exit cleanly");
+    assert!(matches!(exit, SupervisorExit::Completed));
 }

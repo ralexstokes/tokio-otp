@@ -3,7 +3,10 @@ use tokio::time::{Instant, sleep_until};
 use crate::{
     error::{SupervisorError, SupervisorExit},
     event::SupervisorEvent,
-    runtime::{child_runtime::RuntimeChildState, supervision::SupervisorState},
+    runtime::{
+        child_runtime::RuntimeChildState,
+        supervision::{DrainReason, SupervisorState},
+    },
     shutdown::ShutdownMode,
 };
 
@@ -84,7 +87,14 @@ impl SupervisorRuntime {
                         let Some(joined) = maybe else {
                             break;
                         };
-                        self.handle_drained_join(joined)?;
+                        self.handle_drained_join(
+                            joined,
+                            if stopping_supervisor {
+                                DrainReason::Shutdown
+                            } else {
+                                DrainReason::GroupRestart
+                            },
+                        )?;
                     }
                     _ = sleep_until(deadline) => {
                         break;
@@ -161,7 +171,7 @@ impl SupervisorRuntime {
 
     async fn drain_join_set(&mut self) -> Result<(), SupervisorError> {
         while let Some(joined) = self.join_set.join_next_with_id().await {
-            self.handle_drained_join(joined)?;
+            self.handle_drained_join(joined, DrainReason::Shutdown)?;
         }
         Ok(())
     }

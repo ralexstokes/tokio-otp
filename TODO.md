@@ -1,5 +1,4 @@
 * [] v0.1 SPEC gaps
-  - fix natural-exit accounting so restarted/drained failure exits do not incorrectly poison later `SupervisorExit::Completed`
   - fix the shutdown-vs-zero-delay-restart race so shutdown consistently returns `SupervisorExit::Shutdown`
 * [] tracing, metrics, observability
 * [] hardening

@@ -55,7 +55,7 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) events: broadcast::Sender<SupervisorEvent>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
-    saw_failure: bool,
+    terminal_statuses: HashMap<String, TerminalStatus>,
     pending_exit: Option<Result<SupervisorExit, SupervisorError>>,
 }
 
@@ -85,7 +85,7 @@ impl SupervisorRuntime {
             events,
             shutdown_rx,
             task_map: HashMap::new(),
-            saw_failure: false,
+            terminal_statuses: HashMap::new(),
             pending_exit: None,
         }
     }
@@ -125,7 +125,11 @@ impl SupervisorRuntime {
 
     fn finish_natural_exit(&mut self) -> Result<SupervisorExit, SupervisorError> {
         self.send_event(SupervisorEvent::SupervisorStopped);
-        if self.saw_failure {
+        if self
+            .terminal_statuses
+            .values()
+            .any(TerminalStatus::is_failure)
+        {
             Ok(SupervisorExit::Failed)
         } else {
             Ok(SupervisorExit::Completed)
@@ -162,8 +166,8 @@ impl SupervisorRuntime {
                         .await?
                 }
             }
-        } else if classified.status.is_failure() {
-            self.saw_failure = true;
+        } else {
+            self.record_terminal_status(&classified.id, classified.generation, &classified.status);
         }
 
         Ok(())
@@ -172,11 +176,14 @@ impl SupervisorRuntime {
     pub(crate) fn handle_drained_join(
         &mut self,
         joined: Result<(Id, ChildEnvelope), JoinError>,
+        reason: DrainReason,
     ) -> Result<(), SupervisorError> {
         let classified = self.classify_join(joined)?;
         self.record_exit(&classified.id, classified.generation, &classified.status);
-        if classified.status.is_failure() {
-            self.saw_failure = true;
+        if matches!(reason, DrainReason::GroupRestart)
+            && !self.should_respawn_on_group_restart(&classified.id)?
+        {
+            self.record_terminal_status(&classified.id, classified.generation, &classified.status);
         }
         Ok(())
     }
@@ -222,6 +229,29 @@ impl SupervisorRuntime {
             generation,
             status: status.view(),
         });
+    }
+
+    fn record_terminal_status(&mut self, id: &str, generation: u64, status: &ExitStatus) {
+        let terminal_status = TerminalStatus::new(generation, status.is_failure());
+        match self.terminal_statuses.get_mut(id) {
+            Some(current) if current.generation > generation => {}
+            Some(current) => *current = terminal_status,
+            None => {
+                self.terminal_statuses
+                    .insert(id.to_owned(), terminal_status);
+            }
+        }
+    }
+
+    pub(crate) fn clear_terminal_status(&mut self, id: &str) {
+        self.terminal_statuses.remove(id);
+    }
+
+    fn should_respawn_on_group_restart(&self, id: &str) -> Result<bool, SupervisorError> {
+        self.children
+            .get(id)
+            .map(|child| !matches!(child.spec.restart, Restart::Temporary))
+            .ok_or_else(|| SupervisorError::Internal(format!("missing child runtime for {id}")))
     }
 
     async fn handle_one_for_one_restart(
@@ -364,4 +394,29 @@ struct ClassifiedExit {
     id: String,
     generation: u64,
     status: ExitStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalStatus {
+    generation: u64,
+    is_failure: bool,
+}
+
+impl TerminalStatus {
+    fn new(generation: u64, is_failure: bool) -> Self {
+        Self {
+            generation,
+            is_failure,
+        }
+    }
+
+    fn is_failure(&self) -> bool {
+        self.is_failure
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DrainReason {
+    Shutdown,
+    GroupRestart,
 }

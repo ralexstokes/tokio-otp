@@ -12,6 +12,7 @@ use crate::{
 
 impl SupervisorRuntime {
     pub(crate) fn spawn_child(&mut self, id: &str) -> Result<(Option<u64>, u64), SupervisorError> {
+        self.clear_terminal_status(id);
         let child = self
             .children
             .get_mut(id)
