@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::{
-    sync::{Mutex, broadcast, watch},
+    sync::{broadcast, watch},
     task::JoinHandle,
 };
 
@@ -31,10 +31,11 @@ impl SupervisorHandle {
             return result;
         }
 
-        let join_handle = {
-            let mut guard = self.join_handle.lock().await;
-            guard.take()
-        };
+        let join_handle = self
+            .join_handle
+            .lock()
+            .expect("join_handle mutex poisoned")
+            .take();
 
         if let Some(join_handle) = join_handle {
             let result = match join_handle.await {

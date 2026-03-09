@@ -20,7 +20,7 @@ pub enum BackoffPolicy {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RestartIntensity {
     pub max_restarts: usize,
     pub within: Duration,

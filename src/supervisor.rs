@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{broadcast, watch};
 
 use crate::{
     child::ChildSpecInner,

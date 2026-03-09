@@ -37,24 +37,12 @@ pub(crate) fn compute_backoff(
             let mut delay = base;
             let steps = restart_count_in_window.saturating_sub(1);
             for _ in 0..steps {
-                delay = saturating_mul_duration(delay, factor);
+                delay = delay.saturating_mul(factor);
                 if delay >= max {
                     return max;
                 }
             }
             delay.min(max)
         }
-    }
-}
-
-fn saturating_mul_duration(duration: Duration, factor: u32) -> Duration {
-    let nanos = duration.as_nanos();
-    let multiplied = nanos.saturating_mul(u128::from(factor));
-    let secs = multiplied / 1_000_000_000;
-    let subsec_nanos = (multiplied % 1_000_000_000) as u32;
-    if secs > u128::from(u64::MAX) {
-        Duration::MAX
-    } else {
-        Duration::new(secs as u64, subsec_nanos)
     }
 }

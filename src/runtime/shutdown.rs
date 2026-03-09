@@ -36,12 +36,8 @@ impl SupervisorRuntime {
                 child.state = RuntimeChildState::Stopping;
             }
         }
+        // Child tokens are children of group_token, so this cancels all of them.
         self.group_token.cancel();
-        for child in self.children.values_mut() {
-            if let Some(token) = child.active_token.as_ref() {
-                token.cancel();
-            }
-        }
     }
 
     async fn drain_children(&mut self, stopping_supervisor: bool) -> Result<(), SupervisorError> {
@@ -114,13 +110,7 @@ impl SupervisorRuntime {
         }
 
         self.abort_children_requiring_abort();
-        self.drain_join_set().await?;
-
-        if stopping_supervisor {
-            return Ok(());
-        }
-
-        Ok(())
+        self.drain_join_set().await
     }
 
     fn abort_children_requiring_abort(&mut self) {

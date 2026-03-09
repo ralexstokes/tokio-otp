@@ -7,7 +7,7 @@ pub enum ShutdownMode {
     Abort,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShutdownPolicy {
     pub grace: Duration,
     pub mode: ShutdownMode,

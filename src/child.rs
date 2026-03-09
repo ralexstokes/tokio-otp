@@ -48,7 +48,7 @@ impl ChildSpec {
             inner: Arc::new(ChildSpecInner {
                 id: self.inner.id.clone(),
                 restart,
-                shutdown_policy: self.inner.shutdown_policy.clone(),
+                shutdown_policy: self.inner.shutdown_policy,
                 factory: Arc::clone(&self.inner.factory),
             }),
         }
