@@ -12,11 +12,12 @@ use crate::{
 
 type SupervisorJoinHandle = JoinHandle<Result<SupervisorExit, SupervisorError>>;
 type DoneSender = watch::Sender<Option<Result<SupervisorExit, SupervisorError>>>;
+type DoneReceiver = watch::Receiver<Option<Result<SupervisorExit, SupervisorError>>>;
 
 #[derive(Clone)]
 pub struct SupervisorHandle {
     shutdown_tx: watch::Sender<bool>,
-    done_rx: watch::Receiver<Option<Result<SupervisorExit, SupervisorError>>>,
+    done_rx: DoneReceiver,
     events_tx: broadcast::Sender<SupervisorEvent>,
     join_state: Arc<Mutex<Option<(SupervisorJoinHandle, DoneSender)>>>,
 }
@@ -25,7 +26,7 @@ impl SupervisorHandle {
     pub(crate) fn new(
         shutdown_tx: watch::Sender<bool>,
         done_tx: DoneSender,
-        done_rx: watch::Receiver<Option<Result<SupervisorExit, SupervisorError>>>,
+        done_rx: DoneReceiver,
         events_tx: broadcast::Sender<SupervisorEvent>,
         join_handle: SupervisorJoinHandle,
     ) -> Self {

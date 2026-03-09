@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExitStatusView {
@@ -14,21 +14,21 @@ pub enum SupervisorEvent {
     SupervisorStopping,
     SupervisorStopped,
     ChildStarted {
-        id: Arc<str>,
+        id: String,
         generation: u64,
     },
     ChildExited {
-        id: Arc<str>,
+        id: String,
         generation: u64,
         status: ExitStatusView,
     },
     ChildRestartScheduled {
-        id: Arc<str>,
+        id: String,
         generation: u64,
         delay: Duration,
     },
     ChildRestarted {
-        id: Arc<str>,
+        id: String,
         old_generation: u64,
         new_generation: u64,
     },

@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } = event
         {
             println!("child {} restarted", id);
-            if &*id == "flaky-worker" {
+            if id == "flaky-worker" {
                 assert_eq!(old_generation, 0);
                 assert_eq!(new_generation, 1);
                 break;

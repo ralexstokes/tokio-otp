@@ -15,7 +15,7 @@ pub struct ChildSpec {
 
 #[derive(Clone)]
 pub(crate) struct ChildSpecInner {
-    pub(crate) id: Arc<str>,
+    pub(crate) id: String,
     pub(crate) restart: Restart,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) factory: Arc<dyn ChildFactory>,
@@ -48,7 +48,7 @@ where
 }
 
 impl ChildSpec {
-    pub fn new<F, Fut>(id: impl Into<Arc<str>>, f: F) -> Self
+    pub fn new<F, Fut>(id: impl Into<String>, f: F) -> Self
     where
         F: Fn(ChildContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ChildResult> + Send + 'static,

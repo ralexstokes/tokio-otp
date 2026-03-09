@@ -19,7 +19,7 @@ fn duplicate_child_ids_are_rejected() {
         .build()
         .expect_err("duplicate child ids must be rejected");
 
-    assert!(matches!(err, BuildError::DuplicateChildId(id) if &*id == "dup"));
+    assert!(matches!(err, BuildError::DuplicateChildId(id) if id == "dup"));
 }
 
 #[test]

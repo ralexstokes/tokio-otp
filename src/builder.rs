@@ -54,7 +54,7 @@ impl SupervisorBuilder {
         let mut ids = HashSet::new();
         for child in &self.children {
             if !ids.insert(child.id()) {
-                return Err(BuildError::DuplicateChildId(Arc::from(child.id())));
+                return Err(BuildError::DuplicateChildId(child.id().to_owned()));
             }
         }
 

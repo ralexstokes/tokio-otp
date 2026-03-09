@@ -1,5 +1,3 @@
-use std::{collections::HashMap, sync::Arc};
-
 use tokio::time::{Instant, sleep_until};
 
 use crate::{
@@ -30,13 +28,11 @@ impl SupervisorRuntime {
     }
 
     fn cancel_running_children(&mut self) {
-        for id in self.child_order.iter().rev() {
-            if let Some(child) = self.children.get_mut(id.as_ref())
-                && matches!(
-                    child.state,
-                    RuntimeChildState::Running | RuntimeChildState::Starting
-                )
-            {
+        for child in self.children.iter_mut().rev() {
+            if matches!(
+                child.state,
+                RuntimeChildState::Running | RuntimeChildState::Starting
+            ) {
                 child.state = RuntimeChildState::Stopping;
             }
         }
@@ -47,10 +43,7 @@ impl SupervisorRuntime {
     async fn drain_children(&mut self, reason: DrainReason) -> Result<(), SupervisorError> {
         let mut max_grace: Option<std::time::Duration> = None;
 
-        for id in &self.child_order {
-            let Some(child) = self.children.get(id.as_ref()) else {
-                continue;
-            };
+        for child in &self.children {
             if !child.state.is_active() {
                 continue;
             }
@@ -64,7 +57,7 @@ impl SupervisorRuntime {
             }
         }
 
-        abort_matching_children(&self.children, &self.child_order, |child| {
+        abort_matching_children(&self.children, |child| {
             matches!(child.spec.shutdown_policy.mode, ShutdownMode::Abort)
         });
 
@@ -89,9 +82,9 @@ impl SupervisorRuntime {
             }
         }
 
-        let cooperative_timeout_ids = cooperative_timeout_ids(&self.children, &self.child_order);
-        if !cooperative_timeout_ids.is_empty() {
-            abort_matching_children(&self.children, &self.child_order, |child| {
+        let timed_out = cooperative_timeout_names(&self.children, &self.child_names);
+        if !timed_out.is_empty() {
+            abort_matching_children(&self.children, |child| {
                 matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
                     || matches!(
                         child.spec.shutdown_policy.mode,
@@ -99,10 +92,10 @@ impl SupervisorRuntime {
                     )
             });
             self.drain_join_set(reason).await?;
-            return Err(SupervisorError::ShutdownTimedOut(cooperative_timeout_ids));
+            return Err(SupervisorError::ShutdownTimedOut(timed_out));
         }
 
-        abort_matching_children(&self.children, &self.child_order, |child| {
+        abort_matching_children(&self.children, |child| {
             matches!(
                 child.spec.shutdown_policy.mode,
                 ShutdownMode::CooperativeThenAbort | ShutdownMode::Abort
@@ -119,14 +112,9 @@ impl SupervisorRuntime {
     }
 }
 
-fn abort_matching_children(
-    children: &HashMap<Arc<str>, ChildRuntime>,
-    child_order: &[Arc<str>],
-    predicate: impl Fn(&ChildRuntime) -> bool,
-) {
-    for id in child_order {
-        if let Some(child) = children.get(id.as_ref())
-            && child.state.is_active()
+fn abort_matching_children(children: &[ChildRuntime], predicate: impl Fn(&ChildRuntime) -> bool) {
+    for child in children {
+        if child.state.is_active()
             && predicate(child)
             && let Some(abort_handle) = child.abort_handle.as_ref()
         {
@@ -135,19 +123,15 @@ fn abort_matching_children(
     }
 }
 
-fn cooperative_timeout_ids(
-    children: &HashMap<Arc<str>, ChildRuntime>,
-    child_order: &[Arc<str>],
-) -> String {
-    let ids: Vec<&str> = child_order
+fn cooperative_timeout_names(children: &[ChildRuntime], child_names: &[String]) -> String {
+    let ids: Vec<&str> = children
         .iter()
-        .filter(|id| {
-            children.get(id.as_ref()).is_some_and(|child| {
-                child.state.is_active()
-                    && matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
-            })
+        .zip(child_names)
+        .filter(|(child, _)| {
+            child.state.is_active()
+                && matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
         })
-        .map(|id| &**id)
+        .map(|(_, name)| name.as_str())
         .collect();
     ids.join(", ")
 }
