@@ -62,9 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     old_generation,
                     new_generation,
                 } => {
-                    println!(
-                        "child restarted: {id} {old_generation}->{new_generation}"
-                    );
+                    println!("child restarted: {id} {old_generation}->{new_generation}");
                 }
                 SupervisorEvent::GroupRestartScheduled { delay } => {
                     println!("group restart scheduled: delay={delay:?}");

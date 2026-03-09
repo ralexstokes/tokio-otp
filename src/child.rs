@@ -54,7 +54,7 @@ impl ChildSpec {
         }
     }
 
-    pub fn shutdown_policy(self, policy: ShutdownPolicy) -> Self {
+    pub fn shutdown(self, policy: ShutdownPolicy) -> Self {
         Self {
             inner: Arc::new(ChildSpecInner {
                 id: self.inner.id.clone(),
@@ -73,7 +73,7 @@ impl ChildSpec {
         self.inner.restart
     }
 
-    pub fn shutdown_policy_ref(&self) -> &ShutdownPolicy {
+    pub fn shutdown_policy(&self) -> &ShutdownPolicy {
         &self.inner.shutdown_policy
     }
 }

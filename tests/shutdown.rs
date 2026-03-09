@@ -117,7 +117,7 @@ async fn stubborn_child_is_aborted_in_cooperative_then_abort_mode() {
                     }
                 }
             })
-            .shutdown_policy(ShutdownPolicy {
+            .shutdown(ShutdownPolicy {
                 grace: common::SHORT_GRACE,
                 mode: ShutdownMode::CooperativeThenAbort,
             }),
@@ -156,7 +156,7 @@ async fn wait_only_resolves_after_child_lifetimes_end() {
                     }
                 }
             })
-            .shutdown_policy(ShutdownPolicy {
+            .shutdown(ShutdownPolicy {
                 grace: common::SHORT_GRACE,
                 mode: ShutdownMode::Abort,
             }),
