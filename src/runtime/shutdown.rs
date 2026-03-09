@@ -44,30 +44,24 @@ impl SupervisorRuntime {
 
     async fn drain_children(&mut self, stopping_supervisor: bool) -> Result<(), SupervisorError> {
         let mut abort_now = Vec::new();
-        let mut max_grace = None;
+        let mut max_grace: Option<std::time::Duration> = None;
 
         for id in &self.child_order {
             let Some(child) = self.children.get(id.as_str()) else {
                 continue;
             };
-            if !matches!(
-                child.state,
-                RuntimeChildState::Running
-                    | RuntimeChildState::Starting
-                    | RuntimeChildState::Stopping
-            ) {
+            if !child.state.is_active() {
                 continue;
             }
 
+            let grace = child.spec.shutdown_policy.grace;
             match child.spec.shutdown_policy.mode {
                 ShutdownMode::Abort => abort_now.push(id.clone()),
                 ShutdownMode::Cooperative | ShutdownMode::CooperativeThenAbort => {
-                    max_grace = Some(max_grace.map_or(
-                        child.spec.shutdown_policy.grace,
-                        |current: std::time::Duration| {
-                            current.max(child.spec.shutdown_policy.grace)
-                        },
-                    ));
+                    max_grace = match max_grace {
+                        Some(current) => Some(current.max(grace)),
+                        None => Some(grace),
+                    };
                 }
             }
         }
@@ -124,15 +118,11 @@ impl SupervisorRuntime {
             .iter()
             .filter(|id| {
                 self.children.get(id.as_str()).is_some_and(|child| {
-                    matches!(
-                        child.state,
-                        RuntimeChildState::Running
-                            | RuntimeChildState::Starting
-                            | RuntimeChildState::Stopping
-                    ) && matches!(
-                        child.spec.shutdown_policy.mode,
-                        ShutdownMode::CooperativeThenAbort | ShutdownMode::Abort
-                    )
+                    child.state.is_active()
+                        && matches!(
+                            child.spec.shutdown_policy.mode,
+                            ShutdownMode::CooperativeThenAbort | ShutdownMode::Abort
+                        )
                 })
             })
             .cloned()
@@ -148,12 +138,8 @@ impl SupervisorRuntime {
             .iter()
             .filter(|id| {
                 self.children.get(id.as_str()).is_some_and(|child| {
-                    matches!(
-                        child.state,
-                        RuntimeChildState::Running
-                            | RuntimeChildState::Starting
-                            | RuntimeChildState::Stopping
-                    ) && matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
+                    child.state.is_active()
+                        && matches!(child.spec.shutdown_policy.mode, ShutdownMode::Cooperative)
                 })
             })
             .cloned()

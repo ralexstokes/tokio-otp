@@ -159,7 +159,7 @@ impl SupervisorRuntime {
                 SupervisorError::Internal(format!("missing child runtime for {}", classified.id))
             })?;
 
-        if should_restart(restart_policy, &classified.status) {
+        if restart_policy.should_restart(classified.status.is_failure()) {
             match self.strategy {
                 Strategy::OneForOne => {
                     self.handle_one_for_one_restart(classified.id, classified.generation)
@@ -379,17 +379,6 @@ fn classify_join_error(err: JoinError) -> ExitStatus {
         ExitStatus::Aborted
     } else {
         ExitStatus::Panicked
-    }
-}
-
-pub(crate) fn should_restart(restart: Restart, status: &ExitStatus) -> bool {
-    match restart {
-        Restart::Permanent => true,
-        Restart::Transient => matches!(
-            status,
-            ExitStatus::Failed(_) | ExitStatus::Panicked | ExitStatus::Aborted
-        ),
-        Restart::Temporary => false,
     }
 }
 

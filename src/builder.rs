@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::{
-    child::{ChildSpec, ChildSpecInner},
+    child::ChildSpec,
     error::BuildError,
     restart::{BackoffPolicy, RestartIntensity},
     strategy::Strategy,
@@ -64,7 +64,7 @@ impl SupervisorBuilder {
             children: self
                 .children
                 .into_iter()
-                .map(|child| Arc::<ChildSpecInner>::clone(&child.inner))
+                .map(|child| Arc::clone(&child.inner))
                 .collect(),
         }))
     }

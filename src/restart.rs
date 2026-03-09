@@ -8,6 +8,16 @@ pub enum Restart {
     Temporary,
 }
 
+impl Restart {
+    pub(crate) fn should_restart(self, is_failure: bool) -> bool {
+        match self {
+            Self::Permanent => true,
+            Self::Transient => is_failure,
+            Self::Temporary => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BackoffPolicy {
     #[default]

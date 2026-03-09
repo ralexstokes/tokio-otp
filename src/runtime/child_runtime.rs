@@ -22,6 +22,12 @@ pub(crate) enum RuntimeChildState {
     Stopped,
 }
 
+impl RuntimeChildState {
+    pub(crate) fn is_active(self) -> bool {
+        !matches!(self, Self::Stopped)
+    }
+}
+
 impl ChildRuntime {
     pub(crate) fn new(spec: Arc<ChildSpecInner>) -> Self {
         Self {
