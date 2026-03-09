@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::error::BuildError;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Restart {
     Permanent,
@@ -44,5 +46,45 @@ impl Default for RestartIntensity {
             within: Duration::from_secs(30),
             backoff: BackoffPolicy::None,
         }
+    }
+}
+
+impl RestartIntensity {
+    pub(crate) fn validate(&self) -> Result<(), BuildError> {
+        if self.within.is_zero() {
+            return Err(BuildError::InvalidConfig(
+                "restart intensity window must be non-zero",
+            ));
+        }
+
+        match self.backoff {
+            BackoffPolicy::None => {}
+            BackoffPolicy::Fixed(delay) => {
+                if delay.is_zero() {
+                    return Err(BuildError::InvalidConfig(
+                        "fixed backoff delay must be non-zero",
+                    ));
+                }
+            }
+            BackoffPolicy::Exponential { base, factor, max } => {
+                if base.is_zero() {
+                    return Err(BuildError::InvalidConfig(
+                        "exponential backoff base must be non-zero",
+                    ));
+                }
+                if factor == 0 {
+                    return Err(BuildError::InvalidConfig(
+                        "exponential backoff factor must be non-zero",
+                    ));
+                }
+                if max.is_zero() {
+                    return Err(BuildError::InvalidConfig(
+                        "exponential backoff max must be non-zero",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 }

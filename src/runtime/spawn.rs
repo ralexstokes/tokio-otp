@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     context::ChildContext,
     error::SupervisorError,
@@ -30,9 +32,9 @@ impl SupervisorRuntime {
         child.active_token = Some(child_token.clone());
         child.state = RuntimeChildState::Starting;
 
-        let owned_id = id.to_owned();
+        let arc_id = Arc::clone(&child.spec.id);
         let ctx = ChildContext {
-            id: owned_id.clone(),
+            id: Arc::clone(&arc_id),
             generation,
             token: child_token,
             supervisor_token: self.group_token.clone(),
@@ -40,7 +42,7 @@ impl SupervisorRuntime {
         let future = child.spec.factory.make(ctx);
 
         let abort_handle = self.join_set.spawn({
-            let id = owned_id.clone();
+            let id = Arc::clone(&arc_id);
             async move {
                 let result = future.await;
                 ChildEnvelope {
@@ -58,12 +60,12 @@ impl SupervisorRuntime {
         self.task_map.insert(
             task_id,
             TaskMeta {
-                id: owned_id.clone(),
+                id: Arc::clone(&arc_id),
                 generation,
             },
         );
         self.send_event(SupervisorEvent::ChildStarted {
-            id: owned_id,
+            id: arc_id,
             generation,
         });
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::{
     sync::{broadcast, watch},
@@ -23,14 +23,14 @@ use super::{
 };
 
 pub(crate) struct ChildEnvelope {
-    pub(crate) id: String,
+    pub(crate) id: Arc<str>,
     pub(crate) generation: u64,
     pub(crate) result: crate::child::ChildResult,
 }
 
 #[derive(Clone)]
 pub(crate) struct TaskMeta {
-    pub(crate) id: String,
+    pub(crate) id: Arc<str>,
     pub(crate) generation: u64,
 }
 
@@ -46,12 +46,12 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) state: SupervisorState,
     pub(crate) group_token: CancellationToken,
     pub(crate) join_set: JoinSet<ChildEnvelope>,
-    pub(crate) child_order: Vec<String>,
-    pub(crate) children: HashMap<String, ChildRuntime>,
+    pub(crate) child_order: Vec<Arc<str>>,
+    pub(crate) children: HashMap<Arc<str>, ChildRuntime>,
     pub(crate) events: broadcast::Sender<SupervisorEvent>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
-    terminal_statuses: HashMap<String, TerminalStatus>,
+    terminal_statuses: HashMap<Arc<str>, TerminalStatus>,
     pending_exit: Option<Result<SupervisorExit, SupervisorError>>,
 }
 
@@ -61,12 +61,13 @@ impl SupervisorRuntime {
         shutdown_rx: watch::Receiver<bool>,
         events: broadcast::Sender<SupervisorEvent>,
     ) -> Self {
-        let child_order: Vec<String> = config.children.iter().map(|s| s.id.clone()).collect();
+        let child_order: Vec<Arc<str>> =
+            config.children.iter().map(|s| Arc::clone(&s.id)).collect();
         let children = config
             .children
             .into_iter()
             .map(|spec| {
-                let id = spec.id.clone();
+                let id = Arc::clone(&spec.id);
                 (id, ChildRuntime::new(spec))
             })
             .collect();
@@ -212,27 +213,27 @@ impl SupervisorRuntime {
         }
     }
 
-    fn record_exit(&mut self, id: &str, generation: u64, status: &ExitStatus) {
-        if let Some(child) = self.children.get_mut(id) {
+    fn record_exit(&mut self, id: &Arc<str>, generation: u64, status: &ExitStatus) {
+        if let Some(child) = self.children.get_mut(id.as_ref()) {
             child.state = RuntimeChildState::Stopped;
             child.active_token = None;
             child.abort_handle = None;
         }
         self.send_event(SupervisorEvent::ChildExited {
-            id: id.to_owned(),
+            id: Arc::clone(id),
             generation,
             status: status.view(),
         });
     }
 
-    fn record_terminal_status(&mut self, id: &str, generation: u64, status: &ExitStatus) {
+    fn record_terminal_status(&mut self, id: &Arc<str>, generation: u64, status: &ExitStatus) {
         let terminal_status = TerminalStatus::new(generation, status.is_failure());
-        match self.terminal_statuses.get_mut(id) {
+        match self.terminal_statuses.get_mut(id.as_ref()) {
             Some(current) if current.generation > generation => {}
             Some(current) => *current = terminal_status,
             None => {
                 self.terminal_statuses
-                    .insert(id.to_owned(), terminal_status);
+                    .insert(Arc::clone(id), terminal_status);
             }
         }
     }
@@ -250,12 +251,12 @@ impl SupervisorRuntime {
 
     async fn handle_one_for_one_restart(
         &mut self,
-        id: String,
+        id: Arc<str>,
         previous_generation: u64,
     ) -> Result<(), SupervisorError> {
         let delay = self.schedule_restart(Some(&id))?;
         self.send_event(SupervisorEvent::ChildRestartScheduled {
-            id: id.clone(),
+            id: Arc::clone(&id),
             generation: previous_generation,
             delay,
         });
@@ -273,7 +274,7 @@ impl SupervisorRuntime {
 
     async fn handle_one_for_all_restart(
         &mut self,
-        failing_id: String,
+        failing_id: Arc<str>,
     ) -> Result<(), SupervisorError> {
         let delay = self.schedule_restart(None)?;
         self.send_event(SupervisorEvent::GroupRestartScheduled { delay });
@@ -331,24 +332,24 @@ impl SupervisorRuntime {
     fn no_running_children(&self) -> bool {
         self.child_order.iter().all(|id| {
             self.children
-                .get(id.as_str())
+                .get(id.as_ref())
                 .is_some_and(|child| child.state == RuntimeChildState::Stopped)
         })
     }
 
-    fn respawnable_child_ids(&self) -> Vec<String> {
+    fn respawnable_child_ids(&self) -> Vec<Arc<str>> {
         self.child_order
             .iter()
             .filter(|id| {
                 self.children
-                    .get(id.as_str())
+                    .get(id.as_ref())
                     .is_some_and(|child| !matches!(child.spec.restart, Restart::Temporary))
             })
             .cloned()
             .collect()
     }
 
-    fn send_restart_event(&self, id: String, old_generation: u64, new_generation: u64) {
+    fn send_restart_event(&self, id: Arc<str>, old_generation: u64, new_generation: u64) {
         self.send_event(SupervisorEvent::ChildRestarted {
             id,
             old_generation,
@@ -370,7 +371,7 @@ fn classify_join_error(err: JoinError) -> ExitStatus {
 }
 
 struct ClassifiedExit {
-    id: String,
+    id: Arc<str>,
     generation: u64,
     status: ExitStatus,
 }

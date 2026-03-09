@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use thiserror::Error;
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum BuildError {
     #[error("duplicate child id: {0}")]
-    DuplicateChildId(String),
+    DuplicateChildId(Arc<str>),
     #[error("supervisor requires at least one child")]
     EmptyChildren,
     #[error("invalid supervisor configuration: {0}")]

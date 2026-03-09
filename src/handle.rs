@@ -11,30 +11,29 @@ use crate::{
 };
 
 type SupervisorJoinHandle = JoinHandle<Result<SupervisorExit, SupervisorError>>;
+type DoneSender = watch::Sender<Option<Result<SupervisorExit, SupervisorError>>>;
 
 #[derive(Clone)]
 pub struct SupervisorHandle {
     shutdown_tx: watch::Sender<bool>,
     done_rx: watch::Receiver<Option<Result<SupervisorExit, SupervisorError>>>,
-    done_tx: watch::Sender<Option<Result<SupervisorExit, SupervisorError>>>,
     events_tx: broadcast::Sender<SupervisorEvent>,
-    join_handle: Arc<Mutex<Option<SupervisorJoinHandle>>>,
+    join_state: Arc<Mutex<Option<(SupervisorJoinHandle, DoneSender)>>>,
 }
 
 impl SupervisorHandle {
     pub(crate) fn new(
         shutdown_tx: watch::Sender<bool>,
-        done_tx: watch::Sender<Option<Result<SupervisorExit, SupervisorError>>>,
+        done_tx: DoneSender,
         done_rx: watch::Receiver<Option<Result<SupervisorExit, SupervisorError>>>,
         events_tx: broadcast::Sender<SupervisorEvent>,
         join_handle: SupervisorJoinHandle,
     ) -> Self {
         Self {
             shutdown_tx,
-            done_tx,
             done_rx,
             events_tx,
-            join_handle: Arc::new(Mutex::new(Some(join_handle))),
+            join_state: Arc::new(Mutex::new(Some((join_handle, done_tx)))),
         }
     }
 
@@ -47,20 +46,20 @@ impl SupervisorHandle {
             return result;
         }
 
-        let join_handle = self
-            .join_handle
+        let join_state = self
+            .join_state
             .lock()
-            .expect("join_handle mutex poisoned")
+            .expect("join_state mutex poisoned")
             .take();
 
-        if let Some(join_handle) = join_handle {
+        if let Some((join_handle, done_tx)) = join_state {
             let result = match join_handle.await {
                 Ok(result) => result,
                 Err(err) => Err(SupervisorError::Internal(format!(
                     "supervisor task failed to join: {err}"
                 ))),
             };
-            let _ = self.done_tx.send(Some(result.clone()));
+            let _ = done_tx.send(Some(result.clone()));
             return result;
         }
 
