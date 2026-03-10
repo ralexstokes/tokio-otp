@@ -1,7 +1,7 @@
 use crate::{
     context::ChildContext,
     error::SupervisorError,
-    event::SupervisorEvent,
+    event::{NestedEventForwarder, SupervisorEvent, with_nested_event_forwarder},
     runtime::{
         child_runtime::RuntimeChildState,
         supervision::{ChildEnvelope, SupervisorRuntime, TaskMeta},
@@ -37,9 +37,14 @@ impl SupervisorRuntime {
             supervisor_token: self.group_token.clone(),
         };
         let future = child.spec.factory.make(ctx);
+        let forwarder = NestedEventForwarder::new(
+            self.events.clone(),
+            self.child_names[idx].clone(),
+            generation,
+        );
 
         let abort_handle = self.join_set.spawn(async move {
-            let result = future.await;
+            let result = with_nested_event_forwarder(forwarder, future).await;
             ChildEnvelope {
                 idx,
                 generation,

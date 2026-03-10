@@ -20,57 +20,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let observer = tokio::spawn(async move {
         loop {
             let event = events.recv().await?;
-            match event {
-                SupervisorEvent::SupervisorStarted => println!("supervisor started"),
-                SupervisorEvent::SupervisorStopping => println!("supervisor stopping"),
-                SupervisorEvent::SupervisorStopped => {
-                    println!("supervisor stopped");
-                    break;
-                }
-                SupervisorEvent::ChildStarted { id, generation } => {
-                    println!("child started: {id} generation={generation}");
-                }
-                SupervisorEvent::ChildExited {
-                    id,
-                    generation,
-                    status,
-                } => match status {
-                    ExitStatusView::Completed => {
-                        println!("child exited cleanly: {id} generation={generation}");
-                    }
-                    ExitStatusView::Failed(err) => {
-                        println!("child failed: {id} generation={generation} error={err}");
-                    }
-                    ExitStatusView::Panicked => {
-                        println!("child panicked: {id} generation={generation}");
-                    }
-                    ExitStatusView::Aborted => {
-                        println!("child aborted: {id} generation={generation}");
-                    }
-                },
-                SupervisorEvent::ChildRestartScheduled {
-                    id,
-                    generation,
-                    delay,
-                } => {
-                    println!(
-                        "child restart scheduled: {id} generation={generation} delay={delay:?}"
-                    );
-                }
-                SupervisorEvent::ChildRestarted {
-                    id,
-                    old_generation,
-                    new_generation,
-                } => {
-                    println!("child restarted: {id} {old_generation}->{new_generation}");
-                }
-                SupervisorEvent::GroupRestartScheduled { delay } => {
-                    println!("group restart scheduled: delay={delay:?}");
-                }
-                SupervisorEvent::RestartIntensityExceeded => {
-                    println!("restart intensity exceeded");
-                }
+            if matches!(event, SupervisorEvent::SupervisorStopped) {
+                print_event(&event, 0);
+                break;
             }
+
+            print_event(&event, 0);
         }
 
         Ok::<(), tokio::sync::broadcast::error::RecvError>(())
@@ -84,4 +39,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     observer.await??;
 
     Ok(())
+}
+
+fn print_event(event: &SupervisorEvent, depth: usize) {
+    let indent = "  ".repeat(depth);
+
+    match event {
+        SupervisorEvent::SupervisorStarted => println!("{indent}supervisor started"),
+        SupervisorEvent::SupervisorStopping => println!("{indent}supervisor stopping"),
+        SupervisorEvent::SupervisorStopped => {
+            println!("{indent}supervisor stopped");
+        }
+        SupervisorEvent::Nested {
+            id,
+            generation,
+            event,
+        } => {
+            println!("{indent}nested supervisor child: {id} generation={generation}");
+            print_event(event, depth + 1);
+        }
+        SupervisorEvent::ChildStarted { id, generation } => {
+            println!("{indent}child started: {id} generation={generation}");
+        }
+        SupervisorEvent::ChildExited {
+            id,
+            generation,
+            status,
+        } => match status {
+            ExitStatusView::Completed => {
+                println!("{indent}child exited cleanly: {id} generation={generation}");
+            }
+            ExitStatusView::Failed(err) => {
+                println!("{indent}child failed: {id} generation={generation} error={err}");
+            }
+            ExitStatusView::Panicked => {
+                println!("{indent}child panicked: {id} generation={generation}");
+            }
+            ExitStatusView::Aborted => {
+                println!("{indent}child aborted: {id} generation={generation}");
+            }
+        },
+        SupervisorEvent::ChildRestartScheduled {
+            id,
+            generation,
+            delay,
+        } => {
+            println!(
+                "{indent}child restart scheduled: {id} generation={generation} delay={delay:?}"
+            );
+        }
+        SupervisorEvent::ChildRestarted {
+            id,
+            old_generation,
+            new_generation,
+        } => {
+            println!("{indent}child restarted: {id} {old_generation}->{new_generation}");
+        }
+        SupervisorEvent::GroupRestartScheduled { delay } => {
+            println!("{indent}group restart scheduled: delay={delay:?}");
+        }
+        SupervisorEvent::RestartIntensityExceeded => {
+            println!("{indent}restart intensity exceeded");
+        }
+    }
 }
