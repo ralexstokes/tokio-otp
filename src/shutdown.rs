@@ -2,8 +2,18 @@ use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShutdownMode {
+    /// Wait for the grace period, then report a timeout if the task has not exited.
     Cooperative,
+    /// Wait for the grace period, then issue a Tokio abort and return promptly.
+    ///
+    /// Abort remains cooperative at Tokio poll boundaries, so a non-yielding
+    /// future can outlive the shutdown call briefly. For hard-stop guarantees,
+    /// isolate blocking work outside the supervised Tokio task.
     CooperativeThenAbort,
+    /// Issue a Tokio abort and return promptly.
+    ///
+    /// Abort remains cooperative at Tokio poll boundaries, so this mode does not
+    /// forcibly preempt a non-yielding future.
     Abort,
 }
 

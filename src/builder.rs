@@ -12,9 +12,11 @@ pub struct SupervisorBuilder {
     strategy: Strategy,
     restart_intensity: RestartIntensity,
     children: Vec<ChildSpec>,
+    control_channel_capacity: usize,
     event_channel_capacity: usize,
 }
 
+const DEFAULT_CONTROL_CHANNEL_CAPACITY: usize = 64;
 const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 impl Default for SupervisorBuilder {
@@ -29,6 +31,7 @@ impl SupervisorBuilder {
             strategy: Strategy::default(),
             restart_intensity: RestartIntensity::default(),
             children: Vec::new(),
+            control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
             event_channel_capacity: DEFAULT_EVENT_CHANNEL_CAPACITY,
         }
     }
@@ -52,6 +55,12 @@ impl SupervisorBuilder {
     }
 
     #[must_use]
+    pub fn control_channel_capacity(mut self, capacity: usize) -> Self {
+        self.control_channel_capacity = capacity;
+        self
+    }
+
+    #[must_use]
     pub fn event_channel_capacity(mut self, capacity: usize) -> Self {
         self.event_channel_capacity = capacity;
         self
@@ -63,6 +72,16 @@ impl SupervisorBuilder {
         }
 
         self.restart_intensity.validate()?;
+        if self.control_channel_capacity == 0 {
+            return Err(BuildError::InvalidConfig(
+                "control channel capacity must be non-zero",
+            ));
+        }
+        if self.event_channel_capacity == 0 {
+            return Err(BuildError::InvalidConfig(
+                "event channel capacity must be non-zero",
+            ));
+        }
 
         let mut ids = HashSet::new();
         for child in &self.children {
@@ -85,6 +104,7 @@ impl SupervisorBuilder {
                 .into_iter()
                 .map(|child| Arc::clone(&child.inner))
                 .collect(),
+            control_channel_capacity: self.control_channel_capacity,
             event_channel_capacity: self.event_channel_capacity,
         }))
     }

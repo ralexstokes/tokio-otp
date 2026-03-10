@@ -136,6 +136,23 @@ fn empty_child_id_is_rejected() {
 }
 
 #[test]
+fn zero_channel_capacities_are_rejected() {
+    let control_err = SupervisorBuilder::new()
+        .control_channel_capacity(0)
+        .child(ChildSpec::new("worker", |_| async { Ok(()) }))
+        .build()
+        .expect_err("zero control channel capacity must be rejected");
+    assert!(matches!(control_err, BuildError::InvalidConfig(_)));
+
+    let event_err = SupervisorBuilder::new()
+        .event_channel_capacity(0)
+        .child(ChildSpec::new("worker", |_| async { Ok(()) }))
+        .build()
+        .expect_err("zero event channel capacity must be rejected");
+    assert!(matches!(event_err, BuildError::InvalidConfig(_)));
+}
+
+#[test]
 fn valid_configuration_builds() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))

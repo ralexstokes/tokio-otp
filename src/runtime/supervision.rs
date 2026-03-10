@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant as StdInstant},
 };
 
+use slab::Slab;
 use tokio::{
     sync::{broadcast, mpsc, watch},
     task::{Id, JoinError, JoinSet},
@@ -19,8 +20,8 @@ use crate::{
     observability::{SupervisorObservability, format_child_path},
     restart::{Restart, RestartIntensity},
     snapshot::{
-        ChildMembershipView, ChildSnapshot, ChildStateView, NestedSnapshotUpdate,
-        SupervisorSnapshot, SupervisorStateView,
+        ChildMembershipView, ChildSnapshot, ChildStateView, NestedSnapshotNotification,
+        NestedSnapshotState, SupervisorSnapshot, SupervisorStateView,
     },
     strategy::Strategy,
     supervisor::SupervisorConfig,
@@ -35,6 +36,7 @@ type ChildKey = usize;
 
 pub(crate) struct ChildEnvelope {
     pub(crate) key: ChildKey,
+    pub(crate) instance: u64,
     pub(crate) generation: u64,
     pub(crate) result: crate::child::ChildResult,
 }
@@ -42,6 +44,7 @@ pub(crate) struct ChildEnvelope {
 #[derive(Clone, Copy)]
 pub(crate) struct TaskMeta {
     pub(crate) key: ChildKey,
+    pub(crate) instance: u64,
     pub(crate) generation: u64,
 }
 
@@ -62,10 +65,12 @@ pub(crate) enum MembershipState {
 pub(crate) struct ChildEntry {
     pub(crate) id: String,
     pub(crate) formatted_path: String,
+    pub(crate) instance: u64,
     pub(crate) runtime: ChildRuntime,
     terminal_status: Option<TerminalStatus>,
     last_exit: Option<ExitStatusView>,
     pub(crate) nested_snapshot: Option<SupervisorSnapshot>,
+    pub(crate) nested_snapshot_state: Option<NestedSnapshotState>,
     pub(crate) membership: MembershipState,
 }
 
@@ -75,14 +80,17 @@ impl ChildEntry {
         formatted_path: String,
         spec: Arc<crate::child::ChildSpecInner>,
         default_restart_intensity: RestartIntensity,
+        instance: u64,
     ) -> Self {
         Self {
             id,
             formatted_path,
+            instance,
             runtime: ChildRuntime::new(spec, default_restart_intensity),
             terminal_status: None,
             last_exit: None,
             nested_snapshot: None,
+            nested_snapshot_state: None,
             membership: MembershipState::Active,
         }
     }
@@ -102,15 +110,18 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) state: SupervisorState,
     pub(crate) group_token: CancellationToken,
     pub(crate) join_set: JoinSet<ChildEnvelope>,
-    pub(crate) children: Vec<ChildEntry>,
+    pub(crate) children: Slab<ChildEntry>,
     pub(crate) children_by_id: HashMap<String, ChildKey>,
+    pub(crate) child_order: Vec<ChildKey>,
     pub(crate) running_children: usize,
+    pub(crate) live_tasks: usize,
+    pub(crate) next_child_instance: u64,
     pub(crate) events: broadcast::Sender<SupervisorEvent>,
     pub(crate) snapshots: watch::Sender<SupervisorSnapshot>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
-    pub(crate) command_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
-    pub(crate) nested_snapshot_tx: mpsc::UnboundedSender<NestedSnapshotUpdate>,
-    pub(crate) nested_snapshot_rx: mpsc::UnboundedReceiver<NestedSnapshotUpdate>,
+    pub(crate) command_rx: mpsc::Receiver<SupervisorCommand>,
+    pub(crate) nested_snapshot_tx: mpsc::Sender<NestedSnapshotNotification>,
+    pub(crate) nested_snapshot_rx: mpsc::Receiver<NestedSnapshotNotification>,
     pub(crate) commands_open: bool,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
     pub(crate) pending_exit: Option<Result<SupervisorExit, SupervisorError>>,
@@ -123,27 +134,35 @@ impl SupervisorRuntime {
         shutdown_rx: watch::Receiver<bool>,
         events: broadcast::Sender<SupervisorEvent>,
         snapshots: watch::Sender<SupervisorSnapshot>,
-        command_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
+        command_rx: mpsc::Receiver<SupervisorCommand>,
         registry: Arc<NestedControlRegistry>,
         path_prefix: Vec<String>,
     ) -> Self {
         let default_restart_intensity = config.restart_intensity;
         let observability = SupervisorObservability::new(path_prefix.clone(), config.strategy);
-        let mut children = Vec::with_capacity(config.children.len());
+        let mut children = Slab::with_capacity(config.children.len());
         let mut children_by_id = HashMap::with_capacity(config.children.len());
+        let mut child_order = Vec::with_capacity(config.children.len());
+        let mut next_child_instance = 0u64;
 
-        for (key, spec) in config.children.into_iter().enumerate() {
+        for spec in config.children {
             let id = spec.id.clone();
             let formatted_path = format_child_path(&path_prefix, &id);
-            children_by_id.insert(id.clone(), key);
-            children.push(ChildEntry::new(
-                id,
+            let key = children.insert(ChildEntry::new(
+                id.clone(),
                 formatted_path,
                 spec,
                 default_restart_intensity,
+                next_child_instance,
             ));
+            next_child_instance = next_child_instance.saturating_add(1);
+            children_by_id.insert(id.clone(), key);
+            child_order.push(key);
         }
-        let (nested_snapshot_tx, nested_snapshot_rx) = mpsc::unbounded_channel();
+        let nested_snapshot_capacity = config
+            .control_channel_capacity
+            .max(config.event_channel_capacity);
+        let (nested_snapshot_tx, nested_snapshot_rx) = mpsc::channel(nested_snapshot_capacity);
 
         Self {
             meta: RuntimeMeta {
@@ -158,7 +177,10 @@ impl SupervisorRuntime {
             join_set: JoinSet::new(),
             children,
             children_by_id,
+            child_order,
             running_children: 0,
+            live_tasks: 0,
+            next_child_instance,
             events,
             snapshots,
             shutdown_rx,
@@ -174,7 +196,8 @@ impl SupervisorRuntime {
 
     pub(crate) async fn run(&mut self) -> Result<SupervisorExit, SupervisorError> {
         self.send_event(SupervisorEvent::SupervisorStarted);
-        for key in 0..self.children.len() {
+        let initial_children = self.child_order.clone();
+        for key in initial_children {
             self.spawn_child(key)?;
         }
 
@@ -183,7 +206,7 @@ impl SupervisorRuntime {
                 return result;
             }
 
-            if self.join_set.is_empty() && self.no_running_children() {
+            if self.live_tasks == 0 && self.no_running_children() {
                 return self.finish_natural_exit();
             }
 
@@ -223,9 +246,9 @@ impl SupervisorRuntime {
 
     fn finish_natural_exit(&mut self) -> Result<SupervisorExit, SupervisorError> {
         let exit = if self
-            .children
+            .child_order
             .iter()
-            .filter(|entry| entry.membership != MembershipState::Removed)
+            .filter_map(|&key| self.children.get(key))
             .any(|entry| {
                 entry
                     .terminal_status
@@ -271,19 +294,22 @@ impl SupervisorRuntime {
             return Err(ControlError::DuplicateChildId(id));
         }
 
-        let key = self.children.len();
         let formatted_path = format_child_path(&self.meta.path_prefix, &id);
-        self.children.push(ChildEntry::new(
+        let key = self.children.insert(ChildEntry::new(
             id.clone(),
             formatted_path,
             Arc::clone(&child.inner),
             self.meta.default_restart_intensity,
+            self.next_child_instance,
         ));
+        self.next_child_instance = self.next_child_instance.saturating_add(1);
         self.children_by_id.insert(id.clone(), key);
+        self.child_order.push(key);
 
         if let Err(err) = self.spawn_child(key) {
             self.children_by_id.remove(&id);
-            self.children[key].membership = MembershipState::Removed;
+            self.child_order.retain(|&existing| existing != key);
+            self.children.remove(key);
             return Err(map_supervisor_error_to_control(err));
         }
 
@@ -296,19 +322,21 @@ impl SupervisorRuntime {
         self.send_event(SupervisorEvent::SupervisorStopped);
     }
 
-    fn handle_nested_snapshot(&mut self, update: NestedSnapshotUpdate) {
-        let Some(&key) = self.children_by_id.get(&update.parent_id) else {
+    fn handle_nested_snapshot(&mut self, notification: NestedSnapshotNotification) {
+        let Some(entry) = self.children.get_mut(notification.parent_key) else {
             return;
         };
-
-        let entry = &mut self.children[key];
-        if entry.membership == MembershipState::Removed
-            || entry.runtime.generation != update.generation
+        if entry.instance != notification.parent_instance
+            || entry.runtime.generation != notification.generation
         {
             return;
         }
 
-        entry.nested_snapshot = Some(update.snapshot);
+        let Some(state) = entry.nested_snapshot_state.clone() else {
+            return;
+        };
+        state.mark_dequeued();
+        entry.nested_snapshot = state.latest();
         self.publish_snapshot();
     }
 
@@ -355,40 +383,42 @@ impl SupervisorRuntime {
             return Ok(());
         }
 
-        let (deadline, timeout_is_error) = match mode {
+        match mode {
             crate::shutdown::ShutdownMode::Abort => {
-                self.abort_child(key);
-                (None, false)
+                self.abort_and_detach_child(key, DrainReason::Shutdown)
+                    .await
+                    .map_err(map_supervisor_error_to_control)?;
+                Ok(())
             }
             crate::shutdown::ShutdownMode::Cooperative => {
                 self.cancel_child(key);
-                (Some(Instant::now() + grace), true)
+                self.await_child_removal(key, Instant::now() + grace, true)
+                    .await
             }
             crate::shutdown::ShutdownMode::CooperativeThenAbort => {
                 self.cancel_child(key);
-                (Some(Instant::now() + grace), false)
+                self.await_child_removal(key, Instant::now() + grace, false)
+                    .await
             }
-        };
-
-        self.await_child_removal(key, deadline, timeout_is_error)
-            .await
+        }
     }
 
     async fn await_child_removal(
         &mut self,
         key: ChildKey,
-        deadline: Option<Instant>,
+        deadline: Instant,
         timeout_is_error: bool,
     ) -> Result<(), ControlError> {
         let child_id = self.child_id(key).ok_or_else(|| {
             ControlError::Internal("missing child id while removing child".to_owned())
         })?;
         let started_at = StdInstant::now();
-        let mut deadline = deadline;
         let mut removal_error = None;
 
         loop {
-            if self.children[key].membership == MembershipState::Removed {
+            if !self.children.contains(key)
+                || self.children[key].membership == MembershipState::Removed
+            {
                 self.meta.observability.record_shutdown_duration(
                     "remove_child",
                     started_at.elapsed(),
@@ -397,34 +427,30 @@ impl SupervisorRuntime {
                 return removal_error.map_or(Ok(()), Err);
             }
 
-            if let Some(deadline_at) = deadline {
-                tokio::select! {
-                    biased;
-                    changed = self.shutdown_rx.changed() => {
-                        self.handle_shutdown_during_control(changed).await?;
-                    }
-                    maybe = self.join_set.join_next_with_id() => {
-                        self.handle_join_during_control(maybe).await?;
-                    }
-                    _ = tokio::time::sleep_until(deadline_at) => {
-                        self.abort_child(key);
-                        self.meta.observability
-                            .record_shutdown_timeout("remove_child", Some(&child_id));
-                        if timeout_is_error {
-                            removal_error = Some(ControlError::ShutdownTimedOut(child_id.clone()));
-                        }
-                        deadline = None;
-                    }
+            tokio::select! {
+                biased;
+                changed = self.shutdown_rx.changed() => {
+                    self.handle_shutdown_during_control(changed).await?;
                 }
-            } else {
-                tokio::select! {
-                    biased;
-                    changed = self.shutdown_rx.changed() => {
-                        self.handle_shutdown_during_control(changed).await?;
+                maybe = self.join_set.join_next_with_id() => {
+                    self.handle_join_during_control(maybe).await?;
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    self.meta
+                        .observability
+                        .record_shutdown_timeout("remove_child", Some(&child_id));
+                    if timeout_is_error {
+                        removal_error = Some(ControlError::ShutdownTimedOut(child_id.clone()));
                     }
-                    maybe = self.join_set.join_next_with_id() => {
-                        self.handle_join_during_control(maybe).await?;
-                    }
+                    self.abort_and_detach_child(key, DrainReason::Shutdown)
+                        .await
+                        .map_err(map_supervisor_error_to_control)?;
+                    self.meta.observability.record_shutdown_duration(
+                        "remove_child",
+                        started_at.elapsed(),
+                        Some(&child_id),
+                    );
+                    return removal_error.map_or(Ok(()), Err);
                 }
             }
         }
@@ -503,27 +529,34 @@ impl SupervisorRuntime {
     }
 
     fn finalize_removed_child(&mut self, key: ChildKey) {
-        if self.children[key].membership == MembershipState::Removed {
+        if !self.children.contains(key) {
             return;
         }
 
-        let id = {
-            let entry = &mut self.children[key];
-            entry.membership = MembershipState::Removed;
-            entry.terminal_status = None;
-            entry.last_exit = None;
-            entry.nested_snapshot = None;
-            entry.id.clone()
-        };
-        self.children_by_id.remove(&id);
-        self.send_event(SupervisorEvent::ChildRemoved { id });
+        let had_live_task = self.children[key].runtime.abort_handle.is_some();
+        let mut entry = self.children.remove(key);
+        entry.membership = MembershipState::Removed;
+        entry.terminal_status = None;
+        entry.last_exit = None;
+        entry.nested_snapshot = None;
+        if let Some(state) = entry.nested_snapshot_state.as_ref() {
+            state.clear();
+        }
+        if had_live_task {
+            self.live_tasks = self.live_tasks.saturating_sub(1);
+        }
+        self.children_by_id.remove(&entry.id);
+        self.child_order.retain(|&existing| existing != key);
+        self.send_event(SupervisorEvent::ChildRemoved { id: entry.id });
     }
 
     async fn handle_joined_child(
         &mut self,
         joined: Result<(Id, ChildEnvelope), JoinError>,
     ) -> Result<(), SupervisorError> {
-        let classified = self.classify_join(joined)?;
+        let Some(classified) = self.consume_joined_child(joined)? else {
+            return Ok(());
+        };
         self.record_exit(classified.key, classified.generation, &classified.status);
 
         if self.state == SupervisorState::Stopping {
@@ -557,7 +590,9 @@ impl SupervisorRuntime {
         joined: Result<(Id, ChildEnvelope), JoinError>,
         reason: DrainReason,
     ) -> Result<(), SupervisorError> {
-        let classified = self.classify_join(joined)?;
+        let Some(classified) = self.consume_joined_child(joined)? else {
+            return Ok(());
+        };
         self.record_exit(classified.key, classified.generation, &classified.status);
         if matches!(reason, DrainReason::GroupRestart)
             && matches!(
@@ -579,6 +614,7 @@ impl SupervisorRuntime {
                 self.task_map.remove(&task_id);
                 Ok(ClassifiedExit {
                     key: envelope.key,
+                    instance: envelope.instance,
                     generation: envelope.generation,
                     status: ExitStatus::from_child_result(envelope.result),
                 })
@@ -593,6 +629,7 @@ impl SupervisorRuntime {
                 let status = classify_join_error(err);
                 Ok(ClassifiedExit {
                     key: meta.key,
+                    instance: meta.instance,
                     generation: meta.generation,
                     status,
                 })
@@ -616,6 +653,7 @@ impl SupervisorRuntime {
             entry.runtime.next_restart_deadline = None;
             entry.last_exit = Some(status.view());
             entry.nested_snapshot = None;
+            entry.nested_snapshot_state = None;
             entry.id.clone()
         };
         self.send_event(SupervisorEvent::ChildExited {
@@ -679,7 +717,8 @@ impl SupervisorRuntime {
         );
         self.drain_for_group_restart().await?;
         self.group_token = CancellationToken::new();
-        for key in 0..self.children.len() {
+        let keys = self.child_order.clone();
+        for key in keys {
             let entry = &self.children[key];
             if entry.membership != MembershipState::Active
                 || matches!(entry.runtime.spec.restart, Restart::Temporary)
@@ -810,10 +849,10 @@ impl SupervisorRuntime {
     fn snapshot_view(&self) -> SupervisorSnapshot {
         let now = Instant::now();
         let mut children = Vec::with_capacity(self.children_by_id.len());
-        for entry in &self.children {
-            if entry.membership == MembershipState::Removed {
+        for &key in &self.child_order {
+            let Some(entry) = self.children.get(key) else {
                 continue;
-            }
+            };
 
             children.push(ChildSnapshot {
                 id: entry.id.clone(),
@@ -850,6 +889,55 @@ impl SupervisorRuntime {
             children,
         }
     }
+
+    pub(crate) async fn drain_ready_joins(
+        &mut self,
+        reason: DrainReason,
+    ) -> Result<(), SupervisorError> {
+        loop {
+            match tokio::time::timeout(Duration::ZERO, self.join_set.join_next_with_id()).await {
+                Ok(Some(joined)) => self.handle_drained_join(joined, reason)?,
+                Ok(None) | Err(_) => return Ok(()),
+            }
+        }
+    }
+
+    async fn abort_and_detach_child(
+        &mut self,
+        key: ChildKey,
+        reason: DrainReason,
+    ) -> Result<(), SupervisorError> {
+        self.abort_child(key);
+        tokio::task::yield_now().await;
+        self.drain_ready_joins(reason).await?;
+        self.finalize_removed_child_if_present(key);
+        Ok(())
+    }
+
+    fn consume_joined_child(
+        &mut self,
+        joined: Result<(Id, ChildEnvelope), JoinError>,
+    ) -> Result<Option<ClassifiedExit>, SupervisorError> {
+        let classified = self.classify_join(joined)?;
+        if !self.current_child_matches(classified.key, classified.instance, classified.generation) {
+            return Ok(None);
+        }
+
+        self.live_tasks = self.live_tasks.saturating_sub(1);
+        Ok(Some(classified))
+    }
+
+    fn current_child_matches(&self, key: ChildKey, instance: u64, generation: u64) -> bool {
+        self.children.get(key).is_some_and(|entry| {
+            entry.instance == instance && entry.runtime.generation == generation
+        })
+    }
+
+    fn finalize_removed_child_if_present(&mut self, key: ChildKey) {
+        if self.children.contains(key) {
+            self.finalize_removed_child(key);
+        }
+    }
 }
 
 fn classify_join_error(err: JoinError) -> ExitStatus {
@@ -882,6 +970,7 @@ fn map_supervisor_error_to_control(err: SupervisorError) -> ControlError {
 
 struct ClassifiedExit {
     key: ChildKey,
+    instance: u64,
     generation: u64,
     status: ExitStatus,
 }

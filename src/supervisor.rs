@@ -34,6 +34,7 @@ pub(crate) struct SupervisorConfig {
     pub(crate) strategy: Strategy,
     pub(crate) restart_intensity: RestartIntensity,
     pub(crate) children: Vec<Arc<ChildSpecInner>>,
+    pub(crate) control_channel_capacity: usize,
     pub(crate) event_channel_capacity: usize,
 }
 
@@ -45,7 +46,7 @@ impl Supervisor {
     pub async fn run(self) -> Result<SupervisorExit, SupervisorError> {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(self.config.event_channel_capacity);
-        let (_command_tx, command_rx) = mpsc::unbounded_channel();
+        let (_command_tx, command_rx) = mpsc::channel(self.config.control_channel_capacity);
         let (snapshots_tx, _) = watch::channel(initial_snapshot(&self.config));
         self.run_with_channels(
             shutdown_rx,
@@ -68,7 +69,7 @@ impl Supervisor {
         path_prefix: Vec<String>,
     ) -> SupervisorHandle {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::channel(self.config.control_channel_capacity);
         let (done_tx, done_rx) = watch::channel(None);
         let (events_tx, _) = broadcast::channel(self.config.event_channel_capacity);
         let (snapshots_tx, snapshots_rx) = watch::channel(initial_snapshot(&self.config));
@@ -121,7 +122,7 @@ impl Supervisor {
         shutdown_rx: watch::Receiver<bool>,
         events_tx: broadcast::Sender<crate::event::SupervisorEvent>,
         snapshots_tx: watch::Sender<SupervisorSnapshot>,
-        command_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
+        command_rx: mpsc::Receiver<SupervisorCommand>,
         registry: Arc<NestedControlRegistry>,
         path_prefix: Vec<String>,
     ) -> Result<SupervisorExit, SupervisorError> {

@@ -22,6 +22,8 @@ pub enum SupervisorError {
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ControlError {
+    #[error("supervisor control plane is busy")]
+    Busy,
     #[error("duplicate child id: {0}")]
     DuplicateChildId(String),
     #[error("unknown child id: {0}")]

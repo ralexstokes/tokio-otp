@@ -17,7 +17,15 @@ impl SupervisorRuntime {
         key: usize,
     ) -> Result<(Option<u64>, u64), SupervisorError> {
         self.clear_terminal_status(key);
-        let (child_id, generation, old_generation, future, counted_before) = {
+        let (
+            child_id,
+            generation,
+            old_generation,
+            future,
+            counted_before,
+            instance,
+            snapshot_state,
+        ) = {
             let entry = self.children.get_mut(key).ok_or_else(|| {
                 SupervisorError::Internal(format!("missing child slot for key {key}"))
             })?;
@@ -26,6 +34,7 @@ impl SupervisorRuntime {
                 child.state,
                 RuntimeChildState::Starting | RuntimeChildState::Running
             );
+            let instance = entry.instance;
 
             let old_generation = if child.has_started {
                 Some(child.generation)
@@ -42,6 +51,8 @@ impl SupervisorRuntime {
             child.state = RuntimeChildState::Starting;
             child.next_restart_deadline = None;
             entry.nested_snapshot = None;
+            let snapshot_state = crate::snapshot::NestedSnapshotState::default();
+            entry.nested_snapshot_state = Some(snapshot_state.clone());
 
             let child_id = entry.id.clone();
             let ctx = ChildContext {
@@ -52,13 +63,23 @@ impl SupervisorRuntime {
             };
             let future = child.spec.factory.make(ctx);
 
-            (child_id, generation, old_generation, future, counted_before)
+            (
+                child_id,
+                generation,
+                old_generation,
+                future,
+                counted_before,
+                instance,
+                snapshot_state,
+            )
         };
         let forwarder =
             NestedEventForwarder::new(self.events.clone(), child_id.clone(), generation);
         let snapshot_forwarder = NestedSnapshotForwarder::new(
             self.nested_snapshot_tx.clone(),
-            child_id.clone(),
+            snapshot_state,
+            key,
+            instance,
             generation,
         );
         let control_scope =
@@ -86,6 +107,7 @@ impl SupervisorRuntime {
                 .await;
                 ChildEnvelope {
                     key,
+                    instance,
                     generation,
                     result,
                 }
@@ -106,7 +128,15 @@ impl SupervisorRuntime {
         if !counted_before {
             self.running_children = self.running_children.saturating_add(1);
         }
-        self.task_map.insert(task_id, TaskMeta { key, generation });
+        self.live_tasks = self.live_tasks.saturating_add(1);
+        self.task_map.insert(
+            task_id,
+            TaskMeta {
+                key,
+                instance,
+                generation,
+            },
+        );
         self.send_event(SupervisorEvent::ChildStarted {
             id: child_id,
             generation,

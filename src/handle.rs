@@ -22,7 +22,7 @@ type DoneReceiver = watch::Receiver<Option<Result<SupervisorExit, SupervisorErro
 
 #[derive(Clone)]
 pub(crate) struct ControlEndpoint {
-    command_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    command_tx: mpsc::Sender<SupervisorCommand>,
 }
 
 impl ControlEndpoint {
@@ -31,8 +31,18 @@ impl ControlEndpoint {
             .await
     }
 
+    async fn try_add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
+        self.try_send(|reply| SupervisorCommand::AddChild { child, reply })
+            .await
+    }
+
     async fn remove_child(&self, id: String) -> Result<(), ControlError> {
         self.send(|reply| SupervisorCommand::RemoveChild { id, reply })
+            .await
+    }
+
+    async fn try_remove_child(&self, id: String) -> Result<(), ControlError> {
+        self.try_send(|reply| SupervisorCommand::RemoveChild { id, reply })
             .await
     }
 
@@ -43,7 +53,22 @@ impl ControlEndpoint {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(command(reply_tx))
+            .await
             .map_err(|_| ControlError::Unavailable)?;
+        reply_rx.await.map_err(|_| ControlError::Unavailable)?
+    }
+
+    async fn try_send(
+        &self,
+        command: impl FnOnce(oneshot::Sender<Result<(), ControlError>>) -> SupervisorCommand,
+    ) -> Result<(), ControlError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .try_send(command(reply_tx))
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => ControlError::Busy,
+                mpsc::error::TrySendError::Closed(_) => ControlError::Unavailable,
+            })?;
         reply_rx.await.map_err(|_| ControlError::Unavailable)?
     }
 }
@@ -150,7 +175,7 @@ pub(crate) enum SupervisorCommand {
 
 pub(crate) struct SupervisorHandleInit {
     pub(crate) shutdown_tx: watch::Sender<bool>,
-    pub(crate) command_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    pub(crate) command_tx: mpsc::Sender<SupervisorCommand>,
     pub(crate) registry: Arc<NestedControlRegistry>,
     pub(crate) path_prefix: Vec<String>,
     pub(crate) done_tx: DoneSender,
@@ -163,7 +188,7 @@ pub(crate) struct SupervisorHandleInit {
 #[derive(Clone)]
 pub struct SupervisorHandle {
     shutdown_tx: watch::Sender<bool>,
-    command_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    command_tx: mpsc::Sender<SupervisorCommand>,
     registry: Arc<NestedControlRegistry>,
     path_prefix: Vec<String>,
     done_rx: DoneReceiver,
@@ -199,6 +224,10 @@ impl SupervisorHandle {
         self.control_endpoint().add_child(child).await
     }
 
+    pub async fn try_add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
+        self.control_endpoint().try_add_child(child).await
+    }
+
     pub async fn add_child_at<I, S>(&self, path: I, child: ChildSpec) -> Result<(), ControlError>
     where
         I: IntoIterator<Item = S>,
@@ -211,8 +240,28 @@ impl SupervisorHandle {
         }
     }
 
+    pub async fn try_add_child_at<I, S>(
+        &self,
+        path: I,
+        child: ChildSpec,
+    ) -> Result<(), ControlError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if let Some(endpoint) = self.endpoint_for_relative_path(path)? {
+            endpoint.try_add_child(child).await
+        } else {
+            self.try_add_child(child).await
+        }
+    }
+
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         self.control_endpoint().remove_child(id.into()).await
+    }
+
+    pub async fn try_remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
+        self.control_endpoint().try_remove_child(id.into()).await
     }
 
     pub async fn remove_child_at<I, S>(
@@ -228,6 +277,22 @@ impl SupervisorHandle {
             endpoint.remove_child(id.into()).await
         } else {
             self.remove_child(id).await
+        }
+    }
+
+    pub async fn try_remove_child_at<I, S>(
+        &self,
+        path: I,
+        id: impl Into<String>,
+    ) -> Result<(), ControlError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if let Some(endpoint) = self.endpoint_for_relative_path(path)? {
+            endpoint.try_remove_child(id.into()).await
+        } else {
+            self.try_remove_child(id).await
         }
     }
 

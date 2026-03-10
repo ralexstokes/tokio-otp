@@ -17,6 +17,12 @@
 //! lags behind, the runtime logs a warning and increments an observability drop
 //! counter when the `metrics` feature is enabled.
 //!
+//! Shutdown and abort semantics are cooperative because supervised work runs as
+//! Tokio tasks. A timed-out or aborted task is asked to stop, but non-yielding
+//! futures are not forcibly preempted inside this crate. If you need hard stop
+//! guarantees for blocking work, run that work in a dedicated blocking pool or
+//! external process and supervise that boundary instead.
+//!
 //! Minimal setup:
 //!
 //! ```no_run

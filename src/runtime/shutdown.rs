@@ -1,5 +1,6 @@
 use std::time::Instant as StdInstant;
 
+use slab::Slab;
 use tokio::time::{Instant, sleep_until};
 use tracing::{Instrument, info_span};
 
@@ -42,10 +43,10 @@ impl SupervisorRuntime {
 
     fn cancel_running_children(&mut self) {
         let mut cancelled = 0usize;
-        for child in self.children.iter_mut().rev() {
-            if child.membership == MembershipState::Removed {
+        for &key in self.child_order.iter().rev() {
+            let Some(child) = self.children.get_mut(key) else {
                 continue;
-            }
+            };
 
             if matches!(
                 child.runtime.state,
@@ -65,7 +66,7 @@ impl SupervisorRuntime {
         let started_at = StdInstant::now();
         let mut max_grace: Option<std::time::Duration> = None;
 
-        for child in &self.children {
+        for (_, child) in self.children.iter() {
             if child.membership == MembershipState::Removed || !child.runtime.state.is_active() {
                 continue;
             }
@@ -82,11 +83,21 @@ impl SupervisorRuntime {
         abort_matching_children(&self.children, |child| {
             matches!(child.runtime.spec.shutdown_policy.mode, ShutdownMode::Abort)
         });
+        tokio::task::yield_now().await;
+        self.drain_ready_joins(reason).await?;
+        if self.live_tasks == 0 {
+            self.meta.observability.record_shutdown_duration(
+                shutdown_operation(reason),
+                started_at.elapsed(),
+                None,
+            );
+            return Ok(());
+        }
 
         if let Some(grace) = max_grace {
             let deadline = Instant::now() + grace;
             loop {
-                if self.join_set.is_empty() {
+                if self.live_tasks == 0 {
                     break;
                 }
 
@@ -103,7 +114,7 @@ impl SupervisorRuntime {
                 }
             }
 
-            if !self.join_set.is_empty() && matches!(reason, DrainReason::Shutdown) {
+            if self.live_tasks != 0 && matches!(reason, DrainReason::Shutdown) {
                 self.meta
                     .observability
                     .record_shutdown_timeout("shutdown", None);
@@ -111,9 +122,15 @@ impl SupervisorRuntime {
         }
 
         let timed_out = cooperative_timeout_names(&self.children);
-        if !timed_out.is_empty() {
+        let remaining = active_task_names(&self.children);
+        if !remaining.is_empty() {
             abort_matching_children(&self.children, |_| true);
-            self.drain_join_set(reason).await?;
+            tokio::task::yield_now().await;
+            self.drain_ready_joins(reason).await?;
+        }
+
+        let remaining = active_task_names(&self.children);
+        if !timed_out.is_empty() {
             self.meta.observability.record_shutdown_duration(
                 shutdown_operation(reason),
                 started_at.elapsed(),
@@ -122,31 +139,29 @@ impl SupervisorRuntime {
             return Err(SupervisorError::ShutdownTimedOut(timed_out));
         }
 
-        abort_matching_children(&self.children, |child| {
-            matches!(
-                child.runtime.spec.shutdown_policy.mode,
-                ShutdownMode::CooperativeThenAbort
-            )
-        });
-        let result = self.drain_join_set(reason).await;
+        if !remaining.is_empty() {
+            self.meta.observability.record_shutdown_duration(
+                shutdown_operation(reason),
+                started_at.elapsed(),
+                None,
+            );
+            return match reason {
+                DrainReason::Shutdown => Ok(()),
+                DrainReason::GroupRestart => Err(SupervisorError::ShutdownTimedOut(remaining)),
+            };
+        }
+
         self.meta.observability.record_shutdown_duration(
             shutdown_operation(reason),
             started_at.elapsed(),
             None,
         );
-        result
-    }
-
-    async fn drain_join_set(&mut self, reason: DrainReason) -> Result<(), SupervisorError> {
-        while let Some(joined) = self.join_set.join_next_with_id().await {
-            self.handle_drained_join(joined, reason)?;
-        }
         Ok(())
     }
 }
 
-fn abort_matching_children(children: &[ChildEntry], predicate: impl Fn(&ChildEntry) -> bool) {
-    for child in children {
+fn abort_matching_children(children: &Slab<ChildEntry>, predicate: impl Fn(&ChildEntry) -> bool) {
+    for (_, child) in children.iter() {
         if child.membership != MembershipState::Removed
             && child.runtime.state.is_active()
             && predicate(child)
@@ -157,20 +172,34 @@ fn abort_matching_children(children: &[ChildEntry], predicate: impl Fn(&ChildEnt
     }
 }
 
-fn cooperative_timeout_names(children: &[ChildEntry]) -> String {
-    let ids: Vec<&str> = children
+fn cooperative_timeout_names(children: &Slab<ChildEntry>) -> String {
+    collect_child_names(children, |child| {
+        child.membership != MembershipState::Removed
+            && child.runtime.state.is_active()
+            && matches!(
+                child.runtime.spec.shutdown_policy.mode,
+                ShutdownMode::Cooperative
+            )
+    })
+}
+
+fn active_task_names(children: &Slab<ChildEntry>) -> String {
+    collect_child_names(children, |child| {
+        child.membership != MembershipState::Removed && child.runtime.state.is_active()
+    })
+}
+
+fn collect_child_names(
+    children: &Slab<ChildEntry>,
+    predicate: impl Fn(&ChildEntry) -> bool,
+) -> String {
+    children
         .iter()
-        .filter(|child| {
-            child.membership != MembershipState::Removed
-                && child.runtime.state.is_active()
-                && matches!(
-                    child.runtime.spec.shutdown_policy.mode,
-                    ShutdownMode::Cooperative
-                )
-        })
+        .map(|(_, child)| child)
+        .filter(|child| predicate(child))
         .map(|child| child.id.as_str())
-        .collect();
-    ids.join(", ")
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn shutdown_operation(reason: DrainReason) -> &'static str {

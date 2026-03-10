@@ -1,4 +1,11 @@
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use tokio::sync::mpsc;
 
@@ -81,29 +88,102 @@ pub enum ChildMembershipView {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct NestedSnapshotUpdate {
-    pub(crate) parent_id: String,
+pub(crate) struct NestedSnapshotNotification {
+    pub(crate) parent_key: usize,
+    pub(crate) parent_instance: u64,
     pub(crate) generation: u64,
-    pub(crate) snapshot: SupervisorSnapshot,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct NestedSnapshotState {
+    latest: Arc<Mutex<Option<SupervisorSnapshot>>>,
+    queued: Arc<AtomicBool>,
+}
+
+impl NestedSnapshotState {
+    pub(crate) fn clear(&self) {
+        *self
+            .latest
+            .lock()
+            .expect("nested snapshot state mutex poisoned") = None;
+        self.queued.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn replace(&self, snapshot: SupervisorSnapshot) {
+        *self
+            .latest
+            .lock()
+            .expect("nested snapshot state mutex poisoned") = Some(snapshot);
+    }
+
+    pub(crate) fn latest(&self) -> Option<SupervisorSnapshot> {
+        self.latest
+            .lock()
+            .expect("nested snapshot state mutex poisoned")
+            .clone()
+    }
+
+    pub(crate) fn try_queue(&self) -> bool {
+        !self.queued.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn mark_dequeued(&self) {
+        self.queued.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct NestedSnapshotForwarder {
-    updates: mpsc::UnboundedSender<NestedSnapshotUpdate>,
-    parent_id: String,
+    notifications: mpsc::Sender<NestedSnapshotNotification>,
+    state: NestedSnapshotState,
+    parent_key: usize,
+    parent_instance: u64,
     generation: u64,
 }
 
 impl NestedSnapshotForwarder {
     pub(crate) fn new(
-        updates: mpsc::UnboundedSender<NestedSnapshotUpdate>,
-        parent_id: String,
+        notifications: mpsc::Sender<NestedSnapshotNotification>,
+        state: NestedSnapshotState,
+        parent_key: usize,
+        parent_instance: u64,
         generation: u64,
     ) -> Self {
         Self {
-            updates,
-            parent_id,
+            notifications,
+            state,
+            parent_key,
+            parent_instance,
             generation,
+        }
+    }
+
+    fn forward(&self, snapshot: SupervisorSnapshot) {
+        self.state.replace(snapshot);
+        if !self.state.try_queue() {
+            return;
+        }
+
+        let notification = NestedSnapshotNotification {
+            parent_key: self.parent_key,
+            parent_instance: self.parent_instance,
+            generation: self.generation,
+        };
+
+        match self.notifications.try_send(notification) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(notification)) => {
+                let notifications = self.notifications.clone();
+                let state = self.state.clone();
+                tokio::spawn(async move {
+                    if notifications.send(notification).await.is_err() {
+                        state.mark_dequeued();
+                    }
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.state.mark_dequeued();
+            }
         }
     }
 }
@@ -124,10 +204,6 @@ where
 
 pub(crate) fn forward_nested_snapshot(snapshot: SupervisorSnapshot) {
     let _ = NESTED_SNAPSHOT_FORWARDER.try_with(|forwarder| {
-        let _ = forwarder.updates.send(NestedSnapshotUpdate {
-            parent_id: forwarder.parent_id.clone(),
-            generation: forwarder.generation,
-            snapshot,
-        });
+        forwarder.forward(snapshot);
     });
 }
