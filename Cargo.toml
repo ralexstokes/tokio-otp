@@ -23,3 +23,8 @@ metrics-exporter-prometheus = "0.17"
 metrics-util = { version = "0.20", features = ["debugging"] }
 serde_json = "1.0"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
+
+[[bench]]
+name = "common_flows"
+harness = false
+path = "benches/common_flows.rs"

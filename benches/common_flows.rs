@@ -1,0 +1,307 @@
+use std::{
+    env,
+    future::Future,
+    hint::black_box,
+    io::Error,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
+
+use tokio::runtime::{Builder, Runtime};
+use tokio_supervisor::{
+    BoxError, ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorEvent, SupervisorExit,
+};
+
+const DEFAULT_WARMUP_ITERS: usize = 10;
+const DEFAULT_MEASURE_ITERS: usize = 100;
+
+fn main() {
+    let warmup_iters = iterations_from_env("BENCH_WARMUP_ITERS", DEFAULT_WARMUP_ITERS);
+    let measure_iters = iterations_from_env("BENCH_ITERS", DEFAULT_MEASURE_ITERS);
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("benchmark runtime should build");
+
+    println!(
+        "tokio-supervisor common flow benchmarks (warmup={warmup_iters}, measure={measure_iters})"
+    );
+
+    bench_async(
+        &runtime,
+        warmup_iters,
+        measure_iters,
+        "spawn_shutdown/8_children",
+        || spawn_shutdown_flow(8),
+    );
+    bench_async(
+        &runtime,
+        warmup_iters,
+        measure_iters,
+        "one_for_one_restart/4_children",
+        one_for_one_restart_flow,
+    );
+    bench_async(
+        &runtime,
+        warmup_iters,
+        measure_iters,
+        "one_for_all_restart/4_children",
+        one_for_all_restart_flow,
+    );
+    bench_async(
+        &runtime,
+        warmup_iters,
+        measure_iters,
+        "dynamic_add_remove",
+        dynamic_add_remove_flow,
+    );
+}
+
+fn iterations_from_env(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn bench_async<F, Fut>(
+    runtime: &Runtime,
+    warmup_iters: usize,
+    measure_iters: usize,
+    name: &str,
+    mut bench_case: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    for _ in 0..warmup_iters {
+        runtime.block_on(bench_case());
+    }
+
+    let started = Instant::now();
+    for _ in 0..measure_iters {
+        runtime.block_on(bench_case());
+    }
+
+    let elapsed = started.elapsed();
+    let micros_per_iter = elapsed.as_secs_f64() * 1_000_000.0 / measure_iters as f64;
+    println!("{name:30} {micros_per_iter:10.2} us/op");
+}
+
+async fn spawn_shutdown_flow(children: usize) {
+    let mut builder = SupervisorBuilder::new();
+    for index in 0..children {
+        builder = builder.child(ChildSpec::new(
+            format!("worker-{index}"),
+            |ctx| async move {
+                ctx.token.cancelled().await;
+                Ok(())
+            },
+        ));
+    }
+
+    let handle = builder
+        .build()
+        .expect("benchmark supervisor should build")
+        .spawn();
+    let mut events = handle.subscribe();
+    let started = wait_for_child_start_count(&mut events, children).await;
+    black_box(started);
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Shutdown);
+}
+
+async fn one_for_one_restart_flow() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let flaky_attempts = Arc::clone(&attempts);
+    let flaky = ChildSpec::new("flaky", move |ctx| {
+        let attempts = Arc::clone(&flaky_attempts);
+        async move {
+            if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(bench_error("restart me"));
+            }
+
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Transient);
+
+    let mut builder = SupervisorBuilder::new()
+        .strategy(Strategy::OneForOne)
+        .child(flaky);
+    for index in 0..3 {
+        builder = builder.child(ChildSpec::new(format!("peer-{index}"), |ctx| async move {
+            ctx.token.cancelled().await;
+            Ok(())
+        }));
+    }
+
+    let handle = builder
+        .build()
+        .expect("benchmark supervisor should build")
+        .spawn();
+    let mut events = handle.subscribe();
+    wait_for_child_restart(&mut events, "flaky").await;
+    black_box(attempts.load(Ordering::Relaxed));
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Shutdown);
+}
+
+async fn one_for_all_restart_flow() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let trigger_attempts = Arc::clone(&attempts);
+    let trigger = ChildSpec::new("trigger", move |ctx| {
+        let attempts = Arc::clone(&trigger_attempts);
+        async move {
+            if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(bench_error("restart group"));
+            }
+
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Transient);
+
+    let mut builder = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .child(trigger);
+    for index in 0..3 {
+        builder = builder.child(
+            ChildSpec::new(format!("peer-{index}"), |ctx| async move {
+                ctx.token.cancelled().await;
+                Ok(())
+            })
+            .restart(Restart::Permanent),
+        );
+    }
+
+    let handle = builder
+        .build()
+        .expect("benchmark supervisor should build")
+        .spawn();
+    let mut events = handle.subscribe();
+    let restarted = wait_for_restart_count(&mut events, 4).await;
+    black_box(restarted);
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Shutdown);
+}
+
+async fn dynamic_add_remove_flow() {
+    let handle = SupervisorBuilder::new()
+        .child(ChildSpec::new("seed", |ctx| async move {
+            ctx.token.cancelled().await;
+            Ok(())
+        }))
+        .build()
+        .expect("benchmark supervisor should build")
+        .spawn();
+    let mut events = handle.subscribe();
+
+    wait_for_named_child_started(&mut events, "seed").await;
+
+    handle
+        .add_child(ChildSpec::new("dynamic", |ctx| async move {
+            ctx.token.cancelled().await;
+            Ok(())
+        }))
+        .await
+        .expect("dynamic child should be accepted");
+    wait_for_named_child_started(&mut events, "dynamic").await;
+
+    handle
+        .remove_child("dynamic")
+        .await
+        .expect("dynamic child should be removable");
+    wait_for_named_child_removed(&mut events, "dynamic").await;
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Shutdown);
+}
+
+async fn wait_for_child_start_count(
+    events: &mut tokio::sync::broadcast::Receiver<SupervisorEvent>,
+    expected: usize,
+) -> usize {
+    let mut started = 0;
+    while started < expected {
+        if let SupervisorEvent::ChildStarted { .. } = events.recv().await.expect("event stream") {
+            started += 1;
+        }
+    }
+    started
+}
+
+async fn wait_for_child_restart(
+    events: &mut tokio::sync::broadcast::Receiver<SupervisorEvent>,
+    id: &str,
+) {
+    loop {
+        match events.recv().await.expect("event stream") {
+            SupervisorEvent::ChildRestarted {
+                id: restarted_id,
+                old_generation: 0,
+                new_generation: 1,
+            } if restarted_id == id => return,
+            _ => {}
+        }
+    }
+}
+
+async fn wait_for_restart_count(
+    events: &mut tokio::sync::broadcast::Receiver<SupervisorEvent>,
+    expected: usize,
+) -> usize {
+    let mut restarted = 0;
+    while restarted < expected {
+        if let SupervisorEvent::ChildRestarted {
+            old_generation: 0,
+            new_generation: 1,
+            ..
+        } = events.recv().await.expect("event stream")
+        {
+            restarted += 1;
+        }
+    }
+    restarted
+}
+
+async fn wait_for_named_child_started(
+    events: &mut tokio::sync::broadcast::Receiver<SupervisorEvent>,
+    id: &str,
+) {
+    loop {
+        match events.recv().await.expect("event stream") {
+            SupervisorEvent::ChildStarted { id: started_id, .. } if started_id == id => return,
+            _ => {}
+        }
+    }
+}
+
+async fn wait_for_named_child_removed(
+    events: &mut tokio::sync::broadcast::Receiver<SupervisorEvent>,
+    id: &str,
+) {
+    loop {
+        match events.recv().await.expect("event stream") {
+            SupervisorEvent::ChildRemoved { id: removed_id } if removed_id == id => return,
+            _ => {}
+        }
+    }
+}
+
+fn bench_error(message: &'static str) -> BoxError {
+    Box::new(Error::other(message))
+}

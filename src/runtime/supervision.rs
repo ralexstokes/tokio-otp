@@ -104,6 +104,7 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) join_set: JoinSet<ChildEnvelope>,
     pub(crate) children: Vec<ChildEntry>,
     pub(crate) children_by_id: HashMap<String, ChildKey>,
+    pub(crate) running_children: usize,
     pub(crate) events: broadcast::Sender<SupervisorEvent>,
     pub(crate) snapshots: watch::Sender<SupervisorSnapshot>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
@@ -157,6 +158,7 @@ impl SupervisorRuntime {
             join_set: JoinSet::new(),
             children,
             children_by_id,
+            running_children: 0,
             events,
             snapshots,
             shutdown_rx,
@@ -327,8 +329,9 @@ impl SupervisorRuntime {
             return Err(ControlError::LastChildRemovalUnsupported);
         }
 
-        let (mode, grace, active) = {
+        let (mode, grace, active, was_running) = {
             let entry = &mut self.children[key];
+            let was_running = counts_as_running(entry.membership, entry.runtime.state);
             entry.membership = MembershipState::Removing;
             let active = entry.runtime.state.is_active();
             if active {
@@ -338,8 +341,12 @@ impl SupervisorRuntime {
                 entry.runtime.spec.shutdown_policy.mode,
                 entry.runtime.spec.shutdown_policy.grace,
                 active,
+                was_running,
             )
         };
+        if was_running {
+            self.running_children = self.running_children.saturating_sub(1);
+        }
 
         self.send_event(SupervisorEvent::ChildRemoveRequested { id: id.clone() });
 
@@ -594,6 +601,13 @@ impl SupervisorRuntime {
     }
 
     fn record_exit(&mut self, key: ChildKey, generation: u64, status: &ExitStatus) {
+        if counts_as_running(
+            self.children[key].membership,
+            self.children[key].runtime.state,
+        ) {
+            self.running_children = self.running_children.saturating_sub(1);
+        }
+
         let id = {
             let entry = &mut self.children[key];
             entry.runtime.state = RuntimeChildState::Stopped;
@@ -682,13 +696,14 @@ impl SupervisorRuntime {
 
     fn schedule_restart(&mut self, key: ChildKey) -> Result<Duration, SupervisorError> {
         let delay = {
+            let now = Instant::now();
             let child = &mut self.children[key].runtime;
-            child.restart_tracker.record(Instant::now());
+            child.restart_tracker.record(now);
             if child.restart_tracker.exceeded() {
                 None
             } else {
                 let delay = child.restart_tracker.backoff();
-                child.next_restart_deadline = Some(Instant::now() + delay);
+                child.next_restart_deadline = Some(now + delay);
                 Some(delay)
             }
         };
@@ -704,6 +719,37 @@ impl SupervisorRuntime {
     }
 
     async fn wait_for_restart_delay(&mut self, delay: Duration) -> Result<bool, SupervisorError> {
+        if delay.is_zero() {
+            if *self.shutdown_rx.borrow() {
+                self.queue_shutdown_exit().await;
+                return Ok(false);
+            }
+
+            tokio::task::yield_now().await;
+
+            if *self.shutdown_rx.borrow() {
+                self.queue_shutdown_exit().await;
+                return Ok(false);
+            }
+
+            while self.commands_open {
+                match self.command_rx.try_recv() {
+                    Ok(command) => Box::pin(self.handle_command(command)).await,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        self.commands_open = false;
+                        break;
+                    }
+                }
+
+                if self.pending_exit.is_some() {
+                    return Ok(false);
+                }
+            }
+
+            return Ok(true);
+        }
+
         let deadline = Instant::now() + delay;
         loop {
             tokio::select! {
@@ -729,23 +775,11 @@ impl SupervisorRuntime {
     }
 
     fn no_running_children(&self) -> bool {
-        self.children.iter().all(|entry| {
-            entry.membership == MembershipState::Removed
-                || entry.runtime.state == RuntimeChildState::Stopped
-        })
+        self.running_children == 0
     }
 
     fn running_child_count(&self) -> usize {
-        self.children
-            .iter()
-            .filter(|entry| {
-                entry.membership != MembershipState::Removed
-                    && matches!(
-                        entry.runtime.state,
-                        RuntimeChildState::Starting | RuntimeChildState::Running
-                    )
-            })
-            .count()
+        self.running_children
     }
 
     fn send_restart_event(&self, key: ChildKey, old_generation: u64, new_generation: u64) {
@@ -757,7 +791,9 @@ impl SupervisorRuntime {
     }
 
     pub(crate) fn send_event(&self, event: SupervisorEvent) {
-        self.publish_snapshot();
+        if event_updates_snapshot(&event) {
+            self.publish_snapshot();
+        }
         let child_path = event_child_id(&event)
             .and_then(|id| self.children_by_id.get(id))
             .map(|&key| self.children[key].formatted_path.as_str());
@@ -772,6 +808,37 @@ impl SupervisorRuntime {
     }
 
     fn snapshot_view(&self) -> SupervisorSnapshot {
+        let now = Instant::now();
+        let mut children = Vec::with_capacity(self.children_by_id.len());
+        for entry in &self.children {
+            if entry.membership == MembershipState::Removed {
+                continue;
+            }
+
+            children.push(ChildSnapshot {
+                id: entry.id.clone(),
+                generation: entry.runtime.generation,
+                state: match entry.runtime.state {
+                    RuntimeChildState::Starting => ChildStateView::Starting,
+                    RuntimeChildState::Running => ChildStateView::Running,
+                    RuntimeChildState::Stopping => ChildStateView::Stopping,
+                    RuntimeChildState::Stopped => ChildStateView::Stopped,
+                },
+                membership: match entry.membership {
+                    MembershipState::Active => ChildMembershipView::Active,
+                    MembershipState::Removing => ChildMembershipView::Removing,
+                    MembershipState::Removed => unreachable!("removed children filtered"),
+                },
+                last_exit: entry.last_exit.clone(),
+                restart_count: entry.runtime.restart_tracker.total_restarts(),
+                next_restart_in: entry
+                    .runtime
+                    .next_restart_deadline
+                    .map(|deadline| deadline.saturating_duration_since(now)),
+                supervisor: entry.nested_snapshot.as_ref().cloned().map(Box::new),
+            });
+        }
+
         SupervisorSnapshot {
             state: match self.state {
                 SupervisorState::Running => SupervisorStateView::Running,
@@ -780,33 +847,7 @@ impl SupervisorRuntime {
             },
             last_exit: self.last_exit,
             strategy: self.meta.strategy,
-            children: self
-                .children
-                .iter()
-                .filter(|entry| entry.membership != MembershipState::Removed)
-                .map(|entry| ChildSnapshot {
-                    id: entry.id.clone(),
-                    generation: entry.runtime.generation,
-                    state: match entry.runtime.state {
-                        RuntimeChildState::Starting => ChildStateView::Starting,
-                        RuntimeChildState::Running => ChildStateView::Running,
-                        RuntimeChildState::Stopping => ChildStateView::Stopping,
-                        RuntimeChildState::Stopped => ChildStateView::Stopped,
-                    },
-                    membership: match entry.membership {
-                        MembershipState::Active => ChildMembershipView::Active,
-                        MembershipState::Removing => ChildMembershipView::Removing,
-                        MembershipState::Removed => unreachable!("removed children filtered"),
-                    },
-                    last_exit: entry.last_exit.clone(),
-                    restart_count: entry.runtime.restart_tracker.total_restarts(),
-                    next_restart_in: entry
-                        .runtime
-                        .next_restart_deadline
-                        .map(|deadline| deadline.saturating_duration_since(Instant::now())),
-                    supervisor: entry.nested_snapshot.as_ref().cloned().map(Box::new),
-                })
-                .collect(),
+            children,
         }
     }
 }
@@ -868,6 +909,21 @@ impl TerminalStatus {
 pub(crate) enum DrainReason {
     Shutdown,
     GroupRestart,
+}
+
+fn counts_as_running(membership: MembershipState, state: RuntimeChildState) -> bool {
+    membership != MembershipState::Removed
+        && matches!(
+            state,
+            RuntimeChildState::Starting | RuntimeChildState::Running
+        )
+}
+
+fn event_updates_snapshot(event: &SupervisorEvent) -> bool {
+    !matches!(
+        event,
+        SupervisorEvent::SupervisorStarted | SupervisorEvent::ChildRestarted { .. }
+    )
 }
 
 fn event_child_id(event: &SupervisorEvent) -> Option<&str> {

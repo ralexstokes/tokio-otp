@@ -41,6 +41,7 @@ impl SupervisorRuntime {
     }
 
     fn cancel_running_children(&mut self) {
+        let mut cancelled = 0usize;
         for child in self.children.iter_mut().rev() {
             if child.membership == MembershipState::Removed {
                 continue;
@@ -51,8 +52,10 @@ impl SupervisorRuntime {
                 RuntimeChildState::Running | RuntimeChildState::Starting
             ) {
                 child.runtime.state = RuntimeChildState::Stopping;
+                cancelled = cancelled.saturating_add(1);
             }
         }
+        self.running_children = self.running_children.saturating_sub(cancelled);
         // Child tokens are children of group_token, so this cancels all of them.
         self.group_token.cancel();
     }

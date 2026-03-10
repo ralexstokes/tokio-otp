@@ -17,11 +17,15 @@ impl SupervisorRuntime {
         key: usize,
     ) -> Result<(Option<u64>, u64), SupervisorError> {
         self.clear_terminal_status(key);
-        let (child_id, generation, old_generation, future) = {
+        let (child_id, generation, old_generation, future, counted_before) = {
             let entry = self.children.get_mut(key).ok_or_else(|| {
                 SupervisorError::Internal(format!("missing child slot for key {key}"))
             })?;
             let child = &mut entry.runtime;
+            let counted_before = matches!(
+                child.state,
+                RuntimeChildState::Starting | RuntimeChildState::Running
+            );
 
             let old_generation = if child.has_started {
                 Some(child.generation)
@@ -48,7 +52,7 @@ impl SupervisorRuntime {
             };
             let future = child.spec.factory.make(ctx);
 
-            (child_id, generation, old_generation, future)
+            (child_id, generation, old_generation, future, counted_before)
         };
         let forwarder =
             NestedEventForwarder::new(self.events.clone(), child_id.clone(), generation);
@@ -90,13 +94,18 @@ impl SupervisorRuntime {
         );
         let task_id = abort_handle.id();
 
-        let entry = self.children.get_mut(key).ok_or_else(|| {
-            SupervisorError::Internal(format!("missing child slot for key {key}"))
-        })?;
-        let child = &mut entry.runtime;
-        child.has_started = true;
-        child.state = RuntimeChildState::Running;
-        child.abort_handle = Some(abort_handle);
+        {
+            let entry = self.children.get_mut(key).ok_or_else(|| {
+                SupervisorError::Internal(format!("missing child slot for key {key}"))
+            })?;
+            let child = &mut entry.runtime;
+            child.has_started = true;
+            child.state = RuntimeChildState::Running;
+            child.abort_handle = Some(abort_handle);
+        }
+        if !counted_before {
+            self.running_children = self.running_children.saturating_add(1);
+        }
         self.task_map.insert(task_id, TaskMeta { key, generation });
         self.send_event(SupervisorEvent::ChildStarted {
             id: child_id,

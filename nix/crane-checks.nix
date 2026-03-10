@@ -9,7 +9,22 @@ let
   craneLib = crane.mkLib pkgs;
   craneLibStable = craneLib.overrideToolchain rustToolchain;
   craneLibNightly = craneLib.overrideToolchain nightlyToolchain;
-  cargoSrc = craneLibStable.cleanCargoSource src;
+  cargoSrc = pkgs.lib.cleanSourceWith {
+    src = src;
+    filter =
+      path: _type:
+      let
+        relativePath = pkgs.lib.removePrefix "${toString src}/" (toString path);
+      in
+      !(
+        relativePath == ".git"
+        || pkgs.lib.hasPrefix ".git/" relativePath
+        || relativePath == "result"
+        || pkgs.lib.hasPrefix "result/" relativePath
+        || relativePath == "target"
+        || pkgs.lib.hasPrefix "target/" relativePath
+      );
+  };
   commonArgs = {
     src = cargoSrc;
     strictDeps = true;
