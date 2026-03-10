@@ -3,6 +3,8 @@ use crate::{
     event::ExitStatusView,
 };
 
+/// Internal exit classification used by the runtime before public projection
+/// into [`ExitStatusView`].
 #[derive(Debug)]
 pub(crate) enum ExitStatus {
     Completed,

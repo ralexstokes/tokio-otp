@@ -8,6 +8,25 @@ use crate::{
     supervisor::{Supervisor, SupervisorConfig},
 };
 
+/// Builder for constructing a [`Supervisor`] with validated configuration.
+///
+/// At minimum, one child must be added via [`child`](Self::child) before
+/// calling [`build`](Self::build).
+///
+/// # Example
+///
+/// ```no_run
+/// use tokio_supervisor::{ChildSpec, SupervisorBuilder, Strategy};
+///
+/// let supervisor = SupervisorBuilder::new()
+///     .strategy(Strategy::OneForOne)
+///     .child(ChildSpec::new("worker", |ctx| async move {
+///         ctx.token.cancelled().await;
+///         Ok(())
+///     }))
+///     .build()
+///     .expect("valid config");
+/// ```
 pub struct SupervisorBuilder {
     strategy: Strategy,
     restart_intensity: RestartIntensity,
@@ -26,6 +45,8 @@ impl Default for SupervisorBuilder {
 }
 
 impl SupervisorBuilder {
+    /// Creates a new builder with default settings: [`OneForOne`](Strategy::OneForOne)
+    /// strategy, default [`RestartIntensity`], and no children.
     pub fn new() -> Self {
         Self {
             strategy: Strategy::default(),
@@ -36,36 +57,56 @@ impl SupervisorBuilder {
         }
     }
 
+    /// Sets the restart strategy. See [`Strategy`] for options.
     #[must_use]
     pub fn strategy(mut self, strategy: Strategy) -> Self {
         self.strategy = strategy;
         self
     }
 
+    /// Sets the default restart intensity for all children that do not have a
+    /// per-child override.
     #[must_use]
     pub fn restart_intensity(mut self, intensity: RestartIntensity) -> Self {
         self.restart_intensity = intensity;
         self
     }
 
+    /// Appends a child to the supervisor. Children are started in the order
+    /// they are added.
     #[must_use]
     pub fn child(mut self, child: ChildSpec) -> Self {
         self.children.push(child);
         self
     }
 
+    /// Sets the bounded capacity of the internal control channel used for
+    /// runtime commands (add/remove child). Defaults to 64.
     #[must_use]
     pub fn control_channel_capacity(mut self, capacity: usize) -> Self {
         self.control_channel_capacity = capacity;
         self
     }
 
+    /// Sets the bounded capacity of the event broadcast channel. Slow
+    /// subscribers that fall behind this limit will receive a
+    /// [`RecvError::Lagged`](tokio::sync::broadcast::error::RecvError::Lagged)
+    /// error. Defaults to 256.
     #[must_use]
     pub fn event_channel_capacity(mut self, capacity: usize) -> Self {
         self.event_channel_capacity = capacity;
         self
     }
 
+    /// Validates the configuration and returns a ready-to-run [`Supervisor`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError`] if:
+    /// - No children were added.
+    /// - Two children share the same id.
+    /// - Any channel capacity is zero.
+    /// - Any restart intensity or backoff configuration is invalid.
     pub fn build(self) -> Result<Supervisor, BuildError> {
         if self.children.is_empty() {
             return Err(BuildError::EmptyChildren);

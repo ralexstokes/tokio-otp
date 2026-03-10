@@ -66,6 +66,9 @@ impl SupervisorRuntime {
         let started_at = StdInstant::now();
         let mut max_grace: Option<std::time::Duration> = None;
 
+        // Use a single deadline for the whole drain equal to the maximum grace
+        // among cooperative children. This keeps shutdown and `OneForAll`
+        // restarts from compounding per-child grace periods serially.
         for (_, child) in self.children.iter() {
             if child.membership == MembershipState::Removed || !child.runtime.state.is_active() {
                 continue;

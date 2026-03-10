@@ -5,6 +5,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{child::ChildSpecInner, restart::RestartIntensity, runtime::intensity::RestartTracker};
 
+/// Mutable per-child state managed by the supervisor runtime.
+///
+/// Tracks the child's current lifecycle state, its restart history, and the
+/// handles needed to cancel or abort the running Tokio task.
 pub(crate) struct ChildRuntime {
     pub(crate) spec: Arc<ChildSpecInner>,
     pub(crate) restart_tracker: RestartTracker,

@@ -32,8 +32,13 @@ use super::{
     exit::ExitStatus,
 };
 
+/// Slab key for a child entry. Stable across restarts but invalidated when the
+/// child is removed from the slab.
 type ChildKey = usize;
 
+/// Message returned by a child task through the `JoinSet`, carrying the task
+/// result alongside the bookkeeping keys needed to correlate it back to the
+/// correct child entry.
 pub(crate) struct ChildEnvelope {
     pub(crate) key: ChildKey,
     pub(crate) instance: u64,
@@ -41,6 +46,9 @@ pub(crate) struct ChildEnvelope {
     pub(crate) result: crate::child::ChildResult,
 }
 
+/// Metadata stored alongside a Tokio task ID so that `JoinError`s (panics,
+/// cancellations) can be mapped back to the originating child even when the
+/// `ChildEnvelope` is not available.
 #[derive(Clone, Copy)]
 pub(crate) struct TaskMeta {
     pub(crate) key: ChildKey,
@@ -62,9 +70,17 @@ pub(crate) enum MembershipState {
     Removed,
 }
 
+/// Per-child bookkeeping entry stored in the supervisor's slab.
+///
+/// `instance` is a monotonically increasing identifier that distinguishes
+/// different slab occupants at the same key (e.g. after a child is removed and
+/// a new one is inserted at the recycled key). Combined with `generation`
+/// (which counts restarts of the *same* child spec), this pair uniquely
+/// identifies every task the supervisor has ever spawned.
 pub(crate) struct ChildEntry {
     pub(crate) id: String,
     pub(crate) formatted_path: String,
+    /// Unique instance counter for this slab slot. See struct-level docs.
     pub(crate) instance: u64,
     pub(crate) runtime: ChildRuntime,
     terminal_status: Option<TerminalStatus>,
@@ -105,9 +121,30 @@ pub(crate) struct RuntimeMeta {
     pub(crate) observability: SupervisorObservability,
 }
 
+/// Core state machine that drives the supervisor's select loop.
+///
+/// # Key invariants
+///
+/// - `running_children` tracks children in `Starting` or `Running` state whose
+///   `membership` is not `Removed`. It is maintained incrementally by
+///   `spawn_child`, `record_exit`, and `cancel_running_children`.
+/// - `live_tasks` tracks children that have a live Tokio task (i.e. an
+///   `abort_handle` was stored). It is decremented in `consume_joined_child`
+///   and `finalize_removed_child`. When it reaches zero during shutdown the
+///   drain loop exits.
+/// - `child_order` preserves insertion order for deterministic snapshot output
+///   and `OneForAll` restart sequencing.
+/// - `task_map` maps Tokio `Id` → `TaskMeta` so that `JoinError`s (which
+///   don't carry the `ChildEnvelope`) can be attributed to the correct child.
+/// - `pending_exit` is set when a fatal condition (e.g. shutdown or intensity
+///   breach) is detected inside a nested call and must be surfaced to the
+///   top-level loop on the next iteration.
 pub(crate) struct SupervisorRuntime {
     pub(crate) meta: RuntimeMeta,
     pub(crate) state: SupervisorState,
+    /// Parent token whose children are the per-child tokens. Cancelling this
+    /// token cancels all children at once (used in shutdown and `OneForAll`
+    /// restarts).
     pub(crate) group_token: CancellationToken,
     pub(crate) join_set: JoinSet<ChildEnvelope>,
     pub(crate) children: Slab<ChildEntry>,
@@ -245,6 +282,9 @@ impl SupervisorRuntime {
     }
 
     fn finish_natural_exit(&mut self) -> Result<SupervisorExit, SupervisorError> {
+        // Only the latest terminal status for each child counts here. Failures
+        // from superseded generations are cleared by a later successful
+        // restart, so they do not poison a clean natural exit.
         let exit = if self
             .child_order
             .iter()
@@ -715,6 +755,8 @@ impl SupervisorRuntime {
             "restarting child group after exit from {}",
             self.children[failing_key].id
         );
+        // Drain the old generation completely before creating a fresh group
+        // token so `OneForAll` restarts never overlap old and new tasks.
         self.drain_for_group_restart().await?;
         self.group_token = CancellationToken::new();
         let keys = self.child_order.clone();
@@ -758,6 +800,9 @@ impl SupervisorRuntime {
     }
 
     async fn wait_for_restart_delay(&mut self, delay: Duration) -> Result<bool, SupervisorError> {
+        // Shutdown preempts pending restarts, including the zero-delay case.
+        // If command handling has already queued shutdown in `pending_exit`,
+        // the restart is also abandoned.
         if delay.is_zero() {
             if *self.shutdown_rx.borrow() {
                 self.queue_shutdown_exit().await;
@@ -941,6 +986,8 @@ impl SupervisorRuntime {
 }
 
 fn classify_join_error(err: JoinError) -> ExitStatus {
+    // Tokio reports aborts and cancellation through `is_cancelled`; any other
+    // join error is treated as a panic from the child task.
     if err.is_cancelled() {
         ExitStatus::Aborted
     } else {
@@ -976,6 +1023,7 @@ struct ClassifiedExit {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// Tracks the newest terminal outcome observed for a child generation.
 struct TerminalStatus {
     generation: u64,
     is_failure: bool,
@@ -994,6 +1042,10 @@ impl TerminalStatus {
     }
 }
 
+/// Why the supervisor is draining its join set. Affects how exits from
+/// `Temporary` children are handled: during a `GroupRestart`, temporary
+/// children that exit are recorded as terminal (they won't be respawned);
+/// during `Shutdown`, all exits are simply collected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DrainReason {
     Shutdown,

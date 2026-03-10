@@ -7,6 +7,14 @@ use tokio::time::Instant;
 
 use crate::restart::{BackoffPolicy, RestartIntensity};
 
+/// Sliding-window restart rate limiter.
+///
+/// Maintains a deque of restart timestamps. On each `record` call, timestamps
+/// older than `intensity.within` are evicted. If the remaining count exceeds
+/// `intensity.max_restarts`, [`exceeded`](Self::exceeded) returns `true`.
+///
+/// Also computes the backoff delay for the next restart attempt based on the
+/// configured [`BackoffPolicy`].
 pub(crate) struct RestartTracker {
     intensity: RestartIntensity,
     times: VecDeque<Instant>,

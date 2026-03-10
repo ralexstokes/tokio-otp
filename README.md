@@ -1,9 +1,11 @@
 # tokio-supervisor
 
 Structured task supervision for tokio.
-Inspired by Erlang/OTP-style supervisor trees.
+Inspired by Erlang/OTP-style supervision trees.
 
-**Note:** this library only provides supervisor trees with no distributed supervision, or anything like an actor runtime.
+## Getting started
+
+Check the Rust docs for more information, e.g. `just doc`.
 
 ## Development
 

@@ -6,8 +6,12 @@
 
 use tokio::sync::{broadcast, watch};
 
+/// Extension trait for `broadcast::Receiver<SupervisorEvent>` that adds a
+/// convenience method for waiting until a specific event arrives.
 #[allow(async_fn_in_trait)]
 pub trait SupervisorEventReceiverExt {
+    /// Receives events in a loop, returning the first one for which
+    /// `predicate` returns `true`. Intermediate events are discarded.
     async fn wait_for_event<P>(
         &mut self,
         predicate: P,
@@ -33,8 +37,12 @@ impl SupervisorEventReceiverExt for broadcast::Receiver<crate::SupervisorEvent> 
     }
 }
 
+/// Extension trait for `watch::Receiver<SupervisorSnapshot>` that adds a
+/// convenience method for waiting until the snapshot satisfies a condition.
 #[allow(async_fn_in_trait)]
 pub trait SupervisorSnapshotReceiverExt {
+    /// Checks the current snapshot and, if it does not match, waits for
+    /// subsequent updates until `predicate` returns `true`.
     async fn wait_for_snapshot<P>(
         &mut self,
         predicate: P,

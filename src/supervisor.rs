@@ -24,6 +24,21 @@ use crate::{
     strategy::Strategy,
 };
 
+/// A configured supervisor, ready to be run or spawned.
+///
+/// Construct one via [`SupervisorBuilder`](crate::SupervisorBuilder). Then
+/// either:
+///
+/// - Call [`run`](Self::run) to drive the supervisor on the current task
+///   (blocks until exit).
+/// - Call [`spawn`](Self::spawn) to run it as a background Tokio task and get
+///   a [`SupervisorHandle`](crate::SupervisorHandle).
+/// - Call [`into_child_spec`](Self::into_child_spec) to nest this supervisor
+///   as a child of another supervisor.
+///
+/// Cloning a `Supervisor` produces an independent copy that can be started
+/// separately. The clone shares the same child specs (which are
+/// reference-counted) but runs its own supervision tree.
 #[derive(Clone)]
 pub struct Supervisor {
     pub(crate) config: SupervisorConfig,
@@ -43,6 +58,12 @@ impl Supervisor {
         Self { config }
     }
 
+    /// Runs the supervisor on the current task, blocking until it exits.
+    ///
+    /// No [`SupervisorHandle`](crate::SupervisorHandle) is created, so
+    /// shutdown must be driven externally (e.g. via a signal handler that
+    /// drops a `CancellationToken` observed by all children). For most use
+    /// cases, prefer [`spawn`](Self::spawn).
     pub async fn run(self) -> Result<SupervisorExit, SupervisorError> {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(self.config.event_channel_capacity);
@@ -59,6 +80,8 @@ impl Supervisor {
         .await
     }
 
+    /// Spawns the supervisor as a background Tokio task and returns a handle
+    /// for control and observation.
     pub fn spawn(self) -> SupervisorHandle {
         self.spawn_with_control(Arc::new(NestedControlRegistry::default()), Vec::new())
     }

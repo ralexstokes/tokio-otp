@@ -185,6 +185,23 @@ pub(crate) struct SupervisorHandleInit {
     pub(crate) join_handle: SupervisorJoinHandle,
 }
 
+/// Handle to a running supervisor, returned by [`Supervisor::spawn`](crate::Supervisor::spawn).
+///
+/// The handle is cheaply cloneable and can be shared across tasks. It provides:
+///
+/// - **Shutdown**: [`shutdown`](Self::shutdown) /
+///   [`shutdown_and_wait`](Self::shutdown_and_wait).
+/// - **Dynamic children**: [`add_child`](Self::add_child) /
+///   [`remove_child`](Self::remove_child) (and `_at` / `try_` variants for
+///   nested supervisors and back-pressure control).
+/// - **Observability**: [`subscribe`](Self::subscribe) for events,
+///   [`snapshot`](Self::snapshot) / [`subscribe_snapshots`](Self::subscribe_snapshots)
+///   for state.
+/// - **Completion**: [`wait`](Self::wait) to await the supervisor's exit.
+///
+/// Dropping all clones of the handle does **not** shut down the supervisor.
+/// Call [`shutdown`](Self::shutdown) explicitly. [`wait`](Self::wait) does not
+/// resolve until the supervisor has drained and joined its child tasks.
 #[derive(Clone)]
 pub struct SupervisorHandle {
     shutdown_tx: watch::Sender<bool>,
@@ -211,23 +228,44 @@ impl SupervisorHandle {
         }
     }
 
+    /// Requests a graceful shutdown of the supervisor.
+    ///
+    /// This is non-blocking: it signals the supervisor to begin its shutdown
+    /// sequence and returns immediately. Use [`wait`](Self::wait) or
+    /// [`shutdown_and_wait`](Self::shutdown_and_wait) to await completion.
+    ///
+    /// Calling `shutdown` multiple times is harmless.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
 
+    /// Requests a graceful shutdown and waits for the supervisor to fully stop.
     pub async fn shutdown_and_wait(&self) -> Result<SupervisorExit, SupervisorError> {
         self.shutdown();
         self.wait().await
     }
 
+    /// Adds a new child to the supervisor at runtime.
+    ///
+    /// Waits if the control channel is full. Returns [`ControlError::Busy`] is
+    /// not possible with this variant; use [`try_add_child`](Self::try_add_child)
+    /// if you need non-blocking back-pressure semantics.
     pub async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
         self.control_endpoint().add_child(child).await
     }
 
+    /// Like [`add_child`](Self::add_child), but returns
+    /// [`ControlError::Busy`] immediately if the control channel is full
+    /// instead of waiting.
     pub async fn try_add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
         self.control_endpoint().try_add_child(child).await
     }
 
+    /// Adds a child to a nested supervisor identified by `path`.
+    ///
+    /// `path` is an iterable of child ids that form the route from this
+    /// supervisor down to the target nested supervisor. An empty path targets
+    /// this supervisor directly.
     pub async fn add_child_at<I, S>(&self, path: I, child: ChildSpec) -> Result<(), ControlError>
     where
         I: IntoIterator<Item = S>,
@@ -240,6 +278,9 @@ impl SupervisorHandle {
         }
     }
 
+    /// Like [`add_child_at`](Self::add_child_at), but returns
+    /// [`ControlError::Busy`] if the target supervisor's control channel is
+    /// full.
     pub async fn try_add_child_at<I, S>(
         &self,
         path: I,
@@ -256,14 +297,25 @@ impl SupervisorHandle {
         }
     }
 
+    /// Removes a child by id from this supervisor.
+    ///
+    /// The child is stopped according to its [`ShutdownPolicy`](crate::ShutdownPolicy)
+    /// before being removed. A supervisor must always have at least one child;
+    /// attempting to remove the last active child returns
+    /// [`ControlError::LastChildRemovalUnsupported`].
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         self.control_endpoint().remove_child(id.into()).await
     }
 
+    /// Like [`remove_child`](Self::remove_child), but returns
+    /// [`ControlError::Busy`] if the control channel is full.
     pub async fn try_remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         self.control_endpoint().try_remove_child(id.into()).await
     }
 
+    /// Removes a child from a nested supervisor identified by `path`.
+    ///
+    /// See [`add_child_at`](Self::add_child_at) for the meaning of `path`.
     pub async fn remove_child_at<I, S>(
         &self,
         path: I,
@@ -280,6 +332,9 @@ impl SupervisorHandle {
         }
     }
 
+    /// Like [`remove_child_at`](Self::remove_child_at), but returns
+    /// [`ControlError::Busy`] if the target supervisor's control channel is
+    /// full.
     pub async fn try_remove_child_at<I, S>(
         &self,
         path: I,
@@ -296,6 +351,12 @@ impl SupervisorHandle {
         }
     }
 
+    /// Waits for the supervisor to exit and returns its exit reason.
+    ///
+    /// The first caller to `wait` joins the underlying Tokio task. Subsequent
+    /// callers (including concurrent ones from cloned handles) receive the
+    /// same result via a shared watch channel. A successful return means the
+    /// runtime has finished draining and joining supervised child tasks.
     pub async fn wait(&self) -> Result<SupervisorExit, SupervisorError> {
         if let Some(result) = self.done_rx.borrow().clone() {
             return result;
@@ -333,14 +394,23 @@ impl SupervisorHandle {
         })
     }
 
+    /// Returns a new receiver for supervisor lifecycle events.
+    ///
+    /// The receiver is backed by a bounded broadcast channel. If the receiver
+    /// falls behind by more than the configured
+    /// [`event_channel_capacity`](crate::SupervisorBuilder::event_channel_capacity),
+    /// it will receive a `Lagged` error and skip missed events.
     pub fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.events_tx.subscribe()
     }
 
+    /// Returns a clone of the latest [`SupervisorSnapshot`].
     pub fn snapshot(&self) -> SupervisorSnapshot {
         self.snapshots_rx.borrow().clone()
     }
 
+    /// Returns a watch receiver that is updated each time the supervisor's
+    /// snapshot changes. Useful for polling or `wait_for`-style patterns.
     pub fn subscribe_snapshots(&self) -> watch::Receiver<SupervisorSnapshot> {
         self.snapshots_rx.clone()
     }
