@@ -3,6 +3,8 @@
 Structured task supervision for tokio.
 Inspired by Erlang/OTP-style supervisor trees.
 
+**Note:** this library only provides supervisor trees with no distributed supervision, or anything like an actor runtime.
+
 ## Development
 
 Use the flake for both local tooling and CI:
