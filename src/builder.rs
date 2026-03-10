@@ -29,16 +29,19 @@ impl SupervisorBuilder {
         }
     }
 
+    #[must_use]
     pub fn strategy(mut self, strategy: Strategy) -> Self {
         self.strategy = strategy;
         self
     }
 
+    #[must_use]
     pub fn restart_intensity(mut self, intensity: RestartIntensity) -> Self {
         self.restart_intensity = intensity;
         self
     }
 
+    #[must_use]
     pub fn child(mut self, child: ChildSpec) -> Self {
         self.children.push(child);
         self

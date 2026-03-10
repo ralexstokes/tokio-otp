@@ -16,7 +16,7 @@ use crate::{
     error::{ControlError, SupervisorError, SupervisorExit},
     event::{ExitStatusView, SupervisorEvent},
     handle::{NestedControlRegistry, SupervisorCommand},
-    observability::SupervisorObservability,
+    observability::{SupervisorObservability, format_child_path},
     restart::{Restart, RestartIntensity},
     snapshot::{
         ChildMembershipView, ChildSnapshot, ChildStateView, NestedSnapshotUpdate,
@@ -61,6 +61,7 @@ pub(crate) enum MembershipState {
 
 pub(crate) struct ChildEntry {
     pub(crate) id: String,
+    pub(crate) formatted_path: String,
     pub(crate) runtime: ChildRuntime,
     terminal_status: Option<TerminalStatus>,
     last_exit: Option<ExitStatusView>,
@@ -71,11 +72,13 @@ pub(crate) struct ChildEntry {
 impl ChildEntry {
     fn new(
         id: String,
+        formatted_path: String,
         spec: Arc<crate::child::ChildSpecInner>,
         default_restart_intensity: RestartIntensity,
     ) -> Self {
         Self {
             id,
+            formatted_path,
             runtime: ChildRuntime::new(spec, default_restart_intensity),
             terminal_status: None,
             last_exit: None,
@@ -125,8 +128,14 @@ impl SupervisorRuntime {
 
         for (key, spec) in config.children.into_iter().enumerate() {
             let id = spec.id.clone();
+            let formatted_path = format_child_path(&path_prefix, &id);
             children_by_id.insert(id.clone(), key);
-            children.push(ChildEntry::new(id, spec, default_restart_intensity));
+            children.push(ChildEntry::new(
+                id,
+                formatted_path,
+                spec,
+                default_restart_intensity,
+            ));
         }
         let (nested_snapshot_tx, nested_snapshot_rx) = mpsc::unbounded_channel();
 
@@ -161,6 +170,10 @@ impl SupervisorRuntime {
         }
 
         loop {
+            if let Some(result) = self.pending_exit.take() {
+                return result;
+            }
+
             if self.join_set.is_empty() && self.no_running_children() {
                 return self.finish_natural_exit();
             }
@@ -248,8 +261,10 @@ impl SupervisorRuntime {
         }
 
         let key = self.children.len();
+        let formatted_path = format_child_path(&self.path_prefix, &id);
         self.children.push(ChildEntry::new(
             id.clone(),
+            formatted_path,
             Arc::clone(&child.inner),
             self.default_restart_intensity,
         ));
@@ -737,8 +752,11 @@ impl SupervisorRuntime {
 
     pub(crate) fn send_event(&self, event: SupervisorEvent) {
         self.publish_snapshot();
+        let child_path = event_child_id(&event)
+            .and_then(|id| self.children_by_id.get(id))
+            .map(|&key| self.children[key].formatted_path.as_str());
         self.observability
-            .emit_event(&event, self.running_child_count());
+            .emit_event(&event, self.running_child_count(), child_path);
         let _ = self.events.send(event);
     }
 
@@ -843,4 +861,21 @@ impl TerminalStatus {
 pub(crate) enum DrainReason {
     Shutdown,
     GroupRestart,
+}
+
+fn event_child_id(event: &SupervisorEvent) -> Option<&str> {
+    match event {
+        SupervisorEvent::ChildStarted { id, .. }
+        | SupervisorEvent::ChildExited { id, .. }
+        | SupervisorEvent::ChildRestartScheduled { id, .. }
+        | SupervisorEvent::ChildRestarted { id, .. }
+        | SupervisorEvent::ChildRemoveRequested { id }
+        | SupervisorEvent::ChildRemoved { id }
+        | SupervisorEvent::Nested { id, .. } => Some(id),
+        SupervisorEvent::SupervisorStarted
+        | SupervisorEvent::SupervisorStopping
+        | SupervisorEvent::SupervisorStopped
+        | SupervisorEvent::GroupRestartScheduled { .. }
+        | SupervisorEvent::RestartIntensityExceeded => None,
+    }
 }

@@ -58,6 +58,7 @@ impl SupervisorRuntime {
     }
 
     async fn drain_children(&mut self, reason: DrainReason) -> Result<(), SupervisorError> {
+        self.command_rx.close();
         let started_at = StdInstant::now();
         let mut max_grace: Option<std::time::Duration> = None;
 

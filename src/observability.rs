@@ -44,9 +44,14 @@ impl SupervisorObservability {
         format_child_path(&self.path_prefix, child_id)
     }
 
-    pub(crate) fn emit_event(&self, event: &SupervisorEvent, running_children: usize) {
-        self.emit_tracing_event(event);
-        self.emit_metrics(event, running_children);
+    pub(crate) fn emit_event(
+        &self,
+        event: &SupervisorEvent,
+        running_children: usize,
+        child_path: Option<&str>,
+    ) {
+        self.emit_tracing_event(event, child_path);
+        self.emit_metrics(event, running_children, child_path);
     }
 
     pub(crate) fn emit_nested_event_forwarding_lag(&self, dropped_events: u64) {
@@ -143,7 +148,14 @@ impl SupervisorObservability {
     ) {
     }
 
-    fn emit_tracing_event(&self, event: &SupervisorEvent) {
+    fn resolve_child_path<'a>(&'a self, child_id: &str, precomputed: Option<&'a str>) -> String {
+        match precomputed {
+            Some(path) => path.to_owned(),
+            None => self.child_path(child_id),
+        }
+    }
+
+    fn emit_tracing_event(&self, event: &SupervisorEvent, child_path: Option<&str>) {
         match event {
             SupervisorEvent::SupervisorStarted => info!(
                 supervisor_name = %self.supervisor_name,
@@ -172,7 +184,7 @@ impl SupervisorObservability {
                 supervisor_path = %self.supervisor_path,
                 nested_id = %id,
                 nested_generation = *generation,
-                nested_path = %self.child_path(id),
+                nested_path = %self.resolve_child_path(id, child_path),
                 leaf_kind = event_kind(event.leaf()),
                 "nested event forwarded"
             ),
@@ -180,7 +192,7 @@ impl SupervisorObservability {
                 supervisor_name = %self.supervisor_name,
                 supervisor_path = %self.supervisor_path,
                 child_id = %id,
-                child_path = %self.child_path(id),
+                child_path = %self.resolve_child_path(id, child_path),
                 generation = *generation,
                 strategy = self.strategy_label,
                 "child started"
@@ -189,7 +201,7 @@ impl SupervisorObservability {
                 supervisor_name = %self.supervisor_name,
                 supervisor_path = %self.supervisor_path,
                 child_id = %id,
-                child_path = %self.child_path(id),
+                child_path = %self.resolve_child_path(id, child_path),
                 strategy = self.strategy_label,
                 "child removal requested"
             ),
@@ -197,7 +209,7 @@ impl SupervisorObservability {
                 supervisor_name = %self.supervisor_name,
                 supervisor_path = %self.supervisor_path,
                 child_id = %id,
-                child_path = %self.child_path(id),
+                child_path = %self.resolve_child_path(id, child_path),
                 strategy = self.strategy_label,
                 "child removed"
             ),
@@ -210,7 +222,7 @@ impl SupervisorObservability {
                     supervisor_name = %self.supervisor_name,
                     supervisor_path = %self.supervisor_path,
                     child_id = %id,
-                    child_path = %self.child_path(id),
+                    child_path = %self.resolve_child_path(id, child_path),
                     generation = *generation,
                     status = "completed",
                     strategy = self.strategy_label,
@@ -220,7 +232,7 @@ impl SupervisorObservability {
                     supervisor_name = %self.supervisor_name,
                     supervisor_path = %self.supervisor_path,
                     child_id = %id,
-                    child_path = %self.child_path(id),
+                    child_path = %self.resolve_child_path(id, child_path),
                     generation = *generation,
                     status = "failed",
                     error = %message,
@@ -231,7 +243,7 @@ impl SupervisorObservability {
                     supervisor_name = %self.supervisor_name,
                     supervisor_path = %self.supervisor_path,
                     child_id = %id,
-                    child_path = %self.child_path(id),
+                    child_path = %self.resolve_child_path(id, child_path),
                     generation = *generation,
                     status = "panicked",
                     strategy = self.strategy_label,
@@ -241,7 +253,7 @@ impl SupervisorObservability {
                     supervisor_name = %self.supervisor_name,
                     supervisor_path = %self.supervisor_path,
                     child_id = %id,
-                    child_path = %self.child_path(id),
+                    child_path = %self.resolve_child_path(id, child_path),
                     generation = *generation,
                     status = "aborted",
                     strategy = self.strategy_label,
@@ -256,7 +268,7 @@ impl SupervisorObservability {
                 supervisor_name = %self.supervisor_name,
                 supervisor_path = %self.supervisor_path,
                 child_id = %id,
-                child_path = %self.child_path(id),
+                child_path = %self.resolve_child_path(id, child_path),
                 generation = *generation,
                 delay_ms = delay.as_millis() as u64,
                 strategy = self.strategy_label,
@@ -270,7 +282,7 @@ impl SupervisorObservability {
                 supervisor_name = %self.supervisor_name,
                 supervisor_path = %self.supervisor_path,
                 child_id = %id,
-                child_path = %self.child_path(id),
+                child_path = %self.resolve_child_path(id, child_path),
                 old_generation = *old_generation,
                 new_generation = *new_generation,
                 strategy = self.strategy_label,
@@ -293,7 +305,12 @@ impl SupervisorObservability {
     }
 
     #[cfg(feature = "metrics")]
-    fn emit_metrics(&self, event: &SupervisorEvent, running_children: usize) {
+    fn emit_metrics(
+        &self,
+        event: &SupervisorEvent,
+        running_children: usize,
+        child_path: Option<&str>,
+    ) {
         gauge!(
             "supervisor.children.running",
             "supervisor" => self.supervisor_name.clone(),
@@ -307,7 +324,7 @@ impl SupervisorObservability {
                 counter!(
                     "supervisor.children.started",
                     "supervisor" => self.supervisor_name.clone(),
-                    "path" => self.child_path(id),
+                    "path" => self.resolve_child_path(id, child_path),
                     "child_id" => id.clone(),
                     "strategy" => self.strategy_label,
                 )
@@ -317,7 +334,7 @@ impl SupervisorObservability {
                 counter!(
                     "supervisor.children.exited",
                     "supervisor" => self.supervisor_name.clone(),
-                    "path" => self.child_path(id),
+                    "path" => self.resolve_child_path(id, child_path),
                     "child_id" => id.clone(),
                     "strategy" => self.strategy_label,
                     "status" => exit_status_label(status),
@@ -328,7 +345,7 @@ impl SupervisorObservability {
                 counter!(
                     "supervisor.restarts",
                     "supervisor" => self.supervisor_name.clone(),
-                    "path" => self.child_path(id),
+                    "path" => self.resolve_child_path(id, child_path),
                     "child_id" => id.clone(),
                     "strategy" => self.strategy_label,
                 )
@@ -355,7 +372,13 @@ impl SupervisorObservability {
     }
 
     #[cfg(not(feature = "metrics"))]
-    fn emit_metrics(&self, _event: &SupervisorEvent, _running_children: usize) {}
+    fn emit_metrics(
+        &self,
+        _event: &SupervisorEvent,
+        _running_children: usize,
+        _child_path: Option<&str>,
+    ) {
+    }
 }
 
 pub(crate) fn format_path(path_prefix: &[String]) -> String {
@@ -446,15 +469,15 @@ mod tests {
         let nested = SupervisorObservability::new(vec!["nested".to_owned()], Strategy::OneForAll);
 
         assert_tracing_output(
-            || root.emit_event(&SupervisorEvent::SupervisorStarted, 0),
+            || root.emit_event(&SupervisorEvent::SupervisorStarted, 0, None),
             &["supervisor started", r#""supervisor_path":"root""#],
         );
         assert_tracing_output(
-            || root.emit_event(&SupervisorEvent::SupervisorStopping, 0),
+            || root.emit_event(&SupervisorEvent::SupervisorStopping, 0, None),
             &["supervisor stopping", r#""supervisor_path":"root""#],
         );
         assert_tracing_output(
-            || root.emit_event(&SupervisorEvent::SupervisorStopped, 0),
+            || root.emit_event(&SupervisorEvent::SupervisorStopped, 0, None),
             &["supervisor stopped", r#""supervisor_path":"root""#],
         );
         assert_tracing_output(
@@ -466,6 +489,7 @@ mod tests {
                         event: Box::new(SupervisorEvent::SupervisorStarted),
                     },
                     0,
+                    None,
                 )
             },
             &["nested event forwarded", r#""nested_path":"root.inner""#],
@@ -478,6 +502,7 @@ mod tests {
                         generation: 0,
                     },
                     1,
+                    None,
                 )
             },
             &["child started", r#""child_path":"root.worker""#],
@@ -489,6 +514,7 @@ mod tests {
                         id: "worker".to_owned(),
                     },
                     0,
+                    None,
                 )
             },
             &["child removal requested", r#""child_path":"root.worker""#],
@@ -500,6 +526,7 @@ mod tests {
                         id: "worker".to_owned(),
                     },
                     0,
+                    None,
                 )
             },
             &["child removed", r#""child_path":"root.worker""#],
@@ -513,6 +540,7 @@ mod tests {
                         status: ExitStatusView::Failed("boom".to_owned()),
                     },
                     0,
+                    None,
                 )
             },
             &[
@@ -530,6 +558,7 @@ mod tests {
                         delay: Duration::from_millis(10),
                     },
                     0,
+                    None,
                 )
             },
             &["child restart scheduled", r#""child_path":"root.worker""#],
@@ -543,6 +572,7 @@ mod tests {
                         new_generation: 1,
                     },
                     1,
+                    None,
                 )
             },
             &["child restarted", r#""child_path":"root.worker""#],
@@ -554,12 +584,13 @@ mod tests {
                         delay: Duration::from_millis(20),
                     },
                     0,
+                    None,
                 )
             },
             &["group restart scheduled", r#""supervisor_path":"root""#],
         );
         assert_tracing_output(
-            || root.emit_event(&SupervisorEvent::RestartIntensityExceeded, 0),
+            || root.emit_event(&SupervisorEvent::RestartIntensityExceeded, 0, None),
             &["restart intensity exceeded", r#""supervisor_path":"root""#],
         );
         assert_tracing_output(
@@ -570,6 +601,7 @@ mod tests {
                         generation: 3,
                     },
                     1,
+                    None,
                 )
             },
             &[
@@ -604,6 +636,7 @@ mod tests {
                     generation: 1,
                 },
                 1,
+                None,
             );
             observability.emit_event(
                 &SupervisorEvent::ChildExited {
@@ -612,6 +645,7 @@ mod tests {
                     status: ExitStatusView::Failed("boom".to_owned()),
                 },
                 0,
+                None,
             );
             observability.emit_event(
                 &SupervisorEvent::ChildRestarted {
@@ -620,8 +654,9 @@ mod tests {
                     new_generation: 2,
                 },
                 1,
+                None,
             );
-            observability.emit_event(&SupervisorEvent::RestartIntensityExceeded, 0);
+            observability.emit_event(&SupervisorEvent::RestartIntensityExceeded, 0, None);
             observability.emit_nested_event_forwarding_lag(3);
             observability.record_shutdown_timeout("remove_child", Some("leaf"));
             observability.record_shutdown_duration(
