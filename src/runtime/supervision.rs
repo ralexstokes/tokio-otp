@@ -19,7 +19,6 @@ use crate::{
 use super::{
     child_runtime::{ChildRuntime, RuntimeChildState},
     exit::ExitStatus,
-    intensity::RestartTracker,
 };
 
 pub(crate) struct ChildEnvelope {
@@ -42,7 +41,6 @@ pub(crate) enum SupervisorState {
 
 pub(crate) struct SupervisorRuntime {
     pub(crate) strategy: Strategy,
-    pub(crate) restart_tracker: RestartTracker,
     pub(crate) state: SupervisorState,
     pub(crate) group_token: CancellationToken,
     pub(crate) join_set: JoinSet<ChildEnvelope>,
@@ -63,11 +61,15 @@ impl SupervisorRuntime {
     ) -> Self {
         let child_names: Vec<String> = config.children.iter().map(|s| s.id.clone()).collect();
         let child_count = config.children.len();
-        let children = config.children.into_iter().map(ChildRuntime::new).collect();
+        let default_restart_intensity = config.restart_intensity;
+        let children = config
+            .children
+            .into_iter()
+            .map(|spec| ChildRuntime::new(spec, default_restart_intensity))
+            .collect();
 
         Self {
             strategy: config.strategy,
-            restart_tracker: RestartTracker::new(config.restart_intensity),
             state: SupervisorState::Running,
             group_token: CancellationToken::new(),
             join_set: JoinSet::new(),
@@ -232,7 +234,7 @@ impl SupervisorRuntime {
         idx: usize,
         previous_generation: u64,
     ) -> Result<(), SupervisorError> {
-        let delay = self.schedule_restart(Some(idx))?;
+        let delay = self.schedule_restart(idx)?;
         self.send_event(SupervisorEvent::ChildRestartScheduled {
             id: self.child_names[idx].clone(),
             generation: previous_generation,
@@ -254,7 +256,7 @@ impl SupervisorRuntime {
         &mut self,
         failing_idx: usize,
     ) -> Result<(), SupervisorError> {
-        let delay = self.schedule_restart(None)?;
+        let delay = self.schedule_restart(failing_idx)?;
         self.send_event(SupervisorEvent::GroupRestartScheduled { delay });
         if !self.wait_for_restart_delay(delay).await? {
             return Ok(());
@@ -278,15 +280,23 @@ impl SupervisorRuntime {
         Ok(())
     }
 
-    fn schedule_restart(&mut self, child_idx: Option<usize>) -> Result<Duration, SupervisorError> {
-        self.restart_tracker.record(Instant::now());
-        if self.restart_tracker.exceeded() {
+    fn schedule_restart(&mut self, idx: usize) -> Result<Duration, SupervisorError> {
+        let delay = {
+            let child = &mut self.children[idx];
+            child.restart_tracker.record(Instant::now());
+            if child.restart_tracker.exceeded() {
+                None
+            } else {
+                Some(child.restart_tracker.backoff())
+            }
+        };
+
+        let Some(delay) = delay else {
             self.send_event(SupervisorEvent::RestartIntensityExceeded);
             return Err(SupervisorError::RestartIntensityExceeded);
-        }
+        };
 
-        let delay = self.restart_tracker.backoff();
-        let child_id = child_idx.map(|i| &*self.child_names[i]);
+        let child_id = &*self.child_names[idx];
         trace!(?child_id, ?delay, "scheduled child restart");
         Ok(delay)
     }

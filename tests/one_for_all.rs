@@ -7,7 +7,10 @@ use tokio::{
     sync::{Barrier, Notify, mpsc},
     time::{Duration, timeout},
 };
-use tokio_supervisor::{ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorExit};
+use tokio_supervisor::{
+    BackoffPolicy, ChildSpec, Restart, RestartIntensity, Strategy, SupervisorBuilder,
+    SupervisorExit,
+};
 
 mod common;
 
@@ -271,4 +274,69 @@ async fn drained_old_generation_failure_does_not_poison_later_completed_exit() {
         .expect("supervisor should exit after generation one completes")
         .expect("supervisor should exit cleanly");
     assert!(matches!(exit, SupervisorExit::Completed));
+}
+
+#[tokio::test]
+async fn group_restart_uses_the_failing_child_restart_intensity() {
+    let trigger_attempts = Arc::new(AtomicUsize::new(0));
+    let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel();
+    let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
+
+    let trigger = ChildSpec::new("trigger", move |ctx| {
+        let trigger_attempts = trigger_attempts.clone();
+        let trigger_tx = trigger_tx.clone();
+        async move {
+            trigger_tx
+                .send(ctx.generation)
+                .expect("test receiver dropped");
+            if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(common::test_error("restart group"));
+            }
+
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Transient)
+    .restart_intensity(RestartIntensity {
+        max_restarts: 1,
+        within: Duration::from_secs(1),
+        backoff: BackoffPolicy::None,
+    });
+
+    let peer = ChildSpec::new("peer", move |ctx| {
+        let peer_tx = peer_tx.clone();
+        async move {
+            peer_tx.send(ctx.generation).expect("test receiver dropped");
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Permanent)
+    .restart_intensity(RestartIntensity {
+        max_restarts: 0,
+        within: Duration::from_secs(1),
+        backoff: BackoffPolicy::None,
+    });
+
+    let supervisor = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .restart_intensity(RestartIntensity {
+            max_restarts: 0,
+            within: Duration::from_secs(1),
+            backoff: BackoffPolicy::None,
+        })
+        .child(trigger)
+        .child(peer)
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+
+    assert_eq!(common::recv_n(&mut trigger_rx, 2).await, vec![0, 1]);
+    assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert!(matches!(exit, SupervisorExit::Shutdown));
 }

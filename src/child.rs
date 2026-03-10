@@ -1,6 +1,10 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::{context::ChildContext, restart::Restart, shutdown::ShutdownPolicy};
+use crate::{
+    context::ChildContext,
+    restart::{Restart, RestartIntensity},
+    shutdown::ShutdownPolicy,
+};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -17,6 +21,7 @@ pub struct ChildSpec {
 pub(crate) struct ChildSpecInner {
     pub(crate) id: String,
     pub(crate) restart: Restart,
+    pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) factory: Arc<dyn ChildFactory>,
 }
@@ -57,6 +62,7 @@ impl ChildSpec {
             inner: Arc::new(ChildSpecInner {
                 id: id.into(),
                 restart: Restart::default(),
+                restart_intensity: None,
                 shutdown_policy: ShutdownPolicy::default(),
                 factory: make_child_factory(f),
             }),
@@ -79,12 +85,24 @@ impl ChildSpec {
         }
     }
 
+    pub fn restart_intensity(self, intensity: RestartIntensity) -> Self {
+        let mut inner = Arc::unwrap_or_clone(self.inner);
+        inner.restart_intensity = Some(intensity);
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
     pub fn id(&self) -> &str {
         &self.inner.id
     }
 
     pub fn restart_policy(&self) -> Restart {
         self.inner.restart
+    }
+
+    pub(crate) fn restart_intensity_override(&self) -> Option<RestartIntensity> {
+        self.inner.restart_intensity
     }
 
     pub fn shutdown_policy(&self) -> ShutdownPolicy {

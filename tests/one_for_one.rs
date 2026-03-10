@@ -7,7 +7,10 @@ use tokio::{
     sync::mpsc,
     time::{Duration, sleep, timeout},
 };
-use tokio_supervisor::{ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorExit};
+use tokio_supervisor::{
+    BackoffPolicy, ChildSpec, Restart, RestartIntensity, Strategy, SupervisorBuilder,
+    SupervisorExit,
+};
 
 mod common;
 
@@ -146,4 +149,75 @@ async fn temporary_child_does_not_restart() {
         .expect("supervisor should exit cleanly");
 
     common::assert_no_event(&mut starts_rx).await;
+}
+
+#[tokio::test]
+async fn child_restart_intensity_is_isolated_per_child() {
+    let child_restart_intensity = RestartIntensity {
+        max_restarts: 1,
+        within: Duration::from_secs(1),
+        backoff: BackoffPolicy::None,
+    };
+
+    let (child_a_tx, mut child_a_rx) = mpsc::unbounded_channel();
+    let (child_b_tx, mut child_b_rx) = mpsc::unbounded_channel();
+    let child_a_attempts = Arc::new(AtomicUsize::new(0));
+    let child_b_attempts = Arc::new(AtomicUsize::new(0));
+
+    let child_a = ChildSpec::new("child-a", move |ctx| {
+        let child_a_attempts = child_a_attempts.clone();
+        let child_a_tx = child_a_tx.clone();
+        async move {
+            child_a_tx
+                .send(ctx.generation)
+                .expect("test receiver dropped");
+            if child_a_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(common::test_error("boom-a"));
+            }
+
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Transient)
+    .restart_intensity(child_restart_intensity);
+
+    let child_b = ChildSpec::new("child-b", move |ctx| {
+        let child_b_attempts = child_b_attempts.clone();
+        let child_b_tx = child_b_tx.clone();
+        async move {
+            child_b_tx
+                .send(ctx.generation)
+                .expect("test receiver dropped");
+            if child_b_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(common::test_error("boom-b"));
+            }
+
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Transient)
+    .restart_intensity(child_restart_intensity);
+
+    let supervisor = SupervisorBuilder::new()
+        .strategy(Strategy::OneForOne)
+        .restart_intensity(RestartIntensity {
+            max_restarts: 0,
+            within: Duration::from_secs(1),
+            backoff: BackoffPolicy::None,
+        })
+        .child(child_a)
+        .child(child_b)
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+
+    assert_eq!(common::recv_n(&mut child_a_rx, 2).await, vec![0, 1]);
+    assert_eq!(common::recv_n(&mut child_b_rx, 2).await, vec![0, 1]);
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert!(matches!(exit, SupervisorExit::Shutdown));
 }

@@ -53,6 +53,9 @@ impl SupervisorBuilder {
 
         let mut ids = HashSet::new();
         for child in &self.children {
+            if let Some(restart_intensity) = child.restart_intensity_override() {
+                restart_intensity.validate()?;
+            }
             if !ids.insert(child.id()) {
                 return Err(BuildError::DuplicateChildId(child.id().to_owned()));
             }

@@ -3,10 +3,11 @@ use std::sync::Arc;
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::child::ChildSpecInner;
+use crate::{child::ChildSpecInner, restart::RestartIntensity, runtime::intensity::RestartTracker};
 
 pub(crate) struct ChildRuntime {
     pub(crate) spec: Arc<ChildSpecInner>,
+    pub(crate) restart_tracker: RestartTracker,
     pub(crate) generation: u64,
     pub(crate) state: RuntimeChildState,
     pub(crate) active_token: Option<CancellationToken>,
@@ -29,9 +30,14 @@ impl RuntimeChildState {
 }
 
 impl ChildRuntime {
-    pub(crate) fn new(spec: Arc<ChildSpecInner>) -> Self {
+    pub(crate) fn new(
+        spec: Arc<ChildSpecInner>,
+        default_restart_intensity: RestartIntensity,
+    ) -> Self {
+        let restart_intensity = spec.restart_intensity.unwrap_or(default_restart_intensity);
         Self {
             spec,
+            restart_tracker: RestartTracker::new(restart_intensity),
             generation: 0,
             state: RuntimeChildState::Stopped,
             active_token: None,

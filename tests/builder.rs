@@ -38,6 +38,22 @@ fn invalid_restart_intensity_is_rejected() {
 }
 
 #[test]
+fn invalid_child_restart_intensity_is_rejected() {
+    let err = SupervisorBuilder::new()
+        .child(
+            ChildSpec::new("worker", |_| async { Ok(()) }).restart_intensity(RestartIntensity {
+                max_restarts: 1,
+                within: Duration::ZERO,
+                backoff: BackoffPolicy::None,
+            }),
+        )
+        .build()
+        .expect_err("zero-width child restart windows should be rejected");
+
+    assert!(matches!(err, BuildError::InvalidConfig(_)));
+}
+
+#[test]
 fn valid_configuration_builds() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
