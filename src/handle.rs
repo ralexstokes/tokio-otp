@@ -13,6 +13,7 @@ use crate::{
     child::ChildSpec,
     error::{ControlError, SupervisorError, SupervisorExit},
     event::SupervisorEvent,
+    snapshot::SupervisorSnapshot,
 };
 
 type SupervisorJoinHandle = JoinHandle<Result<SupervisorExit, SupervisorError>>;
@@ -155,6 +156,7 @@ pub(crate) struct SupervisorHandleInit {
     pub(crate) done_tx: DoneSender,
     pub(crate) done_rx: DoneReceiver,
     pub(crate) events_tx: broadcast::Sender<SupervisorEvent>,
+    pub(crate) snapshots_rx: watch::Receiver<SupervisorSnapshot>,
     pub(crate) join_handle: SupervisorJoinHandle,
 }
 
@@ -166,6 +168,7 @@ pub struct SupervisorHandle {
     path_prefix: Vec<String>,
     done_rx: DoneReceiver,
     events_tx: broadcast::Sender<SupervisorEvent>,
+    snapshots_rx: watch::Receiver<SupervisorSnapshot>,
     join_state: Arc<Mutex<Option<(SupervisorJoinHandle, DoneSender)>>>,
 }
 
@@ -178,6 +181,7 @@ impl SupervisorHandle {
             path_prefix: init.path_prefix,
             done_rx: init.done_rx,
             events_tx: init.events_tx,
+            snapshots_rx: init.snapshots_rx,
             join_state: Arc::new(Mutex::new(Some((init.join_handle, init.done_tx)))),
         }
     }
@@ -263,6 +267,14 @@ impl SupervisorHandle {
 
     pub fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.events_tx.subscribe()
+    }
+
+    pub fn snapshot(&self) -> SupervisorSnapshot {
+        self.snapshots_rx.borrow().clone()
+    }
+
+    pub fn subscribe_snapshots(&self) -> watch::Receiver<SupervisorSnapshot> {
+        self.snapshots_rx.clone()
     }
 
     pub(crate) fn control_endpoint(&self) -> ControlEndpoint {

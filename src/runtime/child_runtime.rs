@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::task::AbortHandle;
+use tokio::{task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::{child::ChildSpecInner, restart::RestartIntensity, runtime::intensity::RestartTracker};
@@ -13,6 +13,7 @@ pub(crate) struct ChildRuntime {
     pub(crate) active_token: Option<CancellationToken>,
     pub(crate) abort_handle: Option<AbortHandle>,
     pub(crate) has_started: bool,
+    pub(crate) next_restart_deadline: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +44,7 @@ impl ChildRuntime {
             active_token: None,
             abort_handle: None,
             has_started: false,
+            next_restart_deadline: None,
         }
     }
 }

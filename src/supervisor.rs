@@ -13,6 +13,10 @@ use crate::{
     },
     restart::RestartIntensity,
     runtime::SupervisorRuntime,
+    snapshot::{
+        ChildMembershipView, ChildSnapshot, ChildStateView, SupervisorSnapshot,
+        SupervisorStateView, forward_nested_snapshot,
+    },
     strategy::Strategy,
 };
 
@@ -37,9 +41,11 @@ impl Supervisor {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(256);
         let (_command_tx, command_rx) = mpsc::unbounded_channel();
+        let (snapshots_tx, _) = watch::channel(initial_snapshot(&self.config));
         self.run_with_channels(
             shutdown_rx,
             events_tx,
+            snapshots_tx,
             command_rx,
             Arc::new(NestedControlRegistry::default()),
             Vec::new(),
@@ -60,8 +66,10 @@ impl Supervisor {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (done_tx, done_rx) = watch::channel(None);
         let (events_tx, _) = broadcast::channel(256);
+        let (snapshots_tx, snapshots_rx) = watch::channel(initial_snapshot(&self.config));
         let task_done_tx = done_tx.clone();
         let task_events_tx = events_tx.clone();
+        let task_snapshots_tx = snapshots_tx.clone();
         let task_registry = Arc::clone(&registry);
         let task_path_prefix = path_prefix.clone();
 
@@ -70,6 +78,7 @@ impl Supervisor {
                 .run_with_channels(
                     shutdown_rx,
                     task_events_tx,
+                    task_snapshots_tx,
                     command_rx,
                     task_registry,
                     task_path_prefix,
@@ -87,6 +96,7 @@ impl Supervisor {
             done_tx,
             done_rx,
             events_tx,
+            snapshots_rx,
             join_handle,
         })
     }
@@ -105,6 +115,7 @@ impl Supervisor {
         self,
         shutdown_rx: watch::Receiver<bool>,
         events_tx: broadcast::Sender<crate::event::SupervisorEvent>,
+        snapshots_tx: watch::Sender<SupervisorSnapshot>,
         command_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
         registry: Arc<NestedControlRegistry>,
         path_prefix: Vec<String>,
@@ -113,6 +124,7 @@ impl Supervisor {
             self.config,
             shutdown_rx,
             events_tx,
+            snapshots_tx,
             command_rx,
             registry,
             path_prefix,
@@ -131,6 +143,8 @@ impl Supervisor {
         let handle = self.spawn_with_control(control_scope.registry(), control_scope.child_path());
         let _registration = control_scope.register(handle.control_endpoint());
         let mut events_rx = handle.subscribe();
+        let mut snapshots_rx = handle.subscribe_snapshots();
+        forward_nested_snapshot(handle.snapshot());
         let wait = handle.wait();
         tokio::pin!(wait);
         let mut shutdown_requested = false;
@@ -153,6 +167,11 @@ impl Supervisor {
                         Ok(event) => forward_nested_event(event),
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {}
+                    }
+                }
+                changed = snapshots_rx.changed() => {
+                    if let Ok(()) = changed {
+                        forward_nested_snapshot(snapshots_rx.borrow().clone());
                     }
                 }
                 _ = ctx.token.cancelled(), if !shutdown_requested => {
@@ -178,5 +197,27 @@ fn drain_nested_events(events_rx: &mut broadcast::Receiver<crate::event::Supervi
             Err(broadcast::error::TryRecvError::Empty)
             | Err(broadcast::error::TryRecvError::Closed) => break,
         }
+    }
+}
+
+fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot {
+    SupervisorSnapshot {
+        state: SupervisorStateView::Running,
+        last_exit: None,
+        strategy: config.strategy,
+        children: config
+            .children
+            .iter()
+            .map(|spec| ChildSnapshot {
+                id: spec.id.clone(),
+                generation: 0,
+                state: ChildStateView::Stopped,
+                membership: ChildMembershipView::Active,
+                last_exit: None,
+                restart_count: 0,
+                next_restart_in: None,
+                supervisor: None,
+            })
+            .collect(),
     }
 }

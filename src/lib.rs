@@ -7,6 +7,7 @@ mod handle;
 mod restart;
 mod runtime;
 mod shutdown;
+mod snapshot;
 mod strategy;
 mod supervisor;
 
@@ -18,5 +19,8 @@ pub use event::{EventPathSegment, ExitStatusView, SupervisorEvent};
 pub use handle::SupervisorHandle;
 pub use restart::{BackoffPolicy, Restart, RestartIntensity};
 pub use shutdown::{ShutdownMode, ShutdownPolicy};
+pub use snapshot::{
+    ChildMembershipView, ChildSnapshot, ChildStateView, SupervisorSnapshot, SupervisorStateView,
+};
 pub use strategy::Strategy;
 pub use supervisor::Supervisor;

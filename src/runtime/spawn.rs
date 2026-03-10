@@ -7,6 +7,7 @@ use crate::{
         child_runtime::RuntimeChildState,
         supervision::{ChildEnvelope, SupervisorRuntime, TaskMeta},
     },
+    snapshot::{NestedSnapshotForwarder, with_nested_snapshot_forwarder},
 };
 
 impl SupervisorRuntime {
@@ -34,6 +35,8 @@ impl SupervisorRuntime {
             let child_token = self.group_token.child_token();
             child.active_token = Some(child_token.clone());
             child.state = RuntimeChildState::Starting;
+            child.next_restart_deadline = None;
+            entry.nested_snapshot = None;
 
             let child_id = entry.id.clone();
             let ctx = ChildContext {
@@ -48,11 +51,19 @@ impl SupervisorRuntime {
         };
         let forwarder =
             NestedEventForwarder::new(self.events.clone(), child_id.clone(), generation);
+        let snapshot_forwarder = NestedSnapshotForwarder::new(
+            self.nested_snapshot_tx.clone(),
+            child_id.clone(),
+            generation,
+        );
         let control_scope = NestedControlScope::new(self.registry.clone(), self.child_path(key));
 
         let abort_handle = self.join_set.spawn(async move {
             let result = with_nested_control_scope(control_scope, async move {
-                with_nested_event_forwarder(forwarder, future).await
+                with_nested_snapshot_forwarder(snapshot_forwarder, async move {
+                    with_nested_event_forwarder(forwarder, future).await
+                })
+                .await
             })
             .await;
             ChildEnvelope {

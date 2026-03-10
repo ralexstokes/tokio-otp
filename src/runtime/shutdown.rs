@@ -15,10 +15,10 @@ use super::supervision::SupervisorRuntime;
 impl SupervisorRuntime {
     pub(crate) async fn shutdown_all(&mut self) -> Result<SupervisorExit, SupervisorError> {
         self.state = SupervisorState::Stopping;
-        self.send_event(SupervisorEvent::SupervisorStopping);
         self.cancel_running_children();
+        self.send_event(SupervisorEvent::SupervisorStopping);
         self.drain_children(DrainReason::Shutdown).await?;
-        self.send_event(SupervisorEvent::SupervisorStopped);
+        self.finish_with_exit(SupervisorExit::Shutdown);
         Ok(SupervisorExit::Shutdown)
     }
 

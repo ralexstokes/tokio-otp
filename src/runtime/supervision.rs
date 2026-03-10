@@ -10,9 +10,13 @@ use tracing::{debug, trace};
 
 use crate::{
     error::{ControlError, SupervisorError, SupervisorExit},
-    event::SupervisorEvent,
+    event::{ExitStatusView, SupervisorEvent},
     handle::{NestedControlRegistry, SupervisorCommand},
     restart::{Restart, RestartIntensity},
+    snapshot::{
+        ChildMembershipView, ChildSnapshot, ChildStateView, NestedSnapshotUpdate,
+        SupervisorSnapshot, SupervisorStateView,
+    },
     strategy::Strategy,
     supervisor::SupervisorConfig,
 };
@@ -40,6 +44,7 @@ pub(crate) struct TaskMeta {
 pub(crate) enum SupervisorState {
     Running,
     Stopping,
+    Stopped,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +58,8 @@ pub(crate) struct ChildEntry {
     pub(crate) id: String,
     pub(crate) runtime: ChildRuntime,
     terminal_status: Option<TerminalStatus>,
+    last_exit: Option<ExitStatusView>,
+    pub(crate) nested_snapshot: Option<SupervisorSnapshot>,
     pub(crate) membership: MembershipState,
 }
 
@@ -66,6 +73,8 @@ impl ChildEntry {
             id,
             runtime: ChildRuntime::new(spec, default_restart_intensity),
             terminal_status: None,
+            last_exit: None,
+            nested_snapshot: None,
             membership: MembershipState::Active,
         }
     }
@@ -82,11 +91,15 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) registry: Arc<NestedControlRegistry>,
     pub(crate) path_prefix: Vec<String>,
     pub(crate) events: broadcast::Sender<SupervisorEvent>,
+    pub(crate) snapshots: watch::Sender<SupervisorSnapshot>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
     pub(crate) command_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
+    pub(crate) nested_snapshot_tx: mpsc::UnboundedSender<NestedSnapshotUpdate>,
+    pub(crate) nested_snapshot_rx: mpsc::UnboundedReceiver<NestedSnapshotUpdate>,
     pub(crate) commands_open: bool,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
     pub(crate) pending_exit: Option<Result<SupervisorExit, SupervisorError>>,
+    pub(crate) last_exit: Option<SupervisorExit>,
 }
 
 impl SupervisorRuntime {
@@ -94,6 +107,7 @@ impl SupervisorRuntime {
         config: SupervisorConfig,
         shutdown_rx: watch::Receiver<bool>,
         events: broadcast::Sender<SupervisorEvent>,
+        snapshots: watch::Sender<SupervisorSnapshot>,
         command_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
         registry: Arc<NestedControlRegistry>,
         path_prefix: Vec<String>,
@@ -107,6 +121,7 @@ impl SupervisorRuntime {
             children_by_id.insert(id.clone(), key);
             children.push(ChildEntry::new(id, spec, default_restart_intensity));
         }
+        let (nested_snapshot_tx, nested_snapshot_rx) = mpsc::unbounded_channel();
 
         Self {
             strategy: config.strategy,
@@ -119,11 +134,15 @@ impl SupervisorRuntime {
             registry,
             path_prefix,
             events,
+            snapshots,
             shutdown_rx,
             command_rx,
+            nested_snapshot_tx,
+            nested_snapshot_rx,
             commands_open: true,
             task_map: HashMap::new(),
             pending_exit: None,
+            last_exit: None,
         }
     }
 
@@ -156,6 +175,11 @@ impl SupervisorRuntime {
                         return result;
                     }
                 }
+                update = self.nested_snapshot_rx.recv() => {
+                    if let Some(update) = update {
+                        self.handle_nested_snapshot(update);
+                    }
+                }
                 maybe = self.join_set.join_next_with_id() => {
                     let Some(joined) = maybe else {
                         return self.finish_natural_exit();
@@ -170,8 +194,7 @@ impl SupervisorRuntime {
     }
 
     fn finish_natural_exit(&mut self) -> Result<SupervisorExit, SupervisorError> {
-        self.send_event(SupervisorEvent::SupervisorStopped);
-        if self
+        let exit = if self
             .children
             .iter()
             .filter(|entry| entry.membership != MembershipState::Removed)
@@ -180,12 +203,13 @@ impl SupervisorRuntime {
                     .terminal_status
                     .as_ref()
                     .is_some_and(TerminalStatus::is_failure)
-            })
-        {
-            Ok(SupervisorExit::Failed)
+            }) {
+            SupervisorExit::Failed
         } else {
-            Ok(SupervisorExit::Completed)
-        }
+            SupervisorExit::Completed
+        };
+        self.finish_with_exit(exit);
+        Ok(exit)
     }
 
     async fn handle_command(&mut self, command: SupervisorCommand) {
@@ -232,6 +256,28 @@ impl SupervisorRuntime {
         Ok(())
     }
 
+    pub(crate) fn finish_with_exit(&mut self, exit: SupervisorExit) {
+        self.state = SupervisorState::Stopped;
+        self.last_exit = Some(exit);
+        self.send_event(SupervisorEvent::SupervisorStopped);
+    }
+
+    fn handle_nested_snapshot(&mut self, update: NestedSnapshotUpdate) {
+        let Some(&key) = self.children_by_id.get(&update.parent_id) else {
+            return;
+        };
+
+        let entry = &mut self.children[key];
+        if entry.membership == MembershipState::Removed
+            || entry.runtime.generation != update.generation
+        {
+            return;
+        }
+
+        entry.nested_snapshot = Some(update.snapshot);
+        self.publish_snapshot();
+    }
+
     async fn remove_child(&mut self, id: String) -> Result<(), ControlError> {
         if self.state == SupervisorState::Stopping {
             return Err(ControlError::SupervisorStopping);
@@ -249,8 +295,6 @@ impl SupervisorRuntime {
             return Err(ControlError::LastChildRemovalUnsupported);
         }
 
-        self.send_event(SupervisorEvent::ChildRemoveRequested { id: id.clone() });
-
         let (mode, grace, active) = {
             let entry = &mut self.children[key];
             entry.membership = MembershipState::Removing;
@@ -264,6 +308,8 @@ impl SupervisorRuntime {
                 active,
             )
         };
+
+        self.send_event(SupervisorEvent::ChildRemoveRequested { id: id.clone() });
 
         if !active {
             self.finalize_removed_child(key);
@@ -412,6 +458,8 @@ impl SupervisorRuntime {
             let entry = &mut self.children[key];
             entry.membership = MembershipState::Removed;
             entry.terminal_status = None;
+            entry.last_exit = None;
+            entry.nested_snapshot = None;
             entry.id.clone()
         };
         self.children_by_id.remove(&id);
@@ -505,6 +553,9 @@ impl SupervisorRuntime {
             entry.runtime.state = RuntimeChildState::Stopped;
             entry.runtime.active_token = None;
             entry.runtime.abort_handle = None;
+            entry.runtime.next_restart_deadline = None;
+            entry.last_exit = Some(status.view());
+            entry.nested_snapshot = None;
             entry.id.clone()
         };
         self.send_event(SupervisorEvent::ChildExited {
@@ -587,7 +638,9 @@ impl SupervisorRuntime {
             if child.restart_tracker.exceeded() {
                 None
             } else {
-                Some(child.restart_tracker.backoff())
+                let delay = child.restart_tracker.backoff();
+                child.next_restart_deadline = Some(Instant::now() + delay);
+                Some(delay)
             }
         };
 
@@ -639,7 +692,51 @@ impl SupervisorRuntime {
     }
 
     pub(crate) fn send_event(&self, event: SupervisorEvent) {
+        self.publish_snapshot();
         let _ = self.events.send(event);
+    }
+
+    pub(crate) fn publish_snapshot(&self) {
+        let _ = self.snapshots.send_replace(self.snapshot_view());
+    }
+
+    fn snapshot_view(&self) -> SupervisorSnapshot {
+        SupervisorSnapshot {
+            state: match self.state {
+                SupervisorState::Running => SupervisorStateView::Running,
+                SupervisorState::Stopping => SupervisorStateView::Stopping,
+                SupervisorState::Stopped => SupervisorStateView::Stopped,
+            },
+            last_exit: self.last_exit,
+            strategy: self.strategy,
+            children: self
+                .children
+                .iter()
+                .filter(|entry| entry.membership != MembershipState::Removed)
+                .map(|entry| ChildSnapshot {
+                    id: entry.id.clone(),
+                    generation: entry.runtime.generation,
+                    state: match entry.runtime.state {
+                        RuntimeChildState::Starting => ChildStateView::Starting,
+                        RuntimeChildState::Running => ChildStateView::Running,
+                        RuntimeChildState::Stopping => ChildStateView::Stopping,
+                        RuntimeChildState::Stopped => ChildStateView::Stopped,
+                    },
+                    membership: match entry.membership {
+                        MembershipState::Active => ChildMembershipView::Active,
+                        MembershipState::Removing => ChildMembershipView::Removing,
+                        MembershipState::Removed => unreachable!("removed children filtered"),
+                    },
+                    last_exit: entry.last_exit.clone(),
+                    restart_count: entry.runtime.restart_tracker.total_restarts(),
+                    next_restart_in: entry
+                        .runtime
+                        .next_restart_deadline
+                        .map(|deadline| deadline.saturating_duration_since(Instant::now())),
+                    supervisor: entry.nested_snapshot.as_ref().cloned().map(Box::new),
+                })
+                .collect(),
+        }
     }
 }
 

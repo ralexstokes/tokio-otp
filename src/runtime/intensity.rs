@@ -11,6 +11,7 @@ pub(crate) struct RestartTracker {
     intensity: RestartIntensity,
     times: VecDeque<Instant>,
     rng: JitterRng,
+    total_restarts: u64,
 }
 
 impl RestartTracker {
@@ -19,6 +20,7 @@ impl RestartTracker {
             intensity,
             times: VecDeque::new(),
             rng: JitterRng::new(),
+            total_restarts: 0,
         }
     }
 
@@ -31,6 +33,7 @@ impl RestartTracker {
             }
         }
         self.times.push_back(now);
+        self.total_restarts = self.total_restarts.saturating_add(1);
     }
 
     pub(crate) fn exceeded(&self) -> bool {
@@ -55,6 +58,10 @@ impl RestartTracker {
                 deterministic
             }
         }
+    }
+
+    pub(crate) fn total_restarts(&self) -> u64 {
+        self.total_restarts
     }
 }
 
@@ -137,6 +144,7 @@ mod tests {
             rng: JitterRng {
                 state: 0x1234_5678_9abc_def0,
             },
+            total_restarts: 0,
         }
     }
 
