@@ -43,9 +43,8 @@ pub struct ActorSpec {
     pub(crate) inner: Arc<ActorSpecInner>,
 }
 
-#[derive(Clone)]
 pub(crate) struct ActorSpecInner {
-    pub(crate) id: String,
+    pub(crate) id: Arc<str>,
     pub(crate) factory: Arc<dyn ActorFactory>,
 }
 
@@ -77,9 +76,10 @@ impl ActorSpec {
     where
         A: Actor,
     {
+        let id: Arc<str> = id.into().into();
         Self {
             inner: Arc::new(ActorSpecInner {
-                id: id.into(),
+                id,
                 factory: Arc::new(InstanceFactory { actor }),
             }),
         }

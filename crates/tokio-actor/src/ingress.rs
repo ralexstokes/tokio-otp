@@ -48,10 +48,8 @@ impl MailboxRef {
     pub(crate) fn blocking_send(&self, envelope: Envelope) -> Result<(), MailboxError> {
         self.sender
             .blocking_send(envelope)
-            .map_err(|err| match err {
-                mpsc::error::SendError(_) => MailboxError::MailboxClosed {
-                    actor_id: self.actor_id.clone(),
-                },
+            .map_err(|_| MailboxError::MailboxClosed {
+                actor_id: self.actor_id.clone(),
             })
     }
 }
@@ -88,15 +86,15 @@ impl IngressBinding {
 /// rebound to the new actor mailbox automatically.
 #[derive(Clone)]
 pub struct IngressHandle {
-    name: String,
-    actor_id: String,
+    name: Arc<str>,
+    actor_id: Arc<str>,
     binding: watch::Receiver<Option<MailboxRef>>,
 }
 
 impl IngressHandle {
     pub(crate) fn new(
-        name: String,
-        actor_id: String,
+        name: Arc<str>,
+        actor_id: Arc<str>,
         binding: watch::Receiver<Option<MailboxRef>>,
     ) -> Self {
         Self {
@@ -111,20 +109,20 @@ impl IngressHandle {
             .borrow()
             .clone()
             .ok_or_else(|| IngressError::NotRunning {
-                ingress: self.name.clone(),
-                actor_id: self.actor_id.clone(),
+                ingress: self.name.to_string(),
+                actor_id: self.actor_id.to_string(),
             })
     }
 
     fn map_mailbox_error(&self, err: MailboxError) -> IngressError {
         match err {
             MailboxError::MailboxFull { .. } => IngressError::MailboxFull {
-                ingress: self.name.clone(),
-                actor_id: self.actor_id.clone(),
+                ingress: self.name.to_string(),
+                actor_id: self.actor_id.to_string(),
             },
             MailboxError::MailboxClosed { .. } => IngressError::MailboxClosed {
-                ingress: self.name.clone(),
-                actor_id: self.actor_id.clone(),
+                ingress: self.name.to_string(),
+                actor_id: self.actor_id.to_string(),
             },
         }
     }

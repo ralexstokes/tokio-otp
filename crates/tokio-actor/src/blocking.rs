@@ -285,7 +285,7 @@ pub(crate) enum BlockingRuntimeEvent {
 
 impl BlockingRuntime {
     pub(crate) fn new(
-        actor_id: String,
+        actor_id: Arc<str>,
         myself: ActorRef,
         actor_shutdown: CancellationToken,
     ) -> Self {
@@ -360,7 +360,7 @@ impl BlockingRuntime {
 }
 
 struct BlockingRuntimeInner {
-    actor_id: String,
+    actor_id: Arc<str>,
     myself: ActorRef,
     actor_shutdown: CancellationToken,
     state: Mutex<BlockingState>,
@@ -384,7 +384,7 @@ impl BlockingRuntimeInner {
             let mut state = self.lock_state();
             if state.closing || self.actor_shutdown.is_cancelled() {
                 return Err(SpawnBlockingError::ShuttingDown {
-                    actor_id: self.actor_id.clone(),
+                    actor_id: self.actor_id.to_string(),
                 });
             }
 

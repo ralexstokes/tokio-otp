@@ -87,7 +87,7 @@ impl GraphBuilder {
 
         let mut actor_ids = HashSet::new();
         let mut actors = Vec::with_capacity(self.actors.len());
-        let mut links = HashMap::new();
+        let mut links: HashMap<Arc<str>, Vec<Arc<str>>> = HashMap::new();
 
         for actor in self.actors {
             if actor.id().is_empty() {
@@ -96,7 +96,7 @@ impl GraphBuilder {
             if !actor_ids.insert(actor.id().to_owned()) {
                 return Err(BuildError::DuplicateActorId(actor.id().to_owned()));
             }
-            links.insert(actor.id().to_owned(), Vec::new());
+            links.insert(Arc::clone(&actor.inner.id), Vec::new());
             actors.push(Arc::clone(&actor.inner));
         }
 
@@ -108,15 +108,13 @@ impl GraphBuilder {
                 return Err(BuildError::UnknownLinkTarget { from, actor: to });
             }
             let outgoing = links
-                .get_mut(&from)
-                .ok_or_else(|| BuildError::UnknownLinkSource {
-                    actor: from.clone(),
-                })?;
-            outgoing.push(to);
+                .get_mut(from.as_str())
+                .expect("links entry guaranteed by actor_ids check");
+            outgoing.push(to.into());
         }
 
         let mut ingress_names = HashSet::new();
-        let mut ingresses = HashMap::new();
+        let mut ingresses: HashMap<Arc<str>, IngressDefinition> = HashMap::new();
         for (name, target) in self.ingresses {
             if name.is_empty() {
                 return Err(BuildError::InvalidConfig("ingress name must not be empty"));
@@ -132,9 +130,9 @@ impl GraphBuilder {
             }
 
             ingresses.insert(
-                name,
+                name.into(),
                 IngressDefinition {
-                    target_actor: target,
+                    target_actor: target.into(),
                     binding: Arc::new(IngressBinding::default()),
                 },
             );

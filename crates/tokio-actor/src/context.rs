@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -65,9 +65,9 @@ impl ActorRef {
 
 /// Runtime context passed to a graph actor each time the graph is run.
 pub struct ActorContext {
-    pub(crate) id: String,
+    pub(crate) id: Arc<str>,
     pub(crate) mailbox: mpsc::Receiver<Envelope>,
-    pub(crate) peers: HashMap<String, ActorRef>,
+    pub(crate) peers: HashMap<Arc<str>, ActorRef>,
     pub(crate) myself: ActorRef,
     pub(crate) shutdown: CancellationToken,
     pub(crate) blocking: BlockingSpawner,
@@ -78,7 +78,7 @@ impl ActorContext {
         self.peers
             .get(actor_id)
             .ok_or_else(|| SendError::UnknownPeer {
-                actor_id: self.id.clone(),
+                actor_id: self.id.to_string(),
                 peer_id: actor_id.to_owned(),
             })
     }

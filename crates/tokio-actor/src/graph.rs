@@ -22,17 +22,19 @@ use crate::{
     ingress::{IngressBinding, IngressHandle, MailboxRef},
 };
 
-#[derive(Clone)]
+type MailboxSenders = HashMap<Arc<str>, MailboxRef>;
+type MailboxReceivers = HashMap<Arc<str>, mpsc::Receiver<Envelope>>;
+
 pub(crate) struct IngressDefinition {
-    pub(crate) target_actor: String,
+    pub(crate) target_actor: Arc<str>,
     pub(crate) binding: Arc<IngressBinding>,
 }
 
 pub(crate) struct GraphInner {
     pub(crate) actors: Vec<Arc<ActorSpecInner>>,
-    pub(crate) links: HashMap<String, Vec<String>>,
+    pub(crate) links: HashMap<Arc<str>, Vec<Arc<str>>>,
     pub(crate) mailbox_capacity: usize,
-    pub(crate) ingresses: HashMap<String, IngressDefinition>,
+    pub(crate) ingresses: HashMap<Arc<str>, IngressDefinition>,
     pub(crate) running: AtomicBool,
 }
 
@@ -67,8 +69,8 @@ impl Graph {
     pub fn ingress(&self, name: &str) -> Option<IngressHandle> {
         self.inner.ingresses.get(name).map(|definition| {
             IngressHandle::new(
-                name.to_owned(),
-                definition.target_actor.clone(),
+                Arc::from(name),
+                Arc::clone(&definition.target_actor),
                 definition.binding.subscribe(),
             )
         })
@@ -127,7 +129,7 @@ struct GraphRuntime {
     inner: Arc<GraphInner>,
     shutdown: CancellationToken,
     join_set: JoinSet<ActorTaskExit>,
-    task_ids: HashMap<TaskId, String>,
+    task_ids: HashMap<TaskId, Arc<str>>,
 }
 
 impl GraphRuntime {
@@ -166,7 +168,7 @@ impl GraphRuntime {
                     let outcome = self.classify_join(joined);
                     match outcome {
                         Ok(exit) => {
-                            if exit.result.is_err() || (!shutdown_requested && exit.result.is_ok()) {
+                            if !shutdown_requested || exit.result.is_err() {
                                 self.request_shutdown();
                             }
 
@@ -194,29 +196,21 @@ impl GraphRuntime {
         self.inner.clear_ingresses();
     }
 
-    fn create_mailboxes(
-        &self,
-    ) -> (
-        HashMap<String, MailboxRef>,
-        HashMap<String, mpsc::Receiver<Envelope>>,
-    ) {
+    fn create_mailboxes(&self) -> (MailboxSenders, MailboxReceivers) {
         let mut mailboxes = HashMap::with_capacity(self.inner.actors.len());
         let mut receivers = HashMap::with_capacity(self.inner.actors.len());
 
         for actor in &self.inner.actors {
             let (sender, receiver) = mpsc::channel(self.inner.mailbox_capacity);
-            let actor_id: Arc<str> = Arc::from(actor.id.as_str());
-            mailboxes.insert(actor.id.clone(), MailboxRef::new(actor_id, sender));
-            receivers.insert(actor.id.clone(), receiver);
+            let id = Arc::clone(&actor.id);
+            mailboxes.insert(Arc::clone(&id), MailboxRef::new(id.clone(), sender));
+            receivers.insert(id, receiver);
         }
 
         (mailboxes, receivers)
     }
 
-    fn bind_ingresses_with(
-        &self,
-        mailboxes: &HashMap<String, MailboxRef>,
-    ) -> Result<(), GraphError> {
+    fn bind_ingresses_with(&self, mailboxes: &MailboxSenders) -> Result<(), GraphError> {
         for (name, ingress) in &self.inner.ingresses {
             let mailbox = mailboxes
                 .get(&ingress.target_actor)
@@ -234,8 +228,8 @@ impl GraphRuntime {
 
     fn spawn_actors(
         &mut self,
-        mailboxes: &HashMap<String, MailboxRef>,
-        receivers: &mut HashMap<String, mpsc::Receiver<Envelope>>,
+        mailboxes: &MailboxSenders,
+        receivers: &mut MailboxReceivers,
     ) -> Result<(), GraphError> {
         for actor in &self.inner.actors {
             let peers = self
@@ -283,22 +277,22 @@ impl GraphRuntime {
                 tokio::pin!(actor_future);
 
                 let mut first_blocking_failure = None;
+                let mut blocking_events_open = true;
                 let result = loop {
                     tokio::select! {
                         result = &mut actor_future => break result,
-                        maybe_event = blocking.next_event() => {
-                            match maybe_event {
-                                Some(BlockingRuntimeEvent::Completed { task_id, failure }) => {
-                                    if let Some(failure) = failure {
-                                        actor_shutdown.cancel();
-                                        first_blocking_failure.get_or_insert(failure);
-                                    }
-
-                                    if let Some(failure) = blocking.reap_task(task_id).await {
-                                        first_blocking_failure.get_or_insert(failure);
-                                    }
+                        maybe_event = blocking.next_event(), if blocking_events_open => {
+                            if let Some(BlockingRuntimeEvent::Completed { task_id, failure }) = maybe_event {
+                                if let Some(failure) = failure {
+                                    actor_shutdown.cancel();
+                                    first_blocking_failure.get_or_insert(failure);
                                 }
-                                None => {}
+
+                                if let Some(failure) = blocking.reap_task(task_id).await {
+                                    first_blocking_failure.get_or_insert(failure);
+                                }
+                            } else {
+                                blocking_events_open = false;
                             }
                         }
                     }
@@ -324,6 +318,7 @@ impl GraphRuntime {
                 let actor_id = self
                     .task_ids
                     .remove(&err.id())
+                    .map(|id| id.to_string())
                     .unwrap_or_else(|| "<unknown>".to_owned());
                 if err.is_panic() {
                     Err(GraphError::ActorPanicked { actor_id })
@@ -336,7 +331,7 @@ impl GraphRuntime {
 }
 
 struct ActorTaskExit {
-    actor_id: String,
+    actor_id: Arc<str>,
     result: ActorResult,
 }
 
@@ -344,10 +339,10 @@ fn classify_actor_exit(exit: ActorTaskExit, shutdown_requested: bool) -> Option<
     match exit.result {
         Ok(()) if shutdown_requested => None,
         Ok(()) => Some(GraphError::ActorStopped {
-            actor_id: exit.actor_id,
+            actor_id: exit.actor_id.to_string(),
         }),
         Err(source) => Some(GraphError::ActorFailed {
-            actor_id: exit.actor_id,
+            actor_id: exit.actor_id.to_string(),
             source,
         }),
     }

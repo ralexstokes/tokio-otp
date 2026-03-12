@@ -52,3 +52,9 @@ impl From<&'static [u8]> for Envelope {
         Self::from_static(value)
     }
 }
+
+impl From<&'static str> for Envelope {
+    fn from(value: &'static str) -> Self {
+        Self::from_static(value.as_bytes())
+    }
+}
