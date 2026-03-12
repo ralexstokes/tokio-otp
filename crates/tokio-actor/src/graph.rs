@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use tokio::{
@@ -12,6 +13,7 @@ use tokio::{
     task::{Id as TaskId, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::{
     actor::{ActorResult, ActorSpecInner},
@@ -20,6 +22,7 @@ use crate::{
     envelope::Envelope,
     error::GraphError,
     ingress::{IngressBinding, IngressHandle, MailboxRef},
+    observability::{ActorExitStatus, GraphObservability, GraphRunStatus, GraphShutdownCause},
 };
 
 type MailboxSenders = HashMap<Arc<str>, MailboxRef>;
@@ -36,12 +39,16 @@ pub(crate) struct GraphInner {
     pub(crate) mailbox_capacity: usize,
     pub(crate) ingresses: HashMap<Arc<str>, IngressDefinition>,
     pub(crate) running: AtomicBool,
+    pub(crate) observability: GraphObservability,
 }
 
 impl GraphInner {
     fn clear_ingresses(&self) {
-        for ingress in self.ingresses.values() {
-            ingress.binding.clear();
+        for (name, ingress) in &self.ingresses {
+            if ingress.binding.clear() {
+                self.observability
+                    .emit_ingress_cleared(name, &ingress.target_actor);
+            }
         }
     }
 }
@@ -65,6 +72,11 @@ impl Graph {
         }
     }
 
+    /// Returns the graph name used in tracing fields and metric labels.
+    pub fn name(&self) -> &str {
+        self.inner.observability.graph_name()
+    }
+
     /// Returns a stable handle to a named ingress, if it exists.
     pub fn ingress(&self, name: &str) -> Option<IngressHandle> {
         self.inner.ingresses.get(name).map(|definition| {
@@ -72,6 +84,7 @@ impl Graph {
                 Arc::from(name),
                 Arc::clone(&definition.target_actor),
                 definition.binding.subscribe(),
+                self.inner.observability.clone(),
             )
         })
     }
@@ -87,15 +100,39 @@ impl Graph {
     {
         let _active_run = ActiveRun::start(&self.inner)?;
         let mut runtime = GraphRuntime::new(Arc::clone(&self.inner));
+        let started_at = Instant::now();
+        let observability = self.inner.observability.clone();
+        let actor_count = self.inner.actors.len();
+        let ingress_count = self.inner.ingresses.len();
+        let mailbox_capacity = self.inner.mailbox_capacity;
 
-        let mut shutdown = std::pin::pin!(shutdown);
-        runtime.run(&mut shutdown).await
+        observability.emit_graph_started(actor_count, ingress_count, mailbox_capacity);
+
+        let result = {
+            let mut shutdown = std::pin::pin!(shutdown);
+            runtime
+                .run(&mut shutdown)
+                .instrument(observability.graph_span(actor_count, ingress_count, mailbox_capacity))
+                .await
+        };
+
+        let status = if result.is_ok() {
+            GraphRunStatus::Ok
+        } else {
+            GraphRunStatus::Failed
+        };
+        let error = result.as_ref().err().map(std::string::ToString::to_string);
+        observability.emit_graph_stopped(started_at.elapsed(), status, error.as_deref());
+
+        result
     }
 }
 
 impl std::fmt::Debug for Graph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Graph").finish_non_exhaustive()
+        f.debug_struct("Graph")
+            .field("name", &self.name())
+            .finish_non_exhaustive()
     }
 }
 
@@ -164,8 +201,16 @@ impl GraphRuntime {
                     let outcome = self.classify_join(joined);
                     match outcome {
                         Ok(exit) => {
+                            let exit_status = exit.status(shutdown_requested);
+                            let exit_error = exit.result.as_ref().err().map(std::string::ToString::to_string);
+                            self.inner.observability.emit_actor_exited(
+                                &exit.actor_id,
+                                exit_status,
+                                exit_error.as_deref(),
+                            );
+
                             if !shutdown_requested || exit.result.is_err() {
-                                self.request_shutdown();
+                                self.request_shutdown(exit.shutdown_cause(shutdown_requested));
                             }
 
                             if let Some(error) = classify_actor_exit(exit, shutdown_requested) {
@@ -173,14 +218,14 @@ impl GraphRuntime {
                             }
                         }
                         Err(error) => {
-                            self.request_shutdown();
+                            self.request_shutdown(graph_shutdown_cause_for_error(&error));
                             failure.get_or_insert(error);
                         }
                     }
                 }
                 _ = shutdown.as_mut(), if !shutdown_requested => {
                     shutdown_requested = true;
-                    self.request_shutdown();
+                    self.request_shutdown(GraphShutdownCause::External);
                 }
             }
         }
@@ -191,7 +236,12 @@ impl GraphRuntime {
         }
     }
 
-    fn request_shutdown(&self) {
+    fn request_shutdown(&self, cause: GraphShutdownCause) {
+        if self.shutdown.is_cancelled() {
+            return;
+        }
+
+        self.inner.observability.emit_shutdown_requested(cause);
         self.shutdown.cancel();
         self.inner.clear_ingresses();
     }
@@ -221,7 +271,11 @@ impl GraphRuntime {
                         ingress.target_actor
                     ),
                 })?;
-            ingress.binding.bind(mailbox);
+            if ingress.binding.bind(mailbox) {
+                self.inner
+                    .observability
+                    .emit_ingress_bound(name, &ingress.target_actor);
+            }
         }
         Ok(())
     }
@@ -250,7 +304,14 @@ impl GraphRuntime {
                             "actor `{actor_id}` references missing peer mailbox `{peer_id}`"
                         ),
                     })?;
-            peers.insert(Arc::clone(peer_id), ActorRef::from_mailbox(mailbox));
+            peers.insert(
+                Arc::clone(peer_id),
+                ActorRef::from_mailbox(
+                    mailbox,
+                    self.inner.observability.clone(),
+                    Some(Arc::clone(actor_id)),
+                ),
+            );
         }
 
         Ok(peers)
@@ -276,7 +337,13 @@ impl GraphRuntime {
         mailboxes
             .get(actor_id)
             .cloned()
-            .map(ActorRef::from_mailbox)
+            .map(|mailbox| {
+                ActorRef::from_mailbox(
+                    mailbox,
+                    self.inner.observability.clone(),
+                    Some(Arc::clone(actor_id)),
+                )
+            })
             .ok_or_else(|| GraphError::InvalidState {
                 detail: format!("actor `{actor_id}` is missing its own mailbox sender"),
             })
@@ -292,8 +359,12 @@ impl GraphRuntime {
             let mailbox = self.mailbox_receiver(&actor.id, receivers)?;
             let myself = self.actor_ref(&actor.id, mailboxes)?;
             let actor_shutdown = self.shutdown.child_token();
-            let mut blocking =
-                BlockingRuntime::new(actor.id.clone(), myself.clone(), actor_shutdown.clone());
+            let mut blocking = BlockingRuntime::new(
+                actor.id.clone(),
+                myself.clone(),
+                actor_shutdown.clone(),
+                self.inner.observability.clone(),
+            );
             let ctx = ActorContext {
                 id: actor.id.clone(),
                 mailbox,
@@ -301,9 +372,14 @@ impl GraphRuntime {
                 myself,
                 shutdown: actor_shutdown.clone(),
                 blocking: blocking.spawner(),
+                observability: self.inner.observability.clone(),
             };
             let actor_id = actor.id.clone();
             let factory = Arc::clone(&actor.factory);
+            let actor_span = self
+                .inner
+                .observability
+                .actor_span(&actor_id, ctx.peers.len());
 
             let abort_handle = self.join_set.spawn(async move {
                 let actor_future = factory.make(ctx);
@@ -327,8 +403,10 @@ impl GraphRuntime {
                 };
                 let result = blocking.finish(result).await;
                 ActorTaskExit { actor_id, result }
-            });
+            }
+            .instrument(actor_span));
             self.task_ids.insert(abort_handle.id(), actor.id.clone());
+            self.inner.observability.emit_actor_started(&actor.id);
         }
         Ok(())
     }
@@ -349,8 +427,18 @@ impl GraphRuntime {
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "<unknown>".to_owned());
                 if err.is_panic() {
+                    self.inner.observability.emit_actor_exited(
+                        &actor_id,
+                        ActorExitStatus::Panicked,
+                        None,
+                    );
                     Err(GraphError::ActorPanicked { actor_id })
                 } else {
+                    self.inner.observability.emit_actor_exited(
+                        &actor_id,
+                        ActorExitStatus::Cancelled,
+                        None,
+                    );
                     Err(GraphError::ActorCancelled { actor_id })
                 }
             }
@@ -363,6 +451,26 @@ struct ActorTaskExit {
     result: ActorResult,
 }
 
+impl ActorTaskExit {
+    fn status(&self, shutdown_requested: bool) -> ActorExitStatus {
+        match &self.result {
+            Ok(()) if shutdown_requested => ActorExitStatus::Shutdown,
+            Ok(()) => ActorExitStatus::Stopped,
+            Err(_) => ActorExitStatus::Failed,
+        }
+    }
+
+    fn shutdown_cause(&self, shutdown_requested: bool) -> GraphShutdownCause {
+        match self.status(shutdown_requested) {
+            ActorExitStatus::Shutdown => GraphShutdownCause::External,
+            ActorExitStatus::Stopped => GraphShutdownCause::ActorStopped,
+            ActorExitStatus::Failed => GraphShutdownCause::ActorFailed,
+            ActorExitStatus::Panicked => GraphShutdownCause::ActorPanicked,
+            ActorExitStatus::Cancelled => GraphShutdownCause::ActorCancelled,
+        }
+    }
+}
+
 fn classify_actor_exit(exit: ActorTaskExit, shutdown_requested: bool) -> Option<GraphError> {
     match exit.result {
         Ok(()) if shutdown_requested => None,
@@ -373,6 +481,18 @@ fn classify_actor_exit(exit: ActorTaskExit, shutdown_requested: bool) -> Option<
             actor_id: exit.actor_id.to_string(),
             source,
         }),
+    }
+}
+
+fn graph_shutdown_cause_for_error(error: &GraphError) -> GraphShutdownCause {
+    match error {
+        GraphError::ActorStopped { .. } => GraphShutdownCause::ActorStopped,
+        GraphError::ActorFailed { .. } => GraphShutdownCause::ActorFailed,
+        GraphError::ActorPanicked { .. } => GraphShutdownCause::ActorPanicked,
+        GraphError::ActorCancelled { .. } => GraphShutdownCause::ActorCancelled,
+        GraphError::AlreadyRunning | GraphError::InvalidState { .. } => {
+            GraphShutdownCause::External
+        }
     }
 }
 

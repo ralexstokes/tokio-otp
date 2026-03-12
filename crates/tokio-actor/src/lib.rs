@@ -31,6 +31,19 @@
 //! This is especially useful when the graph is hosted inside a supervised
 //! child task and can be restarted by `tokio-supervisor`.
 //!
+//! # Observability
+//!
+//! `tokio-actor` follows the same backend-agnostic pattern as
+//! `tokio-supervisor`:
+//!
+//! - `tracing` spans and structured logs are emitted automatically for graph,
+//!   actor, ingress, and blocking-task lifecycle.
+//! - optional `metrics` counters, gauges, and histograms are available via the
+//!   `metrics` cargo feature.
+//!
+//! Install subscribers and metric recorders in the application boundary or an
+//! example binary, not inside the library.
+//!
 //! # Quick start
 //!
 //! ```no_run
@@ -39,6 +52,7 @@
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let graph = GraphBuilder::new()
+//!     .name("example")
 //!     .actor(ActorSpec::from_actor("frontend", |mut ctx: ActorContext| async move {
 //!         while let Some(envelope) = ctx.recv().await {
 //!             ctx.send("worker", envelope).await?;
@@ -92,11 +106,18 @@
 //! }
 //!
 //! let graph = GraphBuilder::new()
+//!     .name("example")
 //!     .actor(ActorSpec::from_actor("worker", Worker))
 //!     .build()
 //!     .expect("valid graph");
 //! # let _ = graph;
 //! ```
+//!
+//! # Cargo features
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `metrics` | no | Enables `metrics` crate integration for counters, gauges, and histograms. |
 
 mod actor;
 mod blocking;
@@ -106,6 +127,7 @@ mod envelope;
 mod error;
 mod graph;
 mod ingress;
+mod observability;
 
 pub mod prelude {
     pub use crate::{

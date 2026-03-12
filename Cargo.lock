@@ -937,10 +937,15 @@ name = "tokio-actor"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "metrics-util",
  "thiserror",
  "tokio",
  "tokio-supervisor",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

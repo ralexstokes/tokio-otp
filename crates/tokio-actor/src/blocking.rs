@@ -7,6 +7,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use thiserror::Error;
@@ -16,7 +17,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{actor::BoxError, context::ActorRef};
+use crate::{
+    actor::BoxError,
+    context::ActorRef,
+    observability::{BlockingTaskStatus, GraphObservability},
+};
 
 /// Stable identifier for a blocking task owned by an actor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -25,6 +30,13 @@ pub struct BlockingTaskId(u64);
 impl fmt::Display for BlockingTaskId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+#[cfg(test)]
+impl BlockingTaskId {
+    pub(crate) const fn from_u64(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -294,6 +306,7 @@ impl BlockingRuntime {
         actor_id: Arc<str>,
         myself: ActorRef,
         actor_shutdown: CancellationToken,
+        observability: GraphObservability,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -304,6 +317,7 @@ impl BlockingRuntime {
                 actor_shutdown,
                 state: Mutex::new(BlockingState::default()),
                 event_tx,
+                observability,
             }),
             event_rx,
         }
@@ -378,6 +392,7 @@ struct BlockingRuntimeInner {
     actor_shutdown: CancellationToken,
     state: Mutex<BlockingState>,
     event_tx: mpsc::UnboundedSender<BlockingRuntimeEvent>,
+    observability: GraphObservability,
 }
 
 impl BlockingRuntimeInner {
@@ -393,6 +408,7 @@ impl BlockingRuntimeInner {
         let cancel = CancellationToken::new();
         let state = Arc::new(BlockingTaskState::default());
         let (completion_tx, completion_rx) = oneshot::channel();
+        let started_at = Instant::now();
 
         let id = {
             let mut state = self.lock_state();
@@ -412,8 +428,12 @@ impl BlockingRuntimeInner {
         let actor_shutdown = self.actor_shutdown.clone();
         let myself = self.myself.clone();
         let event_tx = self.event_tx.clone();
+        let actor_id = Arc::clone(&self.actor_id);
+        let observability = self.observability.clone();
+        let span = observability.blocking_task_span(&actor_id, id, task_name.as_deref());
 
         let join_handle = spawn_blocking(move || {
+            let _span_guard = span.enter();
             let ctx = BlockingContext {
                 myself,
                 actor_shutdown,
@@ -427,6 +447,8 @@ impl BlockingRuntimeInner {
                 }
                 Err(_) => Err(BlockingTaskError::Panicked),
             };
+            let status = blocking_status_for_result(&result);
+            let error = result.as_ref().err().map(std::string::ToString::to_string);
 
             let failure = result
                 .as_ref()
@@ -434,6 +456,14 @@ impl BlockingRuntimeInner {
                 .filter(|error| !matches!(error, BlockingTaskError::Cancelled))
                 .cloned()
                 .map(|error| BlockingTaskFailure::new(id, completion_name.clone(), error));
+            observability.emit_blocking_task_finished(
+                &actor_id,
+                id,
+                completion_name.as_deref(),
+                status,
+                started_at.elapsed(),
+                error.as_deref(),
+            );
             let _ = completion_tx.send(result);
             let _ = event_tx.send(BlockingRuntimeEvent::Completed { task_id: id });
             failure
@@ -449,6 +479,8 @@ impl BlockingRuntimeInner {
                 join_handle,
             },
         );
+        self.observability
+            .emit_blocking_task_started(&self.actor_id, id, task_name.as_deref());
 
         Ok(BlockingHandle {
             id,
@@ -508,4 +540,16 @@ struct BlockingTaskEntry {
     cancel: CancellationToken,
     state: Arc<BlockingTaskState>,
     join_handle: JoinHandle<Option<BlockingTaskFailure>>,
+}
+
+fn blocking_status_for_result(result: &Result<(), BlockingTaskError>) -> BlockingTaskStatus {
+    match result {
+        Ok(()) => BlockingTaskStatus::Completed,
+        Err(BlockingTaskError::Cancelled) => BlockingTaskStatus::Cancelled,
+        Err(BlockingTaskError::Failed(_)) => BlockingTaskStatus::Failed,
+        Err(BlockingTaskError::Panicked | BlockingTaskError::Unavailable) => {
+            BlockingTaskStatus::Panicked
+        }
+        Err(BlockingTaskError::Rejected(_)) => BlockingTaskStatus::Failed,
+    }
 }

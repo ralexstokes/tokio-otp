@@ -109,6 +109,42 @@ async fn delivers_messages_across_linked_actors() {
     stop_graph(stop, task).await;
 }
 
+#[test]
+fn graph_preserves_explicit_name() {
+    let graph = GraphBuilder::new()
+        .name("orders")
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |_ctx: ActorContext| async { Ok(()) },
+        ))
+        .build()
+        .expect("valid graph");
+
+    assert_eq!(graph.name(), "orders");
+}
+
+#[test]
+fn graph_generates_unique_anonymous_names() {
+    let first = GraphBuilder::new()
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |_ctx: ActorContext| async { Ok(()) },
+        ))
+        .build()
+        .expect("valid graph");
+    let second = GraphBuilder::new()
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |_ctx: ActorContext| async { Ok(()) },
+        ))
+        .build()
+        .expect("valid graph");
+
+    assert_ne!(first.name(), second.name());
+    assert!(first.name().starts_with("graph-"));
+    assert!(second.name().starts_with("graph-"));
+}
+
 #[derive(Clone)]
 struct ForwardingActor;
 

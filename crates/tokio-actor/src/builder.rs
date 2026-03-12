@@ -8,6 +8,7 @@ use crate::{
     error::BuildError,
     graph::{Graph, GraphInner, IngressDefinition},
     ingress::IngressBinding,
+    observability::{GraphObservability, anonymous_graph_name},
 };
 
 /// Builder for constructing a validated actor graph.
@@ -15,6 +16,7 @@ use crate::{
 /// Graphs are static in this first iteration: actors, links, and ingress
 /// points are all defined up front before calling [`build`](Self::build).
 pub struct GraphBuilder {
+    name: Option<String>,
     actors: Vec<ActorSpec>,
     links: Vec<(String, String)>,
     ingresses: Vec<(String, String)>,
@@ -34,11 +36,22 @@ impl GraphBuilder {
     /// 64 messages per actor.
     pub fn new() -> Self {
         Self {
+            name: None,
             actors: Vec::new(),
             links: Vec::new(),
             ingresses: Vec::new(),
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
         }
+    }
+
+    /// Sets the graph name used in tracing fields and metric labels.
+    ///
+    /// If omitted, a stable anonymous name is generated during
+    /// [`build`](Self::build).
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Appends an actor to the graph.
@@ -75,6 +88,14 @@ impl GraphBuilder {
 
     /// Validates the graph and returns an immutable [`Graph`].
     pub fn build(self) -> Result<Graph, BuildError> {
+        let graph_name = match self.name {
+            Some(name) if name.is_empty() => {
+                return Err(BuildError::InvalidConfig("graph name must not be empty"));
+            }
+            Some(name) => name.into(),
+            None => anonymous_graph_name(),
+        };
+
         if self.actors.is_empty() {
             return Err(BuildError::EmptyActors);
         }
@@ -144,6 +165,7 @@ impl GraphBuilder {
             mailbox_capacity: self.mailbox_capacity,
             ingresses,
             running: AtomicBool::new(false),
+            observability: GraphObservability::new(graph_name),
         }))
     }
 }

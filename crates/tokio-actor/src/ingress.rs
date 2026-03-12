@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use tokio::sync::{mpsc, watch};
 
 use crate::{
     envelope::Envelope,
     error::{IngressError, SendError},
+    observability::{GraphObservability, MessageOperation, SendRejection},
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -86,12 +87,12 @@ impl Default for IngressBinding {
 }
 
 impl IngressBinding {
-    pub(crate) fn bind(&self, mailbox: MailboxRef) {
-        self.current.send_replace(Some(mailbox));
+    pub(crate) fn bind(&self, mailbox: MailboxRef) -> bool {
+        self.current.send_replace(Some(mailbox)).is_none()
     }
 
-    pub(crate) fn clear(&self) {
-        self.current.send_replace(None);
+    pub(crate) fn clear(&self) -> bool {
+        self.current.send_replace(None).is_some()
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<Option<MailboxRef>> {
@@ -109,6 +110,7 @@ pub struct IngressHandle {
     name: Arc<str>,
     actor_id: Arc<str>,
     binding: watch::Receiver<Option<MailboxRef>>,
+    observability: GraphObservability,
 }
 
 impl IngressHandle {
@@ -116,11 +118,13 @@ impl IngressHandle {
         name: Arc<str>,
         actor_id: Arc<str>,
         binding: watch::Receiver<Option<MailboxRef>>,
+        observability: GraphObservability,
     ) -> Self {
         Self {
             name,
             actor_id,
             binding,
+            observability,
         }
     }
 
@@ -159,21 +163,45 @@ impl IngressHandle {
 
     /// Sends an envelope through the ingress, waiting for mailbox capacity.
     pub async fn send(&self, envelope: impl Into<Envelope>) -> Result<(), IngressError> {
-        let mailbox = self.current_mailbox()?;
+        let envelope = envelope.into();
+        let envelope_len = envelope.as_slice().len();
+        let started_at = Instant::now();
 
-        mailbox
-            .send(envelope.into())
-            .await
-            .map_err(|err| self.map_mailbox_error(err))
+        let result = match self.current_mailbox() {
+            Ok(mailbox) => mailbox
+                .send(envelope)
+                .await
+                .map_err(|err| self.map_mailbox_error(err)),
+            Err(error) => Err(error),
+        };
+        self.observe_send(
+            MessageOperation::Send,
+            envelope_len,
+            started_at.elapsed(),
+            &result,
+        );
+        result
     }
 
     /// Attempts to send an envelope through the ingress without waiting.
     pub fn try_send(&self, envelope: impl Into<Envelope>) -> Result<(), IngressError> {
-        let mailbox = self.current_mailbox()?;
+        let envelope = envelope.into();
+        let envelope_len = envelope.as_slice().len();
+        let started_at = Instant::now();
 
-        mailbox
-            .try_send(envelope.into())
-            .map_err(|err| self.map_mailbox_error(err))
+        let result = match self.current_mailbox() {
+            Ok(mailbox) => mailbox
+                .try_send(envelope)
+                .map_err(|err| self.map_mailbox_error(err)),
+            Err(error) => Err(error),
+        };
+        self.observe_send(
+            MessageOperation::TrySend,
+            envelope_len,
+            started_at.elapsed(),
+            &result,
+        );
+        result
     }
 
     /// Waits until the ingress is bound to a running graph instance.
@@ -183,6 +211,32 @@ impl IngressHandle {
     pub async fn wait_for_binding(&mut self) {
         let _ = self.binding.wait_for(|slot| slot.is_some()).await;
     }
+
+    fn observe_send(
+        &self,
+        operation: MessageOperation,
+        envelope_len: usize,
+        duration: std::time::Duration,
+        result: &Result<(), IngressError>,
+    ) {
+        match result {
+            Ok(()) => self.observability.emit_ingress_message_sent(
+                self.name(),
+                self.target(),
+                operation,
+                envelope_len,
+                duration,
+            ),
+            Err(error) => self.observability.emit_ingress_message_rejected(
+                self.name(),
+                self.target(),
+                operation,
+                ingress_rejection(error),
+                envelope_len,
+                duration,
+            ),
+        }
+    }
 }
 
 impl std::fmt::Debug for IngressHandle {
@@ -191,5 +245,13 @@ impl std::fmt::Debug for IngressHandle {
             .field("name", &self.name)
             .field("target", &self.actor_id)
             .finish()
+    }
+}
+
+fn ingress_rejection(error: &IngressError) -> SendRejection {
+    match error {
+        IngressError::NotRunning { .. } => SendRejection::NotRunning,
+        IngressError::MailboxFull { .. } => SendRejection::MailboxFull,
+        IngressError::MailboxClosed { .. } => SendRejection::MailboxClosed,
     }
 }
