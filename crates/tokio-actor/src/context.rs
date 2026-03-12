@@ -106,23 +106,14 @@ impl ActorRef {
         duration: std::time::Duration,
         result: &Result<(), SendError>,
     ) {
-        match result {
-            Ok(()) => self.observability.emit_actor_message_sent(
-                self.source_actor_id.as_deref(),
-                self.id(),
-                operation,
-                envelope_len,
-                duration,
-            ),
-            Err(error) => self.observability.emit_actor_message_rejected(
-                self.source_actor_id.as_deref(),
-                self.id(),
-                operation,
-                send_rejection(error),
-                envelope_len,
-                duration,
-            ),
-        }
+        self.observability.emit_actor_message(
+            self.source_actor_id.as_deref(),
+            self.id(),
+            operation,
+            envelope_len,
+            duration,
+            result.as_ref().err().map(send_rejection),
+        );
     }
 }
 
@@ -193,18 +184,7 @@ impl ActorContext {
         match self.peers.get(actor_id) {
             Some(peer) => peer.send(envelope).await,
             None => {
-                self.observability.emit_actor_message_rejected(
-                    Some(&self.id),
-                    actor_id,
-                    MessageOperation::Send,
-                    SendRejection::UnknownPeer,
-                    envelope_len,
-                    started_at.elapsed(),
-                );
-                Err(SendError::UnknownPeer {
-                    actor_id: self.id.to_string(),
-                    peer_id: actor_id.to_owned(),
-                })
+                Err(self.unknown_peer(actor_id, MessageOperation::Send, envelope_len, started_at))
             }
         }
     }
@@ -217,20 +197,12 @@ impl ActorContext {
 
         match self.peers.get(actor_id) {
             Some(peer) => peer.try_send(envelope),
-            None => {
-                self.observability.emit_actor_message_rejected(
-                    Some(&self.id),
-                    actor_id,
-                    MessageOperation::TrySend,
-                    SendRejection::UnknownPeer,
-                    envelope_len,
-                    started_at.elapsed(),
-                );
-                Err(SendError::UnknownPeer {
-                    actor_id: self.id.to_string(),
-                    peer_id: actor_id.to_owned(),
-                })
-            }
+            None => Err(self.unknown_peer(
+                actor_id,
+                MessageOperation::TrySend,
+                envelope_len,
+                started_at,
+            )),
         }
     }
 
@@ -263,6 +235,28 @@ impl ActorContext {
     {
         let handle = self.spawn_blocking(options, f)?;
         handle.wait().await
+    }
+
+    fn unknown_peer(
+        &self,
+        actor_id: &str,
+        operation: MessageOperation,
+        envelope_len: usize,
+        started_at: Instant,
+    ) -> SendError {
+        self.observability.emit_actor_message(
+            Some(self.id()),
+            actor_id,
+            operation,
+            envelope_len,
+            started_at.elapsed(),
+            Some(SendRejection::UnknownPeer),
+        );
+
+        SendError::UnknownPeer {
+            actor_id: self.id.to_string(),
+            peer_id: actor_id.to_owned(),
+        }
     }
 }
 

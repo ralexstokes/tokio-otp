@@ -109,26 +109,28 @@ impl GraphObservability {
         status: GraphRunStatus,
         error: Option<&str>,
     ) {
-        match (status, error) {
-            (GraphRunStatus::Ok, _) => info!(
+        if status == GraphRunStatus::Ok {
+            info!(
                 graph = %self.graph_name,
                 status = status.as_str(),
                 duration_secs = duration.as_secs_f64(),
                 "graph stopped"
-            ),
-            (GraphRunStatus::Failed, Some(error)) => warn!(
+            );
+        } else if let Some(error) = error {
+            warn!(
                 graph = %self.graph_name,
                 status = status.as_str(),
                 error = %error,
                 duration_secs = duration.as_secs_f64(),
                 "graph stopped"
-            ),
-            (GraphRunStatus::Failed, None) => warn!(
+            );
+        } else {
+            warn!(
                 graph = %self.graph_name,
                 status = status.as_str(),
                 duration_secs = duration.as_secs_f64(),
                 "graph stopped"
-            ),
+            );
         }
 
         #[cfg(feature = "metrics")]
@@ -186,29 +188,31 @@ impl GraphObservability {
     ) {
         let running = self.running_actors.fetch_sub(1, Ordering::AcqRel) - 1;
 
-        match (status, error) {
-            (ActorExitStatus::Shutdown, _) => debug!(
+        if status == ActorExitStatus::Shutdown {
+            debug!(
                 graph = %self.graph_name,
                 actor_id = %actor_id,
                 status = status.as_str(),
                 running_actors = running,
                 "actor exited"
-            ),
-            (_, Some(error)) => warn!(
+            );
+        } else if let Some(error) = error {
+            warn!(
                 graph = %self.graph_name,
                 actor_id = %actor_id,
                 status = status.as_str(),
                 error = %error,
                 running_actors = running,
                 "actor exited"
-            ),
-            _ => warn!(
+            );
+        } else {
+            warn!(
                 graph = %self.graph_name,
                 actor_id = %actor_id,
                 status = status.as_str(),
                 running_actors = running,
                 "actor exited"
-            ),
+            );
         }
 
         #[cfg(feature = "metrics")]
@@ -260,13 +264,14 @@ impl GraphObservability {
         .set(0.0);
     }
 
-    pub(crate) fn emit_actor_message_sent(
+    pub(crate) fn emit_actor_message(
         &self,
         source_actor_id: Option<&str>,
         target_actor_id: &str,
         operation: MessageOperation,
         envelope_len: usize,
         duration: Duration,
+        rejection: Option<SendRejection>,
     ) {
         self.trace_actor_message(
             source_actor_id,
@@ -274,65 +279,35 @@ impl GraphObservability {
             operation,
             envelope_len,
             duration,
-            None,
+            rejection,
         );
 
         #[cfg(feature = "metrics")]
         {
-            counter!(
-                "actor_graph.messages.sent",
-                "graph" => self.graph_label(),
-                "actor_id" => target_actor_id.to_owned(),
-                "operation" => operation.as_str(),
-            )
-            .increment(1);
+            match rejection {
+                Some(rejection) => counter!(
+                    "actor_graph.messages.rejected",
+                    "graph" => self.graph_label(),
+                    "actor_id" => target_actor_id.to_owned(),
+                    "operation" => operation.as_str(),
+                    "reason" => rejection.as_str(),
+                )
+                .increment(1),
+                None => counter!(
+                    "actor_graph.messages.sent",
+                    "graph" => self.graph_label(),
+                    "actor_id" => target_actor_id.to_owned(),
+                    "operation" => operation.as_str(),
+                )
+                .increment(1),
+            }
             histogram!(
                 "actor_graph.send.duration",
                 "graph" => self.graph_label(),
                 "source" => "actor",
                 "actor_id" => target_actor_id.to_owned(),
                 "operation" => operation.as_str(),
-                "status" => "ok",
-            )
-            .record(duration.as_secs_f64());
-        }
-    }
-
-    pub(crate) fn emit_actor_message_rejected(
-        &self,
-        source_actor_id: Option<&str>,
-        target_actor_id: &str,
-        operation: MessageOperation,
-        rejection: SendRejection,
-        envelope_len: usize,
-        duration: Duration,
-    ) {
-        self.trace_actor_message(
-            source_actor_id,
-            target_actor_id,
-            operation,
-            envelope_len,
-            duration,
-            Some(rejection),
-        );
-
-        #[cfg(feature = "metrics")]
-        {
-            counter!(
-                "actor_graph.messages.rejected",
-                "graph" => self.graph_label(),
-                "actor_id" => target_actor_id.to_owned(),
-                "operation" => operation.as_str(),
-                "reason" => rejection.as_str(),
-            )
-            .increment(1);
-            histogram!(
-                "actor_graph.send.duration",
-                "graph" => self.graph_label(),
-                "source" => "actor",
-                "actor_id" => target_actor_id.to_owned(),
-                "operation" => operation.as_str(),
-                "status" => "rejected",
+                "status" => send_status_label(rejection),
             )
             .record(duration.as_secs_f64());
         }
@@ -355,47 +330,14 @@ impl GraphObservability {
         .increment(1);
     }
 
-    pub(crate) fn emit_ingress_message_sent(
+    pub(crate) fn emit_ingress_message(
         &self,
         ingress: &str,
         actor_id: &str,
         operation: MessageOperation,
         envelope_len: usize,
         duration: Duration,
-    ) {
-        self.trace_ingress_message(ingress, actor_id, operation, envelope_len, duration, None);
-
-        #[cfg(feature = "metrics")]
-        {
-            counter!(
-                "actor_graph.ingress.sent",
-                "graph" => self.graph_label(),
-                "ingress" => ingress.to_owned(),
-                "actor_id" => actor_id.to_owned(),
-                "operation" => operation.as_str(),
-            )
-            .increment(1);
-            histogram!(
-                "actor_graph.send.duration",
-                "graph" => self.graph_label(),
-                "source" => "ingress",
-                "ingress" => ingress.to_owned(),
-                "actor_id" => actor_id.to_owned(),
-                "operation" => operation.as_str(),
-                "status" => "ok",
-            )
-            .record(duration.as_secs_f64());
-        }
-    }
-
-    pub(crate) fn emit_ingress_message_rejected(
-        &self,
-        ingress: &str,
-        actor_id: &str,
-        operation: MessageOperation,
-        rejection: SendRejection,
-        envelope_len: usize,
-        duration: Duration,
+        rejection: Option<SendRejection>,
     ) {
         self.trace_ingress_message(
             ingress,
@@ -403,20 +345,30 @@ impl GraphObservability {
             operation,
             envelope_len,
             duration,
-            Some(rejection),
+            rejection,
         );
 
         #[cfg(feature = "metrics")]
         {
-            counter!(
-                "actor_graph.ingress.rejected",
-                "graph" => self.graph_label(),
-                "ingress" => ingress.to_owned(),
-                "actor_id" => actor_id.to_owned(),
-                "operation" => operation.as_str(),
-                "reason" => rejection.as_str(),
-            )
-            .increment(1);
+            match rejection {
+                Some(rejection) => counter!(
+                    "actor_graph.ingress.rejected",
+                    "graph" => self.graph_label(),
+                    "ingress" => ingress.to_owned(),
+                    "actor_id" => actor_id.to_owned(),
+                    "operation" => operation.as_str(),
+                    "reason" => rejection.as_str(),
+                )
+                .increment(1),
+                None => counter!(
+                    "actor_graph.ingress.sent",
+                    "graph" => self.graph_label(),
+                    "ingress" => ingress.to_owned(),
+                    "actor_id" => actor_id.to_owned(),
+                    "operation" => operation.as_str(),
+                )
+                .increment(1),
+            }
             histogram!(
                 "actor_graph.send.duration",
                 "graph" => self.graph_label(),
@@ -424,7 +376,7 @@ impl GraphObservability {
                 "ingress" => ingress.to_owned(),
                 "actor_id" => actor_id.to_owned(),
                 "operation" => operation.as_str(),
-                "status" => "rejected",
+                "status" => send_status_label(rejection),
             )
             .record(duration.as_secs_f64());
         }
@@ -652,6 +604,13 @@ impl GraphObservability {
     }
 }
 
+fn send_status_label(rejection: Option<SendRejection>) -> &'static str {
+    match rejection {
+        Some(_) => "rejected",
+        None => "ok",
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GraphRunStatus {
     Ok,
@@ -848,12 +807,13 @@ mod tests {
         );
         assert_tracing_output(
             || {
-                observability.emit_actor_message_sent(
+                observability.emit_actor_message(
                     Some("frontend"),
                     "worker",
                     MessageOperation::Send,
                     5,
                     Duration::from_millis(2),
+                    None,
                 )
             },
             &[
@@ -864,13 +824,13 @@ mod tests {
         );
         assert_tracing_output(
             || {
-                observability.emit_actor_message_rejected(
+                observability.emit_actor_message(
                     Some("frontend"),
                     "worker",
                     MessageOperation::TrySend,
-                    SendRejection::MailboxFull,
                     5,
                     Duration::from_millis(1),
+                    Some(SendRejection::MailboxFull),
                 )
             },
             &[
@@ -889,12 +849,13 @@ mod tests {
         );
         assert_tracing_output(
             || {
-                observability.emit_ingress_message_sent(
+                observability.emit_ingress_message(
                     "requests",
                     "frontend",
                     MessageOperation::Send,
                     5,
                     Duration::from_millis(3),
+                    None,
                 )
             },
             &[
@@ -905,13 +866,13 @@ mod tests {
         );
         assert_tracing_output(
             || {
-                observability.emit_ingress_message_rejected(
+                observability.emit_ingress_message(
                     "requests",
                     "frontend",
                     MessageOperation::Send,
-                    SendRejection::NotRunning,
                     5,
                     Duration::from_millis(1),
+                    Some(SendRejection::NotRunning),
                 )
             },
             &[
@@ -1015,37 +976,39 @@ mod tests {
 
             observability.emit_graph_started(2, 1, 64);
             observability.emit_actor_started("frontend");
-            observability.emit_actor_message_sent(
+            observability.emit_actor_message(
                 Some("frontend"),
                 "worker",
                 MessageOperation::Send,
                 5,
                 Duration::from_millis(2),
+                None,
             );
-            observability.emit_actor_message_rejected(
+            observability.emit_actor_message(
                 Some("frontend"),
                 "worker",
                 MessageOperation::TrySend,
-                SendRejection::MailboxFull,
                 5,
                 Duration::from_millis(1),
+                Some(SendRejection::MailboxFull),
             );
             observability.emit_message_received("worker", 5);
             observability.emit_ingress_bound("requests", "frontend");
-            observability.emit_ingress_message_sent(
+            observability.emit_ingress_message(
                 "requests",
                 "frontend",
                 MessageOperation::Send,
                 5,
                 Duration::from_millis(3),
+                None,
             );
-            observability.emit_ingress_message_rejected(
+            observability.emit_ingress_message(
                 "requests",
                 "frontend",
                 MessageOperation::Send,
-                SendRejection::NotRunning,
                 5,
                 Duration::from_millis(1),
+                Some(SendRejection::NotRunning),
             );
             observability.emit_blocking_task_started(
                 "worker",

@@ -219,23 +219,14 @@ impl IngressHandle {
         duration: std::time::Duration,
         result: &Result<(), IngressError>,
     ) {
-        match result {
-            Ok(()) => self.observability.emit_ingress_message_sent(
-                self.name(),
-                self.target(),
-                operation,
-                envelope_len,
-                duration,
-            ),
-            Err(error) => self.observability.emit_ingress_message_rejected(
-                self.name(),
-                self.target(),
-                operation,
-                ingress_rejection(error),
-                envelope_len,
-                duration,
-            ),
-        }
+        self.observability.emit_ingress_message(
+            self.name(),
+            self.target(),
+            operation,
+            envelope_len,
+            duration,
+            result.as_ref().err().map(ingress_rejection),
+        );
     }
 }
 
