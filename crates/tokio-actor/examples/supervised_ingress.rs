@@ -4,7 +4,7 @@ use tokio::{
     sync::mpsc,
     time::{sleep, timeout},
 };
-use tokio_actor::{ActorContext, ActorSpec, Envelope, GraphBuilder, IngressError};
+use tokio_actor::{ActorContext, ActorSpec, Envelope, GraphBuilder};
 use tokio_supervisor::{ChildSpec, SupervisorBuilder};
 
 #[tokio::main]
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ingress("requests", "frontend")
         .build()?;
 
-    let ingress = graph.ingress("requests").expect("ingress exists");
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
     let supervised_graph = ChildSpec::new("actor-graph", {
         let graph = graph;
         move |ctx| {
@@ -65,7 +65,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let supervisor = SupervisorBuilder::new().child(supervised_graph).build()?;
     let handle = supervisor.spawn();
 
-    send_when_ready(&ingress, Envelope::from_static(b"hello")).await?;
+    ingress.wait_for_binding().await;
+    ingress.send(Envelope::from_static(b"hello")).await?;
 
     // observe the stream of work for some time...
     let _ = timeout(Duration::from_millis(300), async {
@@ -80,17 +81,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     handle.shutdown_and_wait().await?;
     Ok(())
-}
-
-async fn send_when_ready(
-    ingress: &tokio_actor::IngressHandle,
-    envelope: Envelope,
-) -> Result<(), Box<dyn Error>> {
-    loop {
-        match ingress.send(envelope.clone()).await {
-            Ok(()) => return Ok(()),
-            Err(IngressError::NotRunning { .. }) => sleep(Duration::from_millis(10)).await,
-            Err(err) => return Err(Box::new(err)),
-        }
-    }
 }

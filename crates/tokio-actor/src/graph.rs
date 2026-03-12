@@ -205,7 +205,8 @@ impl GraphRuntime {
 
         for actor in &self.inner.actors {
             let (sender, receiver) = mpsc::channel(self.inner.mailbox_capacity);
-            mailboxes.insert(actor.id.clone(), MailboxRef::new(actor.id.clone(), sender));
+            let actor_id: Arc<str> = Arc::from(actor.id.as_str());
+            mailboxes.insert(actor.id.clone(), MailboxRef::new(actor_id, sender));
             receivers.insert(actor.id.clone(), receiver);
         }
 

@@ -7,7 +7,7 @@ use std::{
 
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{sleep, timeout},
+    time::timeout,
 };
 use tokio_actor::{
     Actor, ActorContext, ActorResult, ActorSpec, BlockingOptions, BlockingTaskFailure, BuildError,
@@ -46,7 +46,7 @@ async fn delivers_messages_across_linked_actors() {
         .build()
         .expect("valid graph");
 
-    let ingress = graph.ingress("requests").expect("ingress exists");
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
     let stop = CancellationToken::new();
     let task = tokio::spawn({
         let graph = graph.clone();
@@ -54,7 +54,11 @@ async fn delivers_messages_across_linked_actors() {
         async move { graph.run_until(stop.cancelled()).await }
     });
 
-    send_when_ready(&ingress, Envelope::from_static(b"hello")).await;
+    ingress.wait_for_binding().await;
+    ingress
+        .send(Envelope::from_static(b"hello"))
+        .await
+        .expect("send succeeded");
 
     let envelope = timeout(Duration::from_secs(1), observed_rx.recv())
         .await
@@ -111,7 +115,7 @@ async fn delivers_messages_with_trait_actors() {
         .build()
         .expect("valid graph");
 
-    let ingress = graph.ingress("requests").expect("ingress exists");
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
     let stop = CancellationToken::new();
     let task = tokio::spawn({
         let graph = graph.clone();
@@ -119,7 +123,11 @@ async fn delivers_messages_with_trait_actors() {
         async move { graph.run_until(stop.cancelled()).await }
     });
 
-    send_when_ready(&ingress, Envelope::from_static(b"hello")).await;
+    ingress.wait_for_binding().await;
+    ingress
+        .send(Envelope::from_static(b"hello"))
+        .await
+        .expect("send succeeded");
 
     let envelope = timeout(Duration::from_secs(1), observed_rx.recv())
         .await
@@ -153,7 +161,7 @@ async fn ingress_handle_rebinds_across_reruns() {
         .build()
         .expect("valid graph");
 
-    let ingress = graph.ingress("requests").expect("ingress exists");
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
 
     let first_stop = CancellationToken::new();
     let first_run = tokio::spawn({
@@ -161,7 +169,11 @@ async fn ingress_handle_rebinds_across_reruns() {
         let first_stop = first_stop.clone();
         async move { graph.run_until(first_stop.cancelled()).await }
     });
-    send_when_ready(&ingress, Envelope::from_static(b"first")).await;
+    ingress.wait_for_binding().await;
+    ingress
+        .send(Envelope::from_static(b"first"))
+        .await
+        .expect("send succeeded");
     let first = timeout(Duration::from_secs(1), observed_rx.recv())
         .await
         .expect("first message arrived")
@@ -189,7 +201,11 @@ async fn ingress_handle_rebinds_across_reruns() {
         let second_stop = second_stop.clone();
         async move { graph.run_until(second_stop.cancelled()).await }
     });
-    send_when_ready(&ingress, Envelope::from_static(b"second")).await;
+    ingress.wait_for_binding().await;
+    ingress
+        .send(Envelope::from_static(b"second"))
+        .await
+        .expect("send succeeded");
     let second = timeout(Duration::from_secs(1), observed_rx.recv())
         .await
         .expect("second message arrived")
@@ -423,17 +439,4 @@ async fn graph_waits_for_dropped_blocking_tasks_to_cleanup() {
         .await
         .expect("cleanup finished before graph returned")
         .expect("cleanup signal received");
-}
-
-async fn send_when_ready(ingress: &tokio_actor::IngressHandle, envelope: Envelope) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    loop {
-        match ingress.send(envelope.clone()).await {
-            Ok(()) => return,
-            Err(IngressError::NotRunning { .. }) if tokio::time::Instant::now() < deadline => {
-                sleep(Duration::from_millis(10)).await;
-            }
-            Err(err) => panic!("unexpected ingress error: {err}"),
-        }
-    }
 }

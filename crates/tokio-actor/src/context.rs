@@ -15,8 +15,12 @@ use crate::{
 
 fn map_mailbox_error(err: MailboxError) -> SendError {
     match err {
-        MailboxError::MailboxFull { actor_id } => SendError::MailboxFull { actor_id },
-        MailboxError::MailboxClosed { actor_id } => SendError::MailboxClosed { actor_id },
+        MailboxError::MailboxFull { actor_id } => SendError::MailboxFull {
+            actor_id: actor_id.to_string(),
+        },
+        MailboxError::MailboxClosed { actor_id } => SendError::MailboxClosed {
+            actor_id: actor_id.to_string(),
+        },
     }
 }
 

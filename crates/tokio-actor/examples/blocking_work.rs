@@ -1,10 +1,7 @@
 use std::{error::Error, thread, time::Duration};
 
-use tokio::{
-    sync::mpsc,
-    time::{sleep, timeout},
-};
-use tokio_actor::{ActorContext, ActorSpec, BlockingOptions, Envelope, GraphBuilder, IngressError};
+use tokio::{sync::mpsc, time::timeout};
+use tokio_actor::{ActorContext, ActorSpec, BlockingOptions, Envelope, GraphBuilder};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -56,7 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ingress("requests", "dispatcher")
         .build()?;
 
-    let ingress = graph.ingress("requests").expect("ingress exists");
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
     let stop = CancellationToken::new();
     let task = tokio::spawn({
         let graph = graph.clone();
@@ -64,7 +61,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         async move { graph.run_until(stop.cancelled()).await }
     });
 
-    send_when_ready(&ingress, Envelope::from_static(b"hello blocking actor")).await?;
+    ingress.wait_for_binding().await;
+    ingress
+        .send(Envelope::from_static(b"hello blocking actor"))
+        .await?;
     let envelope = timeout(Duration::from_secs(2), observed_rx.recv())
         .await?
         .expect("blocking result received");
@@ -76,17 +76,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
     stop.cancel();
     task.await??;
     Ok(())
-}
-
-async fn send_when_ready(
-    ingress: &tokio_actor::IngressHandle,
-    envelope: Envelope,
-) -> Result<(), Box<dyn Error>> {
-    loop {
-        match ingress.send(envelope.clone()).await {
-            Ok(()) => return Ok(()),
-            Err(IngressError::NotRunning { .. }) => sleep(Duration::from_millis(10)).await,
-            Err(err) => return Err(Box::new(err)),
-        }
-    }
 }

@@ -39,8 +39,8 @@ impl BlockingOptions {
         }
     }
 
-    fn into_name(self) -> Option<String> {
-        self.name.map(Cow::into_owned)
+    fn into_name(self) -> Option<Arc<str>> {
+        self.name.map(|cow| Arc::from(cow.as_ref()))
     }
 }
 
@@ -131,14 +131,14 @@ pub enum BlockingTaskError {
 #[derive(Clone, Debug)]
 pub struct BlockingTaskFailure {
     task_id: BlockingTaskId,
-    task_name: Option<String>,
+    task_name: Option<Arc<str>>,
     error: BlockingTaskError,
 }
 
 impl BlockingTaskFailure {
     pub(crate) fn new(
         task_id: BlockingTaskId,
-        task_name: Option<String>,
+        task_name: Option<Arc<str>>,
         error: BlockingTaskError,
     ) -> Self {
         Self {
@@ -211,7 +211,7 @@ impl BlockingContext {
 /// Handle to a blocking task spawned by an actor.
 pub struct BlockingHandle {
     id: BlockingTaskId,
-    name: Option<String>,
+    name: Option<Arc<str>>,
     cancel: CancellationToken,
     completion_rx: oneshot::Receiver<Result<(), BlockingTaskError>>,
 }
@@ -475,7 +475,7 @@ struct BlockingState {
 
 struct BlockingTaskEntry {
     id: BlockingTaskId,
-    name: Option<String>,
+    name: Option<Arc<str>>,
     cancel: CancellationToken,
     join_handle: JoinHandle<()>,
 }

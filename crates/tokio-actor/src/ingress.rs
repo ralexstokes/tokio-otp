@@ -1,21 +1,23 @@
+use std::sync::Arc;
+
 use tokio::sync::{mpsc, watch};
 
 use crate::{envelope::Envelope, error::IngressError};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum MailboxError {
-    MailboxFull { actor_id: String },
-    MailboxClosed { actor_id: String },
+    MailboxFull { actor_id: Arc<str> },
+    MailboxClosed { actor_id: Arc<str> },
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct MailboxRef {
-    actor_id: String,
+    actor_id: Arc<str>,
     sender: mpsc::Sender<Envelope>,
 }
 
 impl MailboxRef {
-    pub(crate) fn new(actor_id: String, sender: mpsc::Sender<Envelope>) -> Self {
+    pub(crate) fn new(actor_id: Arc<str>, sender: mpsc::Sender<Envelope>) -> Self {
         Self { actor_id, sender }
     }
 
@@ -154,6 +156,14 @@ impl IngressHandle {
         mailbox
             .try_send(envelope.into())
             .map_err(|err| self.map_mailbox_error(err))
+    }
+
+    /// Waits until the ingress is bound to a running graph instance.
+    ///
+    /// Returns immediately if the graph is already running. Returns if the
+    /// graph (and its ingress bindings) is dropped.
+    pub async fn wait_for_binding(&mut self) {
+        let _ = self.binding.wait_for(|slot| slot.is_some()).await;
     }
 }
 

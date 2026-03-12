@@ -34,7 +34,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use tokio_actor::{ActorContext, ActorSpec, Envelope, GraphBuilder, IngressError};
+//! use tokio_actor::{ActorContext, ActorSpec, Envelope, GraphBuilder};
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,7 +56,7 @@
 //!     .build()
 //!     .expect("valid graph");
 //!
-//! let ingress = graph.ingress("requests").expect("ingress exists");
+//! let mut ingress = graph.ingress("requests").expect("ingress exists");
 //! let stop = tokio_util::sync::CancellationToken::new();
 //! let task = tokio::spawn({
 //!     let graph = graph.clone();
@@ -64,13 +64,8 @@
 //!     async move { graph.run_until(stop.cancelled()).await }
 //! });
 //!
-//! loop {
-//!     match ingress.send(Envelope::from_static(b"hello")).await {
-//!         Ok(()) => break,
-//!         Err(IngressError::NotRunning { .. }) => tokio::task::yield_now().await,
-//!         Err(err) => panic!("unexpected ingress error: {err}"),
-//!     }
-//! }
+//! ingress.wait_for_binding().await;
+//! ingress.send(Envelope::from_static(b"hello")).await.expect("send succeeded");
 //!
 //! stop.cancel();
 //! task.await.expect("graph task joined").expect("graph stopped cleanly");
