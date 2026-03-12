@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 use crate::{
@@ -21,9 +22,15 @@ pub struct GraphBuilder {
     links: Vec<(String, String)>,
     ingresses: Vec<(String, String)>,
     mailbox_capacity: usize,
+    max_envelope_bytes: Option<usize>,
+    max_blocking_tasks_per_actor: Option<usize>,
+    blocking_shutdown_timeout: Duration,
 }
 
 const DEFAULT_MAILBOX_CAPACITY: usize = 64;
+const DEFAULT_MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
+const DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR: usize = 16;
+const DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Default for GraphBuilder {
     fn default() -> Self {
@@ -41,6 +48,9 @@ impl GraphBuilder {
             links: Vec::new(),
             ingresses: Vec::new(),
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
+            max_envelope_bytes: Some(DEFAULT_MAX_ENVELOPE_BYTES),
+            max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
+            blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
         }
     }
 
@@ -83,6 +93,51 @@ impl GraphBuilder {
     #[must_use]
     pub fn mailbox_capacity(mut self, capacity: usize) -> Self {
         self.mailbox_capacity = capacity;
+        self
+    }
+
+    /// Sets the maximum envelope size accepted by actor mailboxes.
+    ///
+    /// The default limit is 1 MiB. Messages that exceed the limit are rejected
+    /// at send time before they enter a mailbox.
+    #[must_use]
+    pub fn max_envelope_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_envelope_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Disables the mailbox envelope size limit.
+    #[must_use]
+    pub fn disable_envelope_size_limit(mut self) -> Self {
+        self.max_envelope_bytes = None;
+        self
+    }
+
+    /// Sets the maximum number of active blocking tasks allowed per actor.
+    ///
+    /// The default limit is 16 active tasks. New blocking work is rejected
+    /// once the actor reaches the configured limit.
+    #[must_use]
+    pub fn max_blocking_tasks_per_actor(mut self, limit: usize) -> Self {
+        self.max_blocking_tasks_per_actor = Some(limit);
+        self
+    }
+
+    /// Disables the per-actor blocking task concurrency limit.
+    #[must_use]
+    pub fn unbounded_blocking_tasks_per_actor(mut self) -> Self {
+        self.max_blocking_tasks_per_actor = None;
+        self
+    }
+
+    /// Sets how long shutdown waits for blocking tasks to stop after
+    /// cancellation is requested.
+    ///
+    /// The default timeout is 5 seconds. Any blocking task still running after
+    /// the timeout is detached so graph shutdown can complete.
+    #[must_use]
+    pub fn blocking_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.blocking_shutdown_timeout = timeout;
         self
     }
 
@@ -163,6 +218,9 @@ impl GraphBuilder {
             actors,
             links,
             mailbox_capacity: self.mailbox_capacity,
+            max_envelope_bytes: self.max_envelope_bytes,
+            max_blocking_tasks_per_actor: self.max_blocking_tasks_per_actor,
+            blocking_shutdown_timeout: self.blocking_shutdown_timeout,
             ingresses,
             running: AtomicBool::new(false),
             observability: GraphObservability::new(graph_name),

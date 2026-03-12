@@ -61,6 +61,15 @@ pub enum SendError {
     /// The sender attempted to address a peer that is not linked.
     #[error("actor `{actor_id}` is not linked to peer `{peer_id}`")]
     UnknownPeer { actor_id: String, peer_id: String },
+    /// The envelope exceeds the configured mailbox payload limit.
+    #[error(
+        "envelope for actor `{actor_id}` exceeds max size of {max_envelope_bytes} bytes ({envelope_len} bytes)"
+    )]
+    EnvelopeTooLarge {
+        actor_id: String,
+        envelope_len: usize,
+        max_envelope_bytes: usize,
+    },
     /// The target actor's mailbox is full.
     #[error("mailbox for actor `{actor_id}` is full")]
     MailboxFull { actor_id: String },
@@ -75,6 +84,16 @@ pub enum IngressError {
     /// The graph is not currently running, so the ingress is not bound.
     #[error("ingress `{ingress}` is not currently bound to actor `{actor_id}`")]
     NotRunning { ingress: String, actor_id: String },
+    /// The ingress envelope exceeds the configured mailbox payload limit.
+    #[error(
+        "ingress `{ingress}` envelope for actor `{actor_id}` exceeds max size of {max_envelope_bytes} bytes ({envelope_len} bytes)"
+    )]
+    EnvelopeTooLarge {
+        ingress: String,
+        actor_id: String,
+        envelope_len: usize,
+        max_envelope_bytes: usize,
+    },
     /// The ingress target mailbox is full.
     #[error("ingress `{ingress}` target actor `{actor_id}` mailbox is full")]
     MailboxFull { ingress: String, actor_id: String },

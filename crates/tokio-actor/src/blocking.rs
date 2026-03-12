@@ -12,10 +12,12 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     task::{JoinHandle, spawn_blocking},
+    time::{Instant as TokioInstant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use crate::{
     actor::BoxError,
@@ -92,6 +94,12 @@ pub enum SpawnBlockingError {
     /// The actor is shutting down, so new blocking work is rejected.
     #[error("actor `{actor_id}` is shutting down")]
     ShuttingDown { actor_id: String },
+    /// The actor has reached its active blocking task limit.
+    #[error("actor `{actor_id}` has reached its blocking task limit of {max_blocking_tasks}")]
+    AtCapacity {
+        actor_id: String,
+        max_blocking_tasks: usize,
+    },
 }
 
 /// Shared, cloneable wrapper around an error returned by blocking work.
@@ -295,6 +303,7 @@ impl BlockingSpawner {
 pub(crate) struct BlockingRuntime {
     inner: Arc<BlockingRuntimeInner>,
     event_rx: mpsc::UnboundedReceiver<BlockingRuntimeEvent>,
+    shutdown_timeout: std::time::Duration,
 }
 
 pub(crate) enum BlockingRuntimeEvent {
@@ -307,6 +316,8 @@ impl BlockingRuntime {
         myself: ActorRef,
         actor_shutdown: CancellationToken,
         observability: GraphObservability,
+        max_blocking_tasks: Option<usize>,
+        shutdown_timeout: std::time::Duration,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -317,9 +328,11 @@ impl BlockingRuntime {
                 actor_shutdown,
                 state: Mutex::new(BlockingState::default()),
                 event_tx,
+                admission: max_blocking_tasks.map(BlockingAdmission::new),
                 observability,
             }),
             event_rx,
+            shutdown_timeout,
         }
     }
 
@@ -333,7 +346,7 @@ impl BlockingRuntime {
 
     pub(crate) async fn reap_task(&self, task_id: BlockingTaskId) -> Option<BlockingTaskFailure> {
         let entry = self.inner.take_task(task_id)?;
-        Self::await_entry(entry).await
+        self.await_entry(entry).await
     }
 
     pub(crate) async fn finish(
@@ -342,13 +355,12 @@ impl BlockingRuntime {
     ) -> Result<(), BoxError> {
         let mut first_failure = None;
         let entries = self.inner.close_and_take_all();
+        let deadline = TokioInstant::now() + self.shutdown_timeout;
         for entry in entries {
-            Self::record_failure(&mut first_failure, Self::await_entry(entry).await);
-        }
-
-        while let Ok(event) = self.event_rx.try_recv() {
-            let BlockingRuntimeEvent::Completed { task_id } = event;
-            Self::record_failure(&mut first_failure, self.reap_task(task_id).await);
+            Self::record_failure(
+                &mut first_failure,
+                self.await_entry_until(entry, deadline).await,
+            );
         }
 
         match actor_result {
@@ -369,20 +381,109 @@ impl BlockingRuntime {
         }
     }
 
-    async fn await_entry(entry: BlockingTaskEntry) -> Option<BlockingTaskFailure> {
-        let join_result = entry.join_handle.await;
-        if entry.state.was_claimed_for_wait() {
+    async fn await_entry(&self, entry: BlockingTaskEntry) -> Option<BlockingTaskFailure> {
+        let BlockingTaskEntry {
+            id,
+            name,
+            cancel: _cancel,
+            state,
+            join_handle,
+        } = entry;
+        Self::complete_entry(id, name, state, join_handle.await)
+    }
+
+    async fn await_entry_until(
+        &self,
+        entry: BlockingTaskEntry,
+        deadline: TokioInstant,
+    ) -> Option<BlockingTaskFailure> {
+        let BlockingTaskEntry {
+            id,
+            name,
+            cancel: _cancel,
+            state,
+            mut join_handle,
+        } = entry;
+
+        if TokioInstant::now() >= deadline {
+            join_handle.abort();
+            self.log_shutdown_timeout(id, name.as_deref());
+            return None;
+        }
+
+        tokio::select! {
+            joined = &mut join_handle => Self::complete_entry(id, name, state, joined),
+            _ = sleep_until(deadline) => {
+                join_handle.abort();
+                self.log_shutdown_timeout(id, name.as_deref());
+                None
+            }
+        }
+    }
+
+    fn complete_entry(
+        id: BlockingTaskId,
+        name: Option<Arc<str>>,
+        state: Arc<BlockingTaskState>,
+        join_result: Result<Option<BlockingTaskFailure>, tokio::task::JoinError>,
+    ) -> Option<BlockingTaskFailure> {
+        if state.was_claimed_for_wait() {
             return None;
         }
 
         match join_result {
             Ok(failure) => failure,
             Err(_) => Some(BlockingTaskFailure::new(
-                entry.id,
-                entry.name,
+                id,
+                name,
                 BlockingTaskError::Unavailable,
             )),
         }
+    }
+
+    fn log_shutdown_timeout(&self, task_id: BlockingTaskId, task_name: Option<&str>) {
+        match task_name {
+            Some(task_name) => warn!(
+                graph = %self.inner.observability.graph_name(),
+                actor_id = %self.inner.actor_id,
+                task_id = %task_id,
+                task_name = %task_name,
+                shutdown_timeout_secs = self.shutdown_timeout.as_secs_f64(),
+                "blocking task did not stop before shutdown timeout; detaching task"
+            ),
+            None => warn!(
+                graph = %self.inner.observability.graph_name(),
+                actor_id = %self.inner.actor_id,
+                task_id = %task_id,
+                shutdown_timeout_secs = self.shutdown_timeout.as_secs_f64(),
+                "blocking task did not stop before shutdown timeout; detaching task"
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BlockingAdmission {
+    limit: usize,
+    semaphore: Arc<Semaphore>,
+}
+
+impl BlockingAdmission {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            semaphore: Arc::new(Semaphore::new(limit)),
+        }
+    }
+
+    fn try_acquire(&self, actor_id: &Arc<str>) -> Result<OwnedSemaphorePermit, SpawnBlockingError> {
+        self.semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SpawnBlockingError::AtCapacity {
+                actor_id: actor_id.to_string(),
+                max_blocking_tasks: self.limit,
+            })
     }
 }
 
@@ -392,6 +493,7 @@ struct BlockingRuntimeInner {
     actor_shutdown: CancellationToken,
     state: Mutex<BlockingState>,
     event_tx: mpsc::UnboundedSender<BlockingRuntimeEvent>,
+    admission: Option<BlockingAdmission>,
     observability: GraphObservability,
 }
 
@@ -410,7 +512,7 @@ impl BlockingRuntimeInner {
         let (completion_tx, completion_rx) = oneshot::channel();
         let started_at = Instant::now();
 
-        let id = {
+        let (id, permit) = {
             let mut state = self.lock_state();
             if state.closing || self.actor_shutdown.is_cancelled() {
                 return Err(SpawnBlockingError::ShuttingDown {
@@ -418,9 +520,14 @@ impl BlockingRuntimeInner {
                 });
             }
 
+            let permit = self
+                .admission
+                .as_ref()
+                .map(|admission| admission.try_acquire(&self.actor_id))
+                .transpose()?;
             let id = BlockingTaskId(state.next_id);
             state.next_id += 1;
-            id
+            (id, permit)
         };
 
         let completion_name = task_name.clone();
@@ -433,6 +540,7 @@ impl BlockingRuntimeInner {
         let span = observability.blocking_task_span(&actor_id, id, task_name.as_deref());
 
         let join_handle = spawn_blocking(move || {
+            let _permit = permit;
             let _span_guard = span.enter();
             let ctx = BlockingContext {
                 myself,

@@ -1,19 +1,23 @@
 use std::{
     future::pending,
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
 
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot},
     task::JoinHandle,
     time::timeout,
 };
 use tokio_actor::{
-    Actor, ActorContext, ActorResult, ActorSpec, BlockingOptions, BlockingTaskFailure, BuildError,
-    Envelope, Graph, GraphBuilder, GraphError, IngressError,
+    Actor, ActorContext, ActorResult, ActorSpec, BlockingOptions, BlockingTaskError,
+    BlockingTaskFailure, BuildError, Envelope, Graph, GraphBuilder, GraphError, IngressError,
+    SendError, SpawnBlockingError,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -576,4 +580,231 @@ async fn run_blocking_does_not_deadlock_on_self_mailbox_backpressure() {
         .expect("actor reported completion");
 
     stop_graph(stop, task).await;
+}
+
+#[tokio::test]
+async fn ingress_rejects_oversized_envelopes() {
+    let graph = GraphBuilder::new()
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |mut ctx: ActorContext| async move {
+                drain_mailbox(&mut ctx).await;
+                Ok(())
+            },
+        ))
+        .ingress("requests", "worker")
+        .max_envelope_bytes(4)
+        .build()
+        .expect("valid graph");
+
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
+    let (stop, task) = start_graph(&graph);
+
+    ingress.wait_for_binding().await;
+    let error = ingress
+        .send(vec![0_u8; 5])
+        .await
+        .expect_err("oversized ingress message should be rejected");
+    assert_eq!(
+        error,
+        IngressError::EnvelopeTooLarge {
+            ingress: "requests".to_owned(),
+            actor_id: "worker".to_owned(),
+            envelope_len: 5,
+            max_envelope_bytes: 4,
+        }
+    );
+
+    stop_graph(stop, task).await;
+}
+
+#[tokio::test]
+async fn actor_send_rejects_oversized_envelopes() {
+    let (error_tx, error_rx) = oneshot::channel();
+    let error_tx = oneshot_slot(error_tx);
+
+    let graph = GraphBuilder::new()
+        .actor(ActorSpec::from_actor("source", {
+            let error_tx = Arc::clone(&error_tx);
+            move |mut ctx: ActorContext| {
+                let error_tx = Arc::clone(&error_tx);
+                async move {
+                    while let Some(envelope) = ctx.recv().await {
+                        if envelope.as_slice() == b"go" {
+                            let error = ctx
+                                .send("sink", vec![0_u8; 5])
+                                .await
+                                .expect_err("oversized peer message should be rejected");
+                            send_once(&error_tx, error);
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        }))
+        .actor(ActorSpec::from_actor(
+            "sink",
+            |mut ctx: ActorContext| async move {
+                drain_mailbox(&mut ctx).await;
+                Ok(())
+            },
+        ))
+        .link("source", "sink")
+        .ingress("requests", "source")
+        .max_envelope_bytes(4)
+        .build()
+        .expect("valid graph");
+
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
+    let (stop, task) = start_graph(&graph);
+
+    ingress.wait_for_binding().await;
+    ingress
+        .send(Envelope::from_static(b"go"))
+        .await
+        .expect("control message sent");
+
+    let error = timeout(Duration::from_secs(1), error_rx)
+        .await
+        .expect("actor reported oversized send")
+        .expect("oversized send result received");
+    assert_eq!(
+        error,
+        SendError::EnvelopeTooLarge {
+            actor_id: "sink".to_owned(),
+            envelope_len: 5,
+            max_envelope_bytes: 4,
+        }
+    );
+
+    stop_graph(stop, task).await;
+}
+
+#[tokio::test]
+async fn blocking_task_limit_rejects_additional_work() {
+    let blocking_started = Arc::new(Notify::new());
+    let (error_tx, error_rx) = oneshot::channel();
+    let error_tx = oneshot_slot(error_tx);
+
+    let graph = GraphBuilder::new()
+        .actor(ActorSpec::from_actor("worker", {
+            let blocking_started = Arc::clone(&blocking_started);
+            let error_tx = Arc::clone(&error_tx);
+            move |mut ctx: ActorContext| {
+                let blocking_started = Arc::clone(&blocking_started);
+                let error_tx = Arc::clone(&error_tx);
+                async move {
+                    while let Some(envelope) = ctx.recv().await {
+                        if envelope.as_slice() == b"start" {
+                            let handle = ctx
+                                .spawn_blocking(BlockingOptions::named("first"), {
+                                    let blocking_started = Arc::clone(&blocking_started);
+                                    move |job| {
+                                        blocking_started.notify_one();
+                                        loop {
+                                            job.checkpoint()?;
+                                            thread::sleep(Duration::from_millis(10));
+                                        }
+                                    }
+                                })
+                                .expect("first blocking task spawned");
+
+                            blocking_started.notified().await;
+                            let error = ctx
+                                .spawn_blocking(BlockingOptions::named("second"), |_job| Ok(()))
+                                .expect_err("second blocking task should be rejected");
+                            send_once(&error_tx, error);
+
+                            handle.cancel();
+                            assert!(matches!(
+                                handle.wait().await,
+                                Err(BlockingTaskError::Cancelled)
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        }))
+        .ingress("requests", "worker")
+        .max_blocking_tasks_per_actor(1)
+        .build()
+        .expect("valid graph");
+
+    let mut ingress = graph.ingress("requests").expect("ingress exists");
+    let (stop, task) = start_graph(&graph);
+
+    ingress.wait_for_binding().await;
+    ingress
+        .send(Envelope::from_static(b"start"))
+        .await
+        .expect("control message sent");
+
+    let error = timeout(Duration::from_secs(1), error_rx)
+        .await
+        .expect("actor reported blocking limit rejection")
+        .expect("blocking limit result received");
+    assert_eq!(
+        error,
+        SpawnBlockingError::AtCapacity {
+            actor_id: "worker".to_owned(),
+            max_blocking_tasks: 1,
+        }
+    );
+
+    stop_graph(stop, task).await;
+}
+
+#[tokio::test]
+async fn graph_shutdown_detaches_uncooperative_blocking_tasks_after_timeout() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (finished_tx, finished_rx) = oneshot::channel();
+    let started_tx = oneshot_slot(started_tx);
+    let finished_tx = oneshot_slot(finished_tx);
+    let release = Arc::new(AtomicBool::new(false));
+
+    let graph = GraphBuilder::new()
+        .actor(ActorSpec::from_actor("worker", {
+            let started_tx = Arc::clone(&started_tx);
+            let finished_tx = Arc::clone(&finished_tx);
+            let release = Arc::clone(&release);
+            move |mut ctx: ActorContext| {
+                let started_tx = Arc::clone(&started_tx);
+                let finished_tx = Arc::clone(&finished_tx);
+                let release = Arc::clone(&release);
+                async move {
+                    ctx.spawn_blocking(BlockingOptions::named("stuck"), move |_job| {
+                        send_once(&started_tx, ());
+                        while !release.load(Ordering::Acquire) {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        send_once(&finished_tx, ());
+                        Ok(())
+                    })
+                    .expect("blocking task spawned");
+
+                    drain_mailbox(&mut ctx).await;
+                    Ok(())
+                }
+            }
+        }))
+        .blocking_shutdown_timeout(Duration::from_millis(50))
+        .build()
+        .expect("valid graph");
+
+    let (stop, task) = start_graph(&graph);
+
+    started_rx.await.expect("blocking task started");
+    stop.cancel();
+    timeout(Duration::from_secs(1), task)
+        .await
+        .expect("graph stopped in time")
+        .expect("graph task joined")
+        .expect("graph stopped cleanly");
+
+    release.store(true, Ordering::Release);
+    timeout(Duration::from_secs(1), finished_rx)
+        .await
+        .expect("detached blocking task eventually finished")
+        .expect("blocking task cleanup signal received");
 }

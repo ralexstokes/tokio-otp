@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use tokio::{
@@ -37,6 +37,9 @@ pub(crate) struct GraphInner {
     pub(crate) actors: Vec<Arc<ActorSpecInner>>,
     pub(crate) links: HashMap<Arc<str>, Vec<Arc<str>>>,
     pub(crate) mailbox_capacity: usize,
+    pub(crate) max_envelope_bytes: Option<usize>,
+    pub(crate) max_blocking_tasks_per_actor: Option<usize>,
+    pub(crate) blocking_shutdown_timeout: Duration,
     pub(crate) ingresses: HashMap<Arc<str>, IngressDefinition>,
     pub(crate) running: AtomicBool,
     pub(crate) observability: GraphObservability,
@@ -253,7 +256,10 @@ impl GraphRuntime {
         for actor in &self.inner.actors {
             let (sender, receiver) = mpsc::channel(self.inner.mailbox_capacity);
             let id = Arc::clone(&actor.id);
-            mailboxes.insert(Arc::clone(&id), MailboxRef::new(id.clone(), sender));
+            mailboxes.insert(
+                Arc::clone(&id),
+                MailboxRef::new(id.clone(), sender, self.inner.max_envelope_bytes),
+            );
             receivers.insert(id, receiver);
         }
 
@@ -364,6 +370,8 @@ impl GraphRuntime {
                 myself.clone(),
                 actor_shutdown.clone(),
                 self.inner.observability.clone(),
+                self.inner.max_blocking_tasks_per_actor,
+                self.inner.blocking_shutdown_timeout,
             );
             let ctx = ActorContext {
                 id: actor.id.clone(),

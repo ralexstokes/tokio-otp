@@ -44,6 +44,20 @@
 //! Install subscribers and metric recorders in the application boundary or an
 //! example binary, not inside the library.
 //!
+//! # Resource limits
+//!
+//! Graphs apply conservative defaults for externally-controlled work:
+//!
+//! - mailboxes still default to 64 queued messages per actor
+//! - envelopes larger than 1 MiB are rejected before entering a mailbox
+//! - actors may run at most 16 blocking tasks concurrently by default
+//! - shutdown waits up to 5 seconds for blocking tasks to stop, then detaches
+//!   any remaining work so the graph can terminate
+//!
+//! Use [`GraphBuilder`] to tune or disable these limits for a specific graph.
+//! Blocking closures should call [`BlockingContext::checkpoint`] or otherwise
+//! observe cancellation regularly when graceful shutdown matters.
+//!
 //! # Quick start
 //!
 //! ```no_run

@@ -10,8 +10,17 @@ use crate::{
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum MailboxError {
-    MailboxFull { actor_id: Arc<str> },
-    MailboxClosed { actor_id: Arc<str> },
+    EnvelopeTooLarge {
+        actor_id: Arc<str>,
+        envelope_len: usize,
+        max_envelope_bytes: usize,
+    },
+    MailboxFull {
+        actor_id: Arc<str>,
+    },
+    MailboxClosed {
+        actor_id: Arc<str>,
+    },
 }
 
 impl MailboxError {
@@ -32,6 +41,15 @@ impl MailboxError {
 
     pub(crate) fn into_send_error(self) -> SendError {
         match self {
+            Self::EnvelopeTooLarge {
+                actor_id,
+                envelope_len,
+                max_envelope_bytes,
+            } => SendError::EnvelopeTooLarge {
+                actor_id: actor_id.to_string(),
+                envelope_len,
+                max_envelope_bytes,
+            },
             Self::MailboxFull { actor_id } => SendError::MailboxFull {
                 actor_id: actor_id.to_string(),
             },
@@ -46,11 +64,20 @@ impl MailboxError {
 pub(crate) struct MailboxRef {
     actor_id: Arc<str>,
     sender: mpsc::Sender<Envelope>,
+    max_envelope_bytes: Option<usize>,
 }
 
 impl MailboxRef {
-    pub(crate) fn new(actor_id: Arc<str>, sender: mpsc::Sender<Envelope>) -> Self {
-        Self { actor_id, sender }
+    pub(crate) fn new(
+        actor_id: Arc<str>,
+        sender: mpsc::Sender<Envelope>,
+        max_envelope_bytes: Option<usize>,
+    ) -> Self {
+        Self {
+            actor_id,
+            sender,
+            max_envelope_bytes,
+        }
     }
 
     pub(crate) fn actor_id(&self) -> &str {
@@ -62,6 +89,7 @@ impl MailboxRef {
     }
 
     pub(crate) async fn send(&self, envelope: Envelope) -> Result<(), MailboxError> {
+        self.validate_envelope(&envelope)?;
         self.sender
             .send(envelope)
             .await
@@ -69,6 +97,7 @@ impl MailboxRef {
     }
 
     pub(crate) fn try_send(&self, envelope: Envelope) -> Result<(), MailboxError> {
+        self.validate_envelope(&envelope)?;
         self.sender
             .try_send(envelope)
             .map_err(|err| MailboxError::from_try_send(&self.actor_id, err))
@@ -76,6 +105,23 @@ impl MailboxRef {
 
     pub(crate) fn blocking_send(&self, envelope: Envelope) -> Result<(), MailboxError> {
         self.try_send(envelope)
+    }
+
+    fn validate_envelope(&self, envelope: &Envelope) -> Result<(), MailboxError> {
+        let Some(max_envelope_bytes) = self.max_envelope_bytes else {
+            return Ok(());
+        };
+
+        let envelope_len = envelope.as_slice().len();
+        if envelope_len <= max_envelope_bytes {
+            return Ok(());
+        }
+
+        Err(MailboxError::EnvelopeTooLarge {
+            actor_id: Arc::clone(&self.actor_id),
+            envelope_len,
+            max_envelope_bytes,
+        })
     }
 }
 
@@ -144,6 +190,16 @@ impl IngressHandle {
 
     fn map_mailbox_error(&self, err: MailboxError) -> IngressError {
         match err {
+            MailboxError::EnvelopeTooLarge {
+                envelope_len,
+                max_envelope_bytes,
+                ..
+            } => IngressError::EnvelopeTooLarge {
+                ingress: self.name.to_string(),
+                actor_id: self.actor_id.to_string(),
+                envelope_len,
+                max_envelope_bytes,
+            },
             MailboxError::MailboxFull { .. } => IngressError::MailboxFull {
                 ingress: self.name.to_string(),
                 actor_id: self.actor_id.to_string(),
@@ -246,6 +302,7 @@ impl std::fmt::Debug for IngressHandle {
 fn ingress_rejection(error: &IngressError) -> SendRejection {
     match error {
         IngressError::NotRunning { .. } => SendRejection::NotRunning,
+        IngressError::EnvelopeTooLarge { .. } => SendRejection::EnvelopeTooLarge,
         IngressError::MailboxFull { .. } => SendRejection::MailboxFull,
         IngressError::MailboxClosed { .. } => SendRejection::MailboxClosed,
     }

@@ -640,6 +640,7 @@ fn shared_label(value: &Arc<str>) -> SharedString {
     SharedString::from(Arc::clone(value))
 }
 
+#[cfg(feature = "metrics")]
 fn send_status_label(rejection: Option<SendRejection>) -> &'static str {
     match rejection {
         Some(_) => "rejected",
@@ -724,6 +725,7 @@ impl MessageOperation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SendRejection {
     UnknownPeer,
+    EnvelopeTooLarge,
     MailboxFull,
     MailboxClosed,
     NotRunning,
@@ -733,6 +735,7 @@ impl SendRejection {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::UnknownPeer => "unknown_peer",
+            Self::EnvelopeTooLarge => "envelope_too_large",
             Self::MailboxFull => "mailbox_full",
             Self::MailboxClosed => "mailbox_closed",
             Self::NotRunning => "not_running",
