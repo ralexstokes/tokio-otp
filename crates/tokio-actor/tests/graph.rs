@@ -8,39 +8,86 @@ use std::{
 
 use tokio::{
     sync::{mpsc, oneshot},
+    task::JoinHandle,
     time::timeout,
 };
 use tokio_actor::{
     Actor, ActorContext, ActorResult, ActorSpec, BlockingOptions, BlockingTaskFailure, BuildError,
-    Envelope, GraphBuilder, GraphError, IngressError,
+    Envelope, Graph, GraphBuilder, GraphError, IngressError,
 };
 use tokio_util::sync::CancellationToken;
+
+fn start_graph(graph: &Graph) -> (CancellationToken, JoinHandle<Result<(), GraphError>>) {
+    let stop = CancellationToken::new();
+    let task = tokio::spawn({
+        let graph = graph.clone();
+        let stop = stop.clone();
+        async move { graph.run_until(stop.cancelled()).await }
+    });
+    (stop, task)
+}
+
+async fn stop_graph(stop: CancellationToken, task: JoinHandle<Result<(), GraphError>>) {
+    stop.cancel();
+    timeout(Duration::from_secs(1), task)
+        .await
+        .expect("graph stopped in time")
+        .expect("graph task joined")
+        .expect("graph stopped cleanly");
+}
+
+async fn recv_envelope(
+    observed_rx: &mut mpsc::UnboundedReceiver<Envelope>,
+    message: &str,
+) -> Envelope {
+    timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect(message)
+        .expect("message observed")
+}
+
+async fn forward_messages(mut ctx: ActorContext, target: &str) -> ActorResult {
+    while let Some(envelope) = ctx.recv().await {
+        ctx.send(target, envelope).await?;
+    }
+    Ok(())
+}
+
+async fn observe_messages(
+    mut ctx: ActorContext,
+    observed_tx: mpsc::UnboundedSender<Envelope>,
+) -> ActorResult {
+    while let Some(envelope) = ctx.recv().await {
+        observed_tx.send(envelope).expect("receiver alive");
+    }
+    Ok(())
+}
+
+async fn drain_mailbox(ctx: &mut ActorContext) {
+    while ctx.recv().await.is_some() {}
+}
+
+fn oneshot_slot<T>(tx: oneshot::Sender<T>) -> Arc<Mutex<Option<oneshot::Sender<T>>>> {
+    Arc::new(Mutex::new(Some(tx)))
+}
+
+fn send_once<T>(slot: &Arc<Mutex<Option<oneshot::Sender<T>>>>, value: T) {
+    if let Some(tx) = slot.lock().expect("mutex not poisoned").take() {
+        let _ = tx.send(value);
+    }
+}
 
 #[tokio::test]
 async fn delivers_messages_across_linked_actors() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "frontend",
-            |mut ctx: ActorContext| async move {
-                while let Some(envelope) = ctx.recv().await {
-                    ctx.send("worker", envelope).await?;
-                }
-                Ok(())
-            },
-        ))
+        .actor(ActorSpec::from_actor("frontend", |ctx: ActorContext| {
+            forward_messages(ctx, "worker")
+        }))
         .actor(ActorSpec::from_actor("worker", {
             let observed_tx = observed_tx.clone();
-            move |mut ctx: ActorContext| {
-                let observed_tx = observed_tx.clone();
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        observed_tx.send(envelope).expect("receiver alive");
-                    }
-                    Ok(())
-                }
-            }
+            move |ctx: ActorContext| observe_messages(ctx, observed_tx.clone())
         }))
         .link("frontend", "worker")
         .ingress("requests", "frontend")
@@ -48,12 +95,7 @@ async fn delivers_messages_across_linked_actors() {
         .expect("valid graph");
 
     let mut ingress = graph.ingress("requests").expect("ingress exists");
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let (stop, task) = start_graph(&graph);
 
     ingress.wait_for_binding().await;
     ingress
@@ -61,27 +103,18 @@ async fn delivers_messages_across_linked_actors() {
         .await
         .expect("send succeeded");
 
-    let envelope = timeout(Duration::from_secs(1), observed_rx.recv())
-        .await
-        .expect("message arrived in time")
-        .expect("message observed");
+    let envelope = recv_envelope(&mut observed_rx, "message arrived in time").await;
     assert_eq!(envelope.as_slice(), b"hello");
 
-    stop.cancel();
-    task.await
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    stop_graph(stop, task).await;
 }
 
 #[derive(Clone)]
 struct ForwardingActor;
 
 impl Actor for ForwardingActor {
-    async fn run(&self, mut ctx: ActorContext) -> ActorResult {
-        while let Some(envelope) = ctx.recv().await {
-            ctx.send("worker", envelope).await?;
-        }
-        Ok(())
+    fn run(&self, ctx: ActorContext) -> impl std::future::Future<Output = ActorResult> + Send {
+        forward_messages(ctx, "worker")
     }
 }
 
@@ -91,11 +124,8 @@ struct ObservingActor {
 }
 
 impl Actor for ObservingActor {
-    async fn run(&self, mut ctx: ActorContext) -> ActorResult {
-        while let Some(envelope) = ctx.recv().await {
-            self.observed_tx.send(envelope).expect("receiver alive");
-        }
-        Ok(())
+    fn run(&self, ctx: ActorContext) -> impl std::future::Future<Output = ActorResult> + Send {
+        observe_messages(ctx, self.observed_tx.clone())
     }
 }
 
@@ -117,12 +147,7 @@ async fn delivers_messages_with_trait_actors() {
         .expect("valid graph");
 
     let mut ingress = graph.ingress("requests").expect("ingress exists");
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let (stop, task) = start_graph(&graph);
 
     ingress.wait_for_binding().await;
     ingress
@@ -130,16 +155,10 @@ async fn delivers_messages_with_trait_actors() {
         .await
         .expect("send succeeded");
 
-    let envelope = timeout(Duration::from_secs(1), observed_rx.recv())
-        .await
-        .expect("message arrived in time")
-        .expect("message observed");
+    let envelope = recv_envelope(&mut observed_rx, "message arrived in time").await;
     assert_eq!(envelope.as_slice(), b"hello");
 
-    stop.cancel();
-    task.await
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    stop_graph(stop, task).await;
 }
 
 #[tokio::test]
@@ -148,15 +167,7 @@ async fn ingress_handle_rebinds_across_reruns() {
     let graph = GraphBuilder::new()
         .actor(ActorSpec::from_actor("frontend", {
             let observed_tx = observed_tx.clone();
-            move |mut ctx: ActorContext| {
-                let observed_tx = observed_tx.clone();
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        observed_tx.send(envelope).expect("receiver alive");
-                    }
-                    Ok(())
-                }
-            }
+            move |ctx: ActorContext| observe_messages(ctx, observed_tx.clone())
         }))
         .ingress("requests", "frontend")
         .build()
@@ -164,28 +175,16 @@ async fn ingress_handle_rebinds_across_reruns() {
 
     let mut ingress = graph.ingress("requests").expect("ingress exists");
 
-    let first_stop = CancellationToken::new();
-    let first_run = tokio::spawn({
-        let graph = graph.clone();
-        let first_stop = first_stop.clone();
-        async move { graph.run_until(first_stop.cancelled()).await }
-    });
+    let (first_stop, first_run) = start_graph(&graph);
     ingress.wait_for_binding().await;
     ingress
         .send(Envelope::from_static(b"first"))
         .await
         .expect("send succeeded");
-    let first = timeout(Duration::from_secs(1), observed_rx.recv())
-        .await
-        .expect("first message arrived")
-        .expect("message observed");
+    let first = recv_envelope(&mut observed_rx, "first message arrived").await;
     assert_eq!(first.as_slice(), b"first");
 
-    first_stop.cancel();
-    first_run
-        .await
-        .expect("first run joined")
-        .expect("first run stopped cleanly");
+    stop_graph(first_stop, first_run).await;
 
     let not_running = ingress.send(Envelope::from_static(b"stopped")).await;
     assert_eq!(
@@ -196,28 +195,16 @@ async fn ingress_handle_rebinds_across_reruns() {
         })
     );
 
-    let second_stop = CancellationToken::new();
-    let second_run = tokio::spawn({
-        let graph = graph.clone();
-        let second_stop = second_stop.clone();
-        async move { graph.run_until(second_stop.cancelled()).await }
-    });
+    let (second_stop, second_run) = start_graph(&graph);
     ingress.wait_for_binding().await;
     ingress
         .send(Envelope::from_static(b"second"))
         .await
         .expect("send succeeded");
-    let second = timeout(Duration::from_secs(1), observed_rx.recv())
-        .await
-        .expect("second message arrived")
-        .expect("message observed");
+    let second = recv_envelope(&mut observed_rx, "second message arrived").await;
     assert_eq!(second.as_slice(), b"second");
 
-    second_stop.cancel();
-    second_run
-        .await
-        .expect("second run joined")
-        .expect("second run stopped cleanly");
+    stop_graph(second_stop, second_run).await;
 }
 
 #[tokio::test]
@@ -275,18 +262,15 @@ async fn actor_error_fails_the_graph() {
 #[tokio::test]
 async fn graph_shutdown_is_cooperative() {
     let (started_tx, started_rx) = oneshot::channel();
-    let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+    let started_tx = oneshot_slot(started_tx);
     let graph = GraphBuilder::new()
         .actor(ActorSpec::from_actor("worker", {
             let started_tx = Arc::clone(&started_tx);
             move |mut ctx: ActorContext| {
                 let started_tx = Arc::clone(&started_tx);
                 async move {
-                    if let Some(tx) = started_tx.lock().expect("mutex not poisoned").take() {
-                        let _ = tx.send(());
-                    }
-
-                    while ctx.recv().await.is_some() {}
+                    send_once(&started_tx, ());
+                    drain_mailbox(&mut ctx).await;
                     Ok(())
                 }
             }
@@ -294,36 +278,24 @@ async fn graph_shutdown_is_cooperative() {
         .build()
         .expect("valid graph");
 
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let (stop, task) = start_graph(&graph);
 
     started_rx.await.expect("actor started");
-    stop.cancel();
-    timeout(Duration::from_secs(1), task)
-        .await
-        .expect("graph stopped in time")
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    stop_graph(stop, task).await;
 }
 
 #[tokio::test]
 async fn graph_can_only_run_once_at_a_time() {
     let (entered_tx, entered_rx) = oneshot::channel();
-    let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+    let entered_tx = oneshot_slot(entered_tx);
     let graph = GraphBuilder::new()
         .actor(ActorSpec::from_actor("worker", {
             let entered_tx = Arc::clone(&entered_tx);
             move |mut ctx: ActorContext| {
                 let entered_tx = Arc::clone(&entered_tx);
                 async move {
-                    if let Some(tx) = entered_tx.lock().expect("mutex not poisoned").take() {
-                        let _ = tx.send(());
-                    }
-                    while ctx.recv().await.is_some() {}
+                    send_once(&entered_tx, ());
+                    drain_mailbox(&mut ctx).await;
                     Ok(())
                 }
             }
@@ -331,22 +303,13 @@ async fn graph_can_only_run_once_at_a_time() {
         .build()
         .expect("valid graph");
 
-    let stop = CancellationToken::new();
-    let first_run = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let (stop, first_run) = start_graph(&graph);
     entered_rx.await.expect("first actor started");
 
     let second_run = graph.run_until(async {}).await;
     assert!(matches!(second_run, Err(GraphError::AlreadyRunning)));
 
-    stop.cancel();
-    first_run
-        .await
-        .expect("first run joined")
-        .expect("first run stopped cleanly");
+    stop_graph(stop, first_run).await;
 }
 
 #[tokio::test]
@@ -360,7 +323,7 @@ async fn dropped_blocking_task_failures_fail_the_actor() {
                 })
                 .expect("blocking task spawned");
 
-                while ctx.recv().await.is_some() {}
+                drain_mailbox(&mut ctx).await;
                 Ok(())
             },
         ))
@@ -386,8 +349,8 @@ async fn dropped_blocking_task_failures_fail_the_actor() {
 async fn graph_waits_for_dropped_blocking_tasks_to_cleanup() {
     let (started_tx, started_rx) = oneshot::channel();
     let (cleaned_tx, cleaned_rx) = oneshot::channel();
-    let started_tx = Arc::new(Mutex::new(Some(started_tx)));
-    let cleaned_tx = Arc::new(Mutex::new(Some(cleaned_tx)));
+    let started_tx = oneshot_slot(started_tx);
+    let cleaned_tx = oneshot_slot(cleaned_tx);
 
     let graph = GraphBuilder::new()
         .actor(ActorSpec::from_actor("worker", {
@@ -398,25 +361,18 @@ async fn graph_waits_for_dropped_blocking_tasks_to_cleanup() {
                 let cleaned_tx = Arc::clone(&cleaned_tx);
                 async move {
                     ctx.spawn_blocking(BlockingOptions::named("cleanup"), move |job| {
-                        if let Some(tx) = started_tx.lock().expect("mutex not poisoned").take() {
-                            let _ = tx.send(());
-                        }
+                        send_once(&started_tx, ());
 
-                        loop {
-                            if job.checkpoint().is_err() {
-                                break;
-                            }
+                        while job.checkpoint().is_ok() {
                             thread::sleep(Duration::from_millis(10));
                         }
 
-                        if let Some(tx) = cleaned_tx.lock().expect("mutex not poisoned").take() {
-                            let _ = tx.send(());
-                        }
+                        send_once(&cleaned_tx, ());
                         Ok(())
                     })
                     .expect("blocking task spawned");
 
-                    while ctx.recv().await.is_some() {}
+                    drain_mailbox(&mut ctx).await;
                     Ok(())
                 }
             }
@@ -424,18 +380,10 @@ async fn graph_waits_for_dropped_blocking_tasks_to_cleanup() {
         .build()
         .expect("valid graph");
 
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let (stop, task) = start_graph(&graph);
 
     started_rx.await.expect("blocking task started");
-    stop.cancel();
-    task.await
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    stop_graph(stop, task).await;
     timeout(Duration::from_secs(1), cleaned_rx)
         .await
         .expect("cleanup finished before graph returned")
@@ -445,7 +393,7 @@ async fn graph_waits_for_dropped_blocking_tasks_to_cleanup() {
 #[tokio::test]
 async fn awaited_blocking_task_failures_can_be_handled_locally() {
     let (handled_tx, handled_rx) = oneshot::channel();
-    let handled_tx = Arc::new(Mutex::new(Some(handled_tx)));
+    let handled_tx = oneshot_slot(handled_tx);
 
     let graph = GraphBuilder::new()
         .actor(ActorSpec::from_actor("worker", {
@@ -460,11 +408,9 @@ async fn awaited_blocking_task_failures_can_be_handled_locally() {
                         .expect("blocking task spawned");
                     handle.wait().await.expect_err("blocking task should fail");
 
-                    if let Some(tx) = handled_tx.lock().expect("mutex not poisoned").take() {
-                        let _ = tx.send(());
-                    }
+                    send_once(&handled_tx, ());
 
-                    while ctx.recv().await.is_some() {}
+                    drain_mailbox(&mut ctx).await;
                     Ok(())
                 }
             }
@@ -472,20 +418,10 @@ async fn awaited_blocking_task_failures_can_be_handled_locally() {
         .build()
         .expect("valid graph");
 
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let (stop, task) = start_graph(&graph);
 
     handled_rx.await.expect("actor handled blocking failure");
-    stop.cancel();
-    timeout(Duration::from_secs(1), task)
-        .await
-        .expect("graph stopped in time")
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    stop_graph(stop, task).await;
 }
 
 #[tokio::test]
@@ -523,7 +459,7 @@ async fn blocking_task_failure_fails_uncooperative_actor_promptly() {
 #[tokio::test]
 async fn actor_exit_is_not_masked_by_shutdown_after_it_finishes() {
     let (done_tx, done_rx) = oneshot::channel();
-    let done_tx = Arc::new(Mutex::new(Some(done_tx)));
+    let done_tx = oneshot_slot(done_tx);
 
     let graph = GraphBuilder::new()
         .actor(ActorSpec::from_actor("worker", {
@@ -531,9 +467,7 @@ async fn actor_exit_is_not_masked_by_shutdown_after_it_finishes() {
             move |_ctx: ActorContext| {
                 let done_tx = Arc::clone(&done_tx);
                 async move {
-                    if let Some(tx) = done_tx.lock().expect("mutex not poisoned").take() {
-                        let _ = tx.send(());
-                    }
+                    send_once(&done_tx, ());
                     Ok(())
                 }
             }
@@ -557,7 +491,7 @@ async fn actor_exit_is_not_masked_by_shutdown_after_it_finishes() {
 #[tokio::test]
 async fn run_blocking_does_not_deadlock_on_self_mailbox_backpressure() {
     let (finished_tx, finished_rx) = oneshot::channel();
-    let finished_tx = Arc::new(Mutex::new(Some(finished_tx)));
+    let finished_tx = oneshot_slot(finished_tx);
 
     let graph = GraphBuilder::new()
         .actor(ActorSpec::from_actor("worker", {
@@ -579,10 +513,7 @@ async fn run_blocking_does_not_deadlock_on_self_mailbox_backpressure() {
                             .await
                             .expect_err("self-send should surface mailbox pressure");
 
-                            if let Some(tx) = finished_tx.lock().expect("mutex not poisoned").take()
-                            {
-                                let _ = tx.send(());
-                            }
+                            send_once(&finished_tx, ());
                         }
                     }
                     Ok(())
@@ -595,12 +526,7 @@ async fn run_blocking_does_not_deadlock_on_self_mailbox_backpressure() {
         .expect("valid graph");
 
     let mut ingress = graph.ingress("requests").expect("ingress exists");
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let (stop, task) = start_graph(&graph);
 
     ingress.wait_for_binding().await;
     ingress
@@ -613,10 +539,5 @@ async fn run_blocking_does_not_deadlock_on_self_mailbox_backpressure() {
         .expect("actor did not deadlock")
         .expect("actor reported completion");
 
-    stop.cancel();
-    timeout(Duration::from_secs(1), task)
-        .await
-        .expect("graph stopped in time")
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    stop_graph(stop, task).await;
 }

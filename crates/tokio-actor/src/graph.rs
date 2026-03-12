@@ -226,38 +226,71 @@ impl GraphRuntime {
         Ok(())
     }
 
+    fn peer_refs(
+        &self,
+        actor_id: &Arc<str>,
+        mailboxes: &MailboxSenders,
+    ) -> Result<HashMap<Arc<str>, ActorRef>, GraphError> {
+        let linked_peers =
+            self.inner
+                .links
+                .get(actor_id)
+                .ok_or_else(|| GraphError::InvalidState {
+                    detail: format!("actor `{actor_id}` is missing its link definition"),
+                })?;
+        let mut peers = HashMap::with_capacity(linked_peers.len());
+
+        for peer_id in linked_peers {
+            let mailbox =
+                mailboxes
+                    .get(peer_id)
+                    .cloned()
+                    .ok_or_else(|| GraphError::InvalidState {
+                        detail: format!(
+                            "actor `{actor_id}` references missing peer mailbox `{peer_id}`"
+                        ),
+                    })?;
+            peers.insert(Arc::clone(peer_id), ActorRef::from_mailbox(mailbox));
+        }
+
+        Ok(peers)
+    }
+
+    fn mailbox_receiver(
+        &self,
+        actor_id: &Arc<str>,
+        receivers: &mut MailboxReceivers,
+    ) -> Result<mpsc::Receiver<Envelope>, GraphError> {
+        receivers
+            .remove(actor_id)
+            .ok_or_else(|| GraphError::InvalidState {
+                detail: format!("actor `{actor_id}` is missing its mailbox receiver"),
+            })
+    }
+
+    fn actor_ref(
+        &self,
+        actor_id: &Arc<str>,
+        mailboxes: &MailboxSenders,
+    ) -> Result<ActorRef, GraphError> {
+        mailboxes
+            .get(actor_id)
+            .cloned()
+            .map(ActorRef::from_mailbox)
+            .ok_or_else(|| GraphError::InvalidState {
+                detail: format!("actor `{actor_id}` is missing its own mailbox sender"),
+            })
+    }
+
     fn spawn_actors(
         &mut self,
         mailboxes: &MailboxSenders,
         receivers: &mut MailboxReceivers,
     ) -> Result<(), GraphError> {
         for actor in &self.inner.actors {
-            let peers = self
-                .inner
-                .links
-                .get(&actor.id)
-                .into_iter()
-                .flatten()
-                .map(|peer_id| {
-                    let mailbox = mailboxes.get(peer_id).cloned();
-                    mailbox.map(|mailbox| (peer_id.clone(), ActorRef::from_mailbox(mailbox)))
-                })
-                .collect::<Option<HashMap<_, _>>>()
-                .ok_or_else(|| GraphError::InvalidState {
-                    detail: format!("actor `{}` references a missing peer mailbox", actor.id),
-                })?;
-            let mailbox = receivers
-                .remove(&actor.id)
-                .ok_or_else(|| GraphError::InvalidState {
-                    detail: format!("actor `{}` is missing its mailbox receiver", actor.id),
-                })?;
-            let myself = mailboxes
-                .get(&actor.id)
-                .cloned()
-                .map(ActorRef::from_mailbox)
-                .ok_or_else(|| GraphError::InvalidState {
-                    detail: format!("actor `{}` is missing its own mailbox sender", actor.id),
-                })?;
+            let peers = self.peer_refs(&actor.id, mailboxes)?;
+            let mailbox = self.mailbox_receiver(&actor.id, receivers)?;
+            let myself = self.actor_ref(&actor.id, mailboxes)?;
             let actor_shutdown = self.shutdown.child_token();
             let mut blocking =
                 BlockingRuntime::new(actor.id.clone(), myself.clone(), actor_shutdown.clone());
@@ -292,7 +325,7 @@ impl GraphRuntime {
                         }
                     }
                 };
-                let result = blocking.finish(result, None).await;
+                let result = blocking.finish(result).await;
                 ActorTaskExit { actor_id, result }
             });
             self.task_ids.insert(abort_handle.id(), actor.id.clone());

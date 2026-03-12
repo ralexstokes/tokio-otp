@@ -13,17 +13,6 @@ use crate::{
     ingress::{MailboxError, MailboxRef},
 };
 
-fn map_mailbox_error(err: MailboxError) -> SendError {
-    match err {
-        MailboxError::MailboxFull { actor_id } => SendError::MailboxFull {
-            actor_id: actor_id.to_string(),
-        },
-        MailboxError::MailboxClosed { actor_id } => SendError::MailboxClosed {
-            actor_id: actor_id.to_string(),
-        },
-    }
-}
-
 /// Cloneable sender for an actor mailbox.
 #[derive(Clone, Debug)]
 pub struct ActorRef {
@@ -45,14 +34,14 @@ impl ActorRef {
         self.mailbox
             .send(envelope.into())
             .await
-            .map_err(map_mailbox_error)
+            .map_err(MailboxError::into_send_error)
     }
 
     /// Attempts to send an envelope without waiting for mailbox capacity.
     pub fn try_send(&self, envelope: impl Into<Envelope>) -> Result<(), SendError> {
         self.mailbox
             .try_send(envelope.into())
-            .map_err(map_mailbox_error)
+            .map_err(MailboxError::into_send_error)
     }
 
     /// Sends an envelope from blocking code without requiring an async context.
@@ -63,7 +52,7 @@ impl ActorRef {
     pub fn blocking_send(&self, envelope: impl Into<Envelope>) -> Result<(), SendError> {
         self.mailbox
             .blocking_send(envelope.into())
-            .map_err(map_mailbox_error)
+            .map_err(MailboxError::into_send_error)
     }
 }
 

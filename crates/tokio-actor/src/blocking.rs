@@ -325,20 +325,16 @@ impl BlockingRuntime {
     pub(crate) async fn finish(
         &mut self,
         actor_result: Result<(), BoxError>,
-        mut first_failure: Option<BlockingTaskFailure>,
     ) -> Result<(), BoxError> {
+        let mut first_failure = None;
         let entries = self.inner.close_and_take_all();
         for entry in entries {
-            if let Some(failure) = Self::await_entry(entry).await {
-                first_failure.get_or_insert(failure);
-            }
+            Self::record_failure(&mut first_failure, Self::await_entry(entry).await);
         }
 
         while let Ok(event) = self.event_rx.try_recv() {
             let BlockingRuntimeEvent::Completed { task_id } = event;
-            if let Some(failure) = self.reap_task(task_id).await {
-                first_failure.get_or_insert(failure);
-            }
+            Self::record_failure(&mut first_failure, self.reap_task(task_id).await);
         }
 
         match actor_result {
@@ -350,26 +346,28 @@ impl BlockingRuntime {
         }
     }
 
+    fn record_failure(
+        first_failure: &mut Option<BlockingTaskFailure>,
+        failure: Option<BlockingTaskFailure>,
+    ) {
+        if first_failure.is_none() {
+            *first_failure = failure;
+        }
+    }
+
     async fn await_entry(entry: BlockingTaskEntry) -> Option<BlockingTaskFailure> {
-        match entry.join_handle.await {
-            Ok(failure) => {
-                if entry.state.was_claimed_for_wait() {
-                    None
-                } else {
-                    failure
-                }
-            }
-            Err(_) => {
-                if entry.state.was_claimed_for_wait() {
-                    None
-                } else {
-                    Some(BlockingTaskFailure::new(
-                        entry.id,
-                        entry.name,
-                        BlockingTaskError::Unavailable,
-                    ))
-                }
-            }
+        let join_result = entry.join_handle.await;
+        if entry.state.was_claimed_for_wait() {
+            return None;
+        }
+
+        match join_result {
+            Ok(failure) => failure,
+            Err(_) => Some(BlockingTaskFailure::new(
+                entry.id,
+                entry.name,
+                BlockingTaskError::Unavailable,
+            )),
         }
     }
 }

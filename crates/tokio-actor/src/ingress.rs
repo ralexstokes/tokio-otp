@@ -2,12 +2,43 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
-use crate::{envelope::Envelope, error::IngressError};
+use crate::{
+    envelope::Envelope,
+    error::{IngressError, SendError},
+};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum MailboxError {
     MailboxFull { actor_id: Arc<str> },
     MailboxClosed { actor_id: Arc<str> },
+}
+
+impl MailboxError {
+    fn closed(actor_id: &Arc<str>) -> Self {
+        Self::MailboxClosed {
+            actor_id: Arc::clone(actor_id),
+        }
+    }
+
+    fn from_try_send(actor_id: &Arc<str>, err: mpsc::error::TrySendError<Envelope>) -> Self {
+        match err {
+            mpsc::error::TrySendError::Full(_) => Self::MailboxFull {
+                actor_id: Arc::clone(actor_id),
+            },
+            mpsc::error::TrySendError::Closed(_) => Self::closed(actor_id),
+        }
+    }
+
+    pub(crate) fn into_send_error(self) -> SendError {
+        match self {
+            Self::MailboxFull { actor_id } => SendError::MailboxFull {
+                actor_id: actor_id.to_string(),
+            },
+            Self::MailboxClosed { actor_id } => SendError::MailboxClosed {
+                actor_id: actor_id.to_string(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -29,31 +60,17 @@ impl MailboxRef {
         self.sender
             .send(envelope)
             .await
-            .map_err(|_| MailboxError::MailboxClosed {
-                actor_id: self.actor_id.clone(),
-            })
+            .map_err(|_| MailboxError::closed(&self.actor_id))
     }
 
     pub(crate) fn try_send(&self, envelope: Envelope) -> Result<(), MailboxError> {
-        self.sender.try_send(envelope).map_err(|err| match err {
-            mpsc::error::TrySendError::Full(_) => MailboxError::MailboxFull {
-                actor_id: self.actor_id.clone(),
-            },
-            mpsc::error::TrySendError::Closed(_) => MailboxError::MailboxClosed {
-                actor_id: self.actor_id.clone(),
-            },
-        })
+        self.sender
+            .try_send(envelope)
+            .map_err(|err| MailboxError::from_try_send(&self.actor_id, err))
     }
 
     pub(crate) fn blocking_send(&self, envelope: Envelope) -> Result<(), MailboxError> {
-        self.sender.try_send(envelope).map_err(|err| match err {
-            mpsc::error::TrySendError::Full(_) => MailboxError::MailboxFull {
-                actor_id: self.actor_id.clone(),
-            },
-            mpsc::error::TrySendError::Closed(_) => MailboxError::MailboxClosed {
-                actor_id: self.actor_id.clone(),
-            },
-        })
+        self.try_send(envelope)
     }
 }
 
