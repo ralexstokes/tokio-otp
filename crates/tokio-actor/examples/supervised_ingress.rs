@@ -4,7 +4,7 @@ use tokio::{
     sync::mpsc,
     time::{sleep, timeout},
 };
-use tokio_actor::{ActorSpec, Envelope, GraphBuilder, IngressError};
+use tokio_actor::{ActorContext, ActorSpec, Envelope, GraphBuilder, IngressError};
 use tokio_supervisor::{ChildSpec, SupervisorBuilder};
 
 #[tokio::main]
@@ -12,22 +12,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("frontend", |mut ctx| async move {
-            while let Some(envelope) = ctx.recv().await {
-                ctx.send("worker", envelope).await?;
-            }
-            Ok(())
-        }))
-        .actor(ActorSpec::native("generator", |ctx| async move {
-            loop {
-                ctx.send("worker", Envelope::from_static(b"some work"))
-                    .await?;
-                sleep(Duration::from_millis(50)).await;
-            }
-        }))
-        .actor(ActorSpec::native("worker", {
+        .actor(ActorSpec::from_actor(
+            "frontend",
+            |mut ctx: ActorContext| async move {
+                while let Some(envelope) = ctx.recv().await {
+                    ctx.send("worker", envelope).await?;
+                }
+                Ok(())
+            },
+        ))
+        .actor(ActorSpec::from_actor(
+            "generator",
+            |ctx: ActorContext| async move {
+                loop {
+                    ctx.send("worker", Envelope::from_static(b"some work"))
+                        .await?;
+                    sleep(Duration::from_millis(50)).await;
+                }
+            },
+        ))
+        .actor(ActorSpec::from_actor("worker", {
             let observed_tx = observed_tx;
-            move |mut ctx| {
+            move |mut ctx: ActorContext| {
                 let observed_tx = observed_tx.clone();
                 async move {
                     while let Some(envelope) = ctx.recv().await {

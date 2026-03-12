@@ -4,7 +4,7 @@ use tokio::{
     sync::mpsc,
     time::{sleep, timeout},
 };
-use tokio_actor::{ActorSpec, BlockingOptions, Envelope, GraphBuilder, IngressError};
+use tokio_actor::{ActorContext, ActorSpec, BlockingOptions, Envelope, GraphBuilder, IngressError};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -12,34 +12,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("dispatcher", |mut ctx| async move {
-            let sink = ctx.peer("sink").expect("linked sink exists");
+        .actor(ActorSpec::from_actor(
+            "dispatcher",
+            |mut ctx: ActorContext| async move {
+                let sink = ctx.peer("sink").expect("linked sink exists");
 
-            while let Some(envelope) = ctx.recv().await {
-                let sink = sink.clone();
-                let _background =
-                    ctx.spawn_blocking(BlockingOptions::named("uppercase"), move |job| {
-                        // emulate heavy work...
-                        for _ in 0..5 {
-                            job.checkpoint()?;
-                            thread::sleep(Duration::from_millis(20));
-                        }
+                while let Some(envelope) = ctx.recv().await {
+                    let sink = sink.clone();
+                    let _background =
+                        ctx.spawn_blocking(BlockingOptions::named("uppercase"), move |job| {
+                            // emulate heavy work...
+                            for _ in 0..5 {
+                                job.checkpoint()?;
+                                thread::sleep(Duration::from_millis(20));
+                            }
 
-                        let uppercased: Vec<u8> = envelope
-                            .as_slice()
-                            .iter()
-                            .map(|byte| byte.to_ascii_uppercase())
-                            .collect();
-                        sink.blocking_send(uppercased)?;
-                        Ok(())
-                    })?;
-            }
+                            let uppercased: Vec<u8> = envelope
+                                .as_slice()
+                                .iter()
+                                .map(|byte| byte.to_ascii_uppercase())
+                                .collect();
+                            sink.blocking_send(uppercased)?;
+                            Ok(())
+                        })?;
+                }
 
-            Ok(())
-        }))
-        .actor(ActorSpec::native("sink", {
+                Ok(())
+            },
+        ))
+        .actor(ActorSpec::from_actor("sink", {
             let observed_tx = observed_tx.clone();
-            move |mut ctx| {
+            move |mut ctx: ActorContext| {
                 let observed_tx = observed_tx.clone();
                 async move {
                     while let Some(envelope) = ctx.recv().await {

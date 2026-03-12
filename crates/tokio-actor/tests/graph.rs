@@ -10,8 +10,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    ActorSpec, BlockingOptions, BlockingTaskFailure, BuildError, Envelope, GraphBuilder,
-    GraphError, IngressError,
+    Actor, ActorContext, ActorResult, ActorSpec, BlockingOptions, BlockingTaskFailure, BuildError,
+    Envelope, GraphBuilder, GraphError, IngressError,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -20,15 +20,18 @@ async fn delivers_messages_across_linked_actors() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("frontend", |mut ctx| async move {
-            while let Some(envelope) = ctx.recv().await {
-                ctx.send("worker", envelope).await?;
-            }
-            Ok(())
-        }))
-        .actor(ActorSpec::native("worker", {
+        .actor(ActorSpec::from_actor(
+            "frontend",
+            |mut ctx: ActorContext| async move {
+                while let Some(envelope) = ctx.recv().await {
+                    ctx.send("worker", envelope).await?;
+                }
+                Ok(())
+            },
+        ))
+        .actor(ActorSpec::from_actor("worker", {
             let observed_tx = observed_tx.clone();
-            move |mut ctx| {
+            move |mut ctx: ActorContext| {
                 let observed_tx = observed_tx.clone();
                 async move {
                     while let Some(envelope) = ctx.recv().await {
@@ -65,13 +68,78 @@ async fn delivers_messages_across_linked_actors() {
         .expect("graph stopped cleanly");
 }
 
+#[derive(Clone)]
+struct ForwardingActor;
+
+impl Actor for ForwardingActor {
+    async fn run(&self, mut ctx: ActorContext) -> ActorResult {
+        while let Some(envelope) = ctx.recv().await {
+            ctx.send("worker", envelope).await?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ObservingActor {
+    observed_tx: mpsc::UnboundedSender<Envelope>,
+}
+
+impl Actor for ObservingActor {
+    async fn run(&self, mut ctx: ActorContext) -> ActorResult {
+        while let Some(envelope) = ctx.recv().await {
+            self.observed_tx.send(envelope).expect("receiver alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn delivers_messages_with_trait_actors() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+
+    let graph = GraphBuilder::new()
+        .actor(ActorSpec::from_actor("frontend", ForwardingActor))
+        .actor(ActorSpec::from_actor(
+            "worker",
+            ObservingActor {
+                observed_tx: observed_tx.clone(),
+            },
+        ))
+        .link("frontend", "worker")
+        .ingress("requests", "frontend")
+        .build()
+        .expect("valid graph");
+
+    let ingress = graph.ingress("requests").expect("ingress exists");
+    let stop = CancellationToken::new();
+    let task = tokio::spawn({
+        let graph = graph.clone();
+        let stop = stop.clone();
+        async move { graph.run_until(stop.cancelled()).await }
+    });
+
+    send_when_ready(&ingress, Envelope::from_static(b"hello")).await;
+
+    let envelope = timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect("message arrived in time")
+        .expect("message observed");
+    assert_eq!(envelope.as_slice(), b"hello");
+
+    stop.cancel();
+    task.await
+        .expect("graph task joined")
+        .expect("graph stopped cleanly");
+}
+
 #[tokio::test]
 async fn ingress_handle_rebinds_across_reruns() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("frontend", {
+        .actor(ActorSpec::from_actor("frontend", {
             let observed_tx = observed_tx.clone();
-            move |mut ctx| {
+            move |mut ctx: ActorContext| {
                 let observed_tx = observed_tx.clone();
                 async move {
                     while let Some(envelope) = ctx.recv().await {
@@ -138,8 +206,14 @@ async fn ingress_handle_rebinds_across_reruns() {
 #[tokio::test]
 async fn rejects_invalid_graph_definitions() {
     let duplicate = GraphBuilder::new()
-        .actor(ActorSpec::native("worker", |_ctx| async { Ok(()) }))
-        .actor(ActorSpec::native("worker", |_ctx| async { Ok(()) }))
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |_ctx: ActorContext| async { Ok(()) },
+        ))
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |_ctx: ActorContext| async { Ok(()) },
+        ))
         .build();
     assert!(matches!(
         duplicate,
@@ -147,7 +221,10 @@ async fn rejects_invalid_graph_definitions() {
     ));
 
     let unknown_link = GraphBuilder::new()
-        .actor(ActorSpec::native("worker", |_ctx| async { Ok(()) }))
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |_ctx: ActorContext| async { Ok(()) },
+        ))
         .link("worker", "missing")
         .build();
     assert!(matches!(
@@ -160,11 +237,14 @@ async fn rejects_invalid_graph_definitions() {
 #[tokio::test]
 async fn actor_error_fails_the_graph() {
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("worker", |_ctx| async move {
-            Err::<(), _>(Box::<dyn std::error::Error + Send + Sync>::from(
-                io::Error::other("boom"),
-            ))
-        }))
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |_ctx: ActorContext| async move {
+                Err::<(), _>(Box::<dyn std::error::Error + Send + Sync>::from(
+                    io::Error::other("boom"),
+                ))
+            },
+        ))
         .build()
         .expect("valid graph");
 
@@ -180,9 +260,9 @@ async fn graph_shutdown_is_cooperative() {
     let (started_tx, started_rx) = oneshot::channel();
     let started_tx = Arc::new(Mutex::new(Some(started_tx)));
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("worker", {
+        .actor(ActorSpec::from_actor("worker", {
             let started_tx = Arc::clone(&started_tx);
-            move |mut ctx| {
+            move |mut ctx: ActorContext| {
                 let started_tx = Arc::clone(&started_tx);
                 async move {
                     if let Some(tx) = started_tx.lock().expect("mutex not poisoned").take() {
@@ -218,9 +298,9 @@ async fn graph_can_only_run_once_at_a_time() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("worker", {
+        .actor(ActorSpec::from_actor("worker", {
             let entered_tx = Arc::clone(&entered_tx);
-            move |mut ctx| {
+            move |mut ctx: ActorContext| {
                 let entered_tx = Arc::clone(&entered_tx);
                 async move {
                     if let Some(tx) = entered_tx.lock().expect("mutex not poisoned").take() {
@@ -255,15 +335,18 @@ async fn graph_can_only_run_once_at_a_time() {
 #[tokio::test]
 async fn dropped_blocking_task_failures_fail_the_actor() {
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("worker", |mut ctx| async move {
-            ctx.spawn_blocking(BlockingOptions::named("boom"), |_job| {
-                Err(io::Error::other("boom").into())
-            })
-            .expect("blocking task spawned");
+        .actor(ActorSpec::from_actor(
+            "worker",
+            |mut ctx: ActorContext| async move {
+                ctx.spawn_blocking(BlockingOptions::named("boom"), |_job| {
+                    Err(io::Error::other("boom").into())
+                })
+                .expect("blocking task spawned");
 
-            while ctx.recv().await.is_some() {}
-            Ok(())
-        }))
+                while ctx.recv().await.is_some() {}
+                Ok(())
+            },
+        ))
         .build()
         .expect("valid graph");
 
@@ -290,10 +373,10 @@ async fn graph_waits_for_dropped_blocking_tasks_to_cleanup() {
     let cleaned_tx = Arc::new(Mutex::new(Some(cleaned_tx)));
 
     let graph = GraphBuilder::new()
-        .actor(ActorSpec::native("worker", {
+        .actor(ActorSpec::from_actor("worker", {
             let started_tx = Arc::clone(&started_tx);
             let cleaned_tx = Arc::clone(&cleaned_tx);
-            move |mut ctx| {
+            move |mut ctx: ActorContext| {
                 let started_tx = Arc::clone(&started_tx);
                 let cleaned_tx = Arc::clone(&cleaned_tx);
                 async move {
