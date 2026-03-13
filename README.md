@@ -3,7 +3,7 @@
 Crates for the tokio ecosystem that are inspired by Erlang/OTP.
 * `tokio-supervisor` - structured task supervision
 * `tokio-actor` - static actor graphs with stable ingress and actor references
-* `tokio-otp` - Runtime for supervising whole graphs or individual actors
+* `tokio-otp` - Runtime wrappers for supervising whole graphs or individual actors
 
 ## Getting started
 

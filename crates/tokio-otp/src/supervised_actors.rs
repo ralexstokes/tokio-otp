@@ -5,7 +5,7 @@ use tokio_supervisor::{
     ChildSpec, Restart, RestartIntensity, ShutdownPolicy, Supervisor, SupervisorBuilder,
 };
 
-use crate::error::BuildError;
+use crate::{error::BuildError, runtime::Runtime};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ActorOverrides {
@@ -106,6 +106,13 @@ impl SupervisedActors {
             .fold(builder, |builder, child| builder.child(child));
         let supervisor = builder.build()?;
         Ok((supervisor, ingresses))
+    }
+
+    /// Adds the actor children to a supervisor builder and packages the result
+    /// into a [`Runtime`].
+    pub fn build_runtime(self, builder: SupervisorBuilder) -> Result<Runtime, BuildError> {
+        let (supervisor, ingresses) = self.build_supervisor(builder)?;
+        Ok(Runtime::new(supervisor, ingresses))
     }
 
     fn validate_overrides(&self) -> Result<(), BuildError> {

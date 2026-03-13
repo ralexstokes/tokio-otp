@@ -13,6 +13,7 @@ metrics = ["tokio-actor/metrics", "tokio-supervisor/metrics"]
 
 [dependencies]
 thiserror.workspace = true
+tokio.workspace = true
 tokio-actor.workspace = true
 tokio-supervisor.workspace = true
 

@@ -54,10 +54,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ingress("requests", "frontend")
         .build()?;
 
-    let (supervisor, mut ingresses) = SupervisedActors::new(graph)?
-        .build_supervisor(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
-    let handle = supervisor.spawn();
-    let mut ingress = ingresses.remove("requests").expect("ingress exists");
+    let runtime = SupervisedActors::new(graph)?
+        .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
+    let handle = runtime.spawn();
+    let mut ingress = handle.ingress("requests").expect("ingress exists");
 
     ingress.wait_for_binding().await;
     ingress.send(Envelope::from_static(b"hello")).await?;
