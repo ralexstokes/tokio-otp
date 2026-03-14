@@ -18,7 +18,7 @@
 //! | [`Graph`] | Immutable, cloneable graph spec that can be rerun. |
 //! | [`ActorSet`] | Decomposed graph where actors can be run independently. |
 //! | [`RunnableActor`] | One actor plus stable peer wiring for per-actor supervision. |
-//! | [`ActorSpec`] | Native Rust actor definition. |
+//! | [`ActorSpec`] | Actor definition. |
 //! | [`ActorContext`] | Mailbox, peers, and shutdown token visible to one actor. |
 //! | [`ActorRef`] | Cloneable stable mailbox sender for a linked peer. |
 //! | [`IngressHandle`] | Stable external sender that survives graph reruns. |
