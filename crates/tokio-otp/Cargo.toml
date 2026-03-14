@@ -9,14 +9,20 @@ keywords = ["tokio", "otp", "actor", "supervisor"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
+console = ["dep:tokio-otp-console"]
 metrics = ["tokio-actor/metrics", "tokio-supervisor/metrics"]
 
 [dependencies]
 thiserror.workspace = true
 tokio.workspace = true
 tokio-actor.workspace = true
+tokio-otp-console = { workspace = true, optional = true }
 tokio-supervisor.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
+
+[[example]]
+name = "console"
+required-features = ["console"]

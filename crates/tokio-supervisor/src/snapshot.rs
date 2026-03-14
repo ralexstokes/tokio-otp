@@ -19,6 +19,7 @@ use crate::{error::SupervisorExit, event::ExitStatusView, strategy::Strategy};
 /// [`SupervisorEvent`](crate::SupervisorEvent), so subscribers reading the
 /// snapshot from an event handler will see already-consistent state.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SupervisorSnapshot {
     /// Current lifecycle state of the supervisor.
     pub state: SupervisorStateView,
@@ -32,6 +33,7 @@ pub struct SupervisorSnapshot {
 
 /// Point-in-time snapshot of a single child.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChildSnapshot {
     /// The child's unique identifier.
     pub id: String,
@@ -102,6 +104,7 @@ impl ChildSnapshot {
 
 /// Lifecycle state of a supervisor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SupervisorStateView {
     /// The supervisor is running and accepting commands.
     Running,
@@ -113,6 +116,7 @@ pub enum SupervisorStateView {
 
 /// Lifecycle state of a child task.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ChildStateView {
     /// The child has been created but its task has not yet started running.
     Starting,
@@ -127,6 +131,7 @@ pub enum ChildStateView {
 
 /// Whether a child is a permanent member of the supervisor or is being removed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ChildMembershipView {
     /// The child is an active member of the supervisor.
     Active,

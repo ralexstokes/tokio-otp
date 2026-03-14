@@ -409,6 +409,15 @@ impl SupervisorHandle {
         self.snapshots_rx.borrow().clone()
     }
 
+    /// Returns the broadcast sender for supervisor lifecycle events.
+    ///
+    /// This is useful when you need to create multiple independent receivers
+    /// (e.g. one per WebSocket connection) by calling
+    /// [`broadcast::Sender::subscribe`] on the returned sender.
+    pub fn event_sender(&self) -> broadcast::Sender<SupervisorEvent> {
+        self.events_tx.clone()
+    }
+
     /// Returns a watch receiver that is updated each time the supervisor's
     /// snapshot changes. Useful for polling or `wait_for`-style patterns.
     pub fn subscribe_snapshots(&self) -> watch::Receiver<SupervisorSnapshot> {

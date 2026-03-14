@@ -80,6 +80,7 @@ pub enum ControlError {
 /// Returned by [`SupervisorHandle::wait`](crate::SupervisorHandle::wait) on
 /// success.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SupervisorExit {
     /// The supervisor was explicitly shut down via
     /// [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).

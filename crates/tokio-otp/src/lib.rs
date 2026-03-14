@@ -31,6 +31,7 @@
 //!   overrides.
 //! - `examples/dynamic_actors.rs` — adding and removing actors at runtime.
 //! - `examples/supervisor_snapshot_trace.rs` — observing runtime state.
+//! - `examples/console.rs` — serving the web console for a supervised runtime.
 
 mod error;
 mod runtime;
@@ -54,6 +55,9 @@ pub mod prelude {
 
     pub use crate::{DynamicActorError, DynamicActorOptions, SupervisedActors, SupervisedGraph};
 }
+
+#[cfg(feature = "console")]
+pub use tokio_otp_console::{Console, ConsoleBuilder, ConsoleHandle};
 
 pub use error::{BuildError, DynamicActorError};
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};

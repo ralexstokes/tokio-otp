@@ -313,6 +313,17 @@ impl RuntimeHandle {
     }
 }
 
+#[cfg(feature = "console")]
+impl RuntimeHandle {
+    /// Returns a [`ConsoleBuilder`](tokio_otp_console::ConsoleBuilder) pre-wired
+    /// with this runtime's snapshot and event channels.
+    pub fn console(&self) -> tokio_otp_console::ConsoleBuilder {
+        tokio_otp_console::Console::builder()
+            .snapshots(self.supervisor.subscribe_snapshots())
+            .events(self.supervisor.event_sender())
+    }
+}
+
 impl std::fmt::Debug for RuntimeHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeHandle")

@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 /// This is a cloneable, displayable view of the exit status; the original error
 /// value (if any) is converted to its `Display` string.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExitStatusView {
     /// The child returned `Ok(())`.
     Completed,
@@ -22,6 +23,7 @@ pub enum ExitStatusView {
 /// One segment of a [`SupervisorEvent::Nested`] path, identifying which child
 /// supervisor forwarded the event.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventPathSegment {
     /// The child id of the nested supervisor that forwarded this event.
     pub id: String,
@@ -40,6 +42,7 @@ pub struct EventPathSegment {
 /// **before** broadcasting the corresponding event, so event handlers can read
 /// already-consistent snapshot state.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SupervisorEvent {
     /// The supervisor has started and all initial children are being spawned.
     SupervisorStarted,

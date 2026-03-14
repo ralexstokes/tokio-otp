@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tokio-otp console</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0f1117;
+    color: #e2e8f0;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: 48px 1fr 250px;
+    grid-template-columns: 60% 40%;
+    grid-template-areas:
+      "header header"
+      "tree   stats"
+      "log    log";
+  }
+
+  @media (max-width: 800px) {
+    body {
+      grid-template-rows: 48px auto auto 250px;
+      grid-template-columns: 1fr;
+      grid-template-areas: "header" "tree" "stats" "log";
+    }
+  }
+
+  /* Header */
+  .header {
+    grid-area: header;
+    background: #1a1d27;
+    border-bottom: 1px solid #2a2d3a;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+  }
+  .header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.5px; }
+  .conn-status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .conn-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    transition: background 0.3s;
+  }
+  .conn-dot.connected { background: #4ade80; box-shadow: 0 0 6px #4ade8066; }
+  .conn-dot.disconnected { background: #f87171; box-shadow: 0 0 6px #f8717166; }
+
+  /* Panels */
+  .panel {
+    overflow-y: auto;
+    padding: 16px;
+  }
+  .tree-panel { grid-area: tree; border-right: 1px solid #2a2d3a; }
+  .stats-panel { grid-area: stats; }
+  .log-panel {
+    grid-area: log;
+    border-top: 1px solid #2a2d3a;
+    padding: 12px 20px;
+  }
+
+  .panel-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #9ca3af;
+    margin-bottom: 12px;
+  }
+
+  /* Tree */
+  details { margin-left: 16px; }
+  details:first-child { margin-left: 0; }
+  summary {
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    transition: background 0.15s;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "\25B6";
+    font-size: 10px;
+    transition: transform 0.15s;
+    color: #9ca3af;
+  }
+  details[open] > summary::before { transform: rotate(90deg); }
+  summary:hover { background: #2a2d3a44; }
+
+  .child-id { font-weight: 600; color: #e2e8f0; }
+  .badge {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .badge-running  { background: #4ade8022; color: #4ade80; }
+  .badge-starting { background: #60a5fa22; color: #60a5fa; }
+  .badge-stopping { background: #fbbf2422; color: #fbbf24; }
+  .badge-stopped  { background: #9ca3af22; color: #9ca3af; }
+  .meta { font-size: 12px; color: #9ca3af; }
+  .membership-removing { color: #fbbf24; }
+
+  .root-node {
+    padding: 6px 10px;
+    border: 1px solid #2a2d3a;
+    border-radius: 6px;
+    background: #1a1d27;
+    margin-bottom: 8px;
+  }
+
+  /* Stats */
+  .stat-card {
+    background: #1a1d27;
+    border: 1px solid #2a2d3a;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+  }
+  .stat-label { color: #9ca3af; }
+  .stat-value { font-weight: 600; }
+
+  /* Log */
+  .log-panel .panel-title { margin-bottom: 8px; }
+  .log-entries { overflow-y: auto; height: calc(100% - 28px); }
+  .log-entry {
+    padding: 3px 0;
+    border-bottom: 1px solid #2a2d3a22;
+    font-size: 13px;
+    display: flex;
+    gap: 10px;
+  }
+  .log-ts { color: #9ca3af; white-space: nowrap; flex-shrink: 0; }
+  .log-msg { color: #e2e8f0; }
+
+  .empty-state { color: #9ca3af; font-style: italic; padding: 20px 0; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <h1>tokio-otp console</h1>
+  <div class="conn-status">
+    <div id="conn-dot" class="conn-dot disconnected"></div>
+    <span id="conn-text">Disconnected</span>
+  </div>
+</header>
+
+<section class="panel tree-panel">
+  <div class="panel-title">Supervision Tree</div>
+  <div id="tree-root"><div class="empty-state">Waiting for snapshot...</div></div>
+</section>
+
+<section class="panel stats-panel">
+  <div class="panel-title">Stats</div>
+  <div id="stats-root"><div class="empty-state">No data yet</div></div>
+</section>
+
+<section class="panel log-panel">
+  <div class="panel-title">Event Log</div>
+  <div class="log-entries" id="log-entries"></div>
+</section>
+
+<script>
+(function () {
+  "use strict";
+
+  const MAX_LOG = 500;
+  let snapshot = null;
+  let logEntries = [];
+
+  // --- WebSocket with auto-reconnect ---
+  let ws = null;
+  let backoff = 1000;
+  const MAX_BACKOFF = 10000;
+
+  function wsUrl() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + location.host + "/ws";
+  }
+
+  function setConnected(ok) {
+    const dot = document.getElementById("conn-dot");
+    const txt = document.getElementById("conn-text");
+    dot.className = "conn-dot " + (ok ? "connected" : "disconnected");
+    txt.textContent = ok ? "Connected" : "Disconnected";
+  }
+
+  function connect() {
+    try { ws = new WebSocket(wsUrl()); } catch (_) { scheduleReconnect(); return; }
+
+    ws.onopen = function () {
+      backoff = 1000;
+      setConnected(true);
+    };
+
+    ws.onclose = function () {
+      setConnected(false);
+      scheduleReconnect();
+    };
+
+    ws.onerror = function () {
+      ws.close();
+    };
+
+    ws.onmessage = function (ev) {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (_) { return; }
+      if (msg.type === "snapshot") {
+        snapshot = msg.data;
+        renderTree();
+        renderStats();
+      } else if (msg.type === "event") {
+        addLogEntry(msg.data);
+      }
+    };
+  }
+
+  function scheduleReconnect() {
+    setTimeout(function () {
+      backoff = Math.min(backoff * 2, MAX_BACKOFF);
+      connect();
+    }, backoff);
+  }
+
+  // --- Rendering: Tree ---
+  function stateBadgeClass(state) {
+    if (!state) return "badge-stopped";
+    switch (state) {
+      case "Running":  return "badge-running";
+      case "Starting": return "badge-starting";
+      case "Stopping": return "badge-stopping";
+      case "Stopped":  return "badge-stopped";
+      default:         return "badge-stopped";
+    }
+  }
+
+  function formatExit(exit) {
+    if (exit === null || exit === undefined) return null;
+    if (typeof exit === "string") return exit;
+    if (exit.Failed !== undefined) return "Failed: " + exit.Failed;
+    return JSON.stringify(exit);
+  }
+
+  function renderChild(child) {
+    var det = document.createElement("details");
+    det.open = true;
+    var sum = document.createElement("summary");
+
+    var idSpan = document.createElement("span");
+    idSpan.className = "child-id";
+    idSpan.textContent = child.id;
+
+    var badge = document.createElement("span");
+    badge.className = "badge " + stateBadgeClass(child.state);
+    badge.textContent = child.state || "Unknown";
+
+    sum.appendChild(idSpan);
+    sum.appendChild(badge);
+
+    var meta = document.createElement("span");
+    meta.className = "meta";
+    var parts = ["gen:" + child.generation, "restarts:" + child.restart_count];
+    if (child.membership === "Removing") {
+      var rm = document.createElement("span");
+      rm.className = "membership-removing";
+      rm.textContent = " [removing]";
+      meta.textContent = parts.join(" | ");
+      meta.appendChild(rm);
+    } else {
+      meta.textContent = parts.join(" | ");
+    }
+    sum.appendChild(meta);
+
+    var exitStr = formatExit(child.last_exit);
+    if (exitStr) {
+      var exitBadge = document.createElement("span");
+      exitBadge.className = "badge " + (exitStr.startsWith("Failed") || exitStr === "Panicked" || exitStr === "Aborted" ? "badge-stopped" : "badge-running");
+      exitBadge.style.fontSize = "11px";
+      if (exitStr.startsWith("Failed") || exitStr === "Panicked" || exitStr === "Aborted") {
+        exitBadge.style.color = "#f87171";
+        exitBadge.style.background = "#f8717122";
+      }
+      exitBadge.textContent = exitStr;
+      sum.appendChild(exitBadge);
+    }
+
+    if (child.next_restart_in) {
+      var nri = document.createElement("span");
+      nri.className = "meta";
+      nri.textContent = "restart in " + child.next_restart_in.secs + "s";
+      sum.appendChild(nri);
+    }
+
+    det.appendChild(sum);
+
+    if (child.supervisor) {
+      var nested = renderSupervisor(child.supervisor);
+      det.appendChild(nested);
+    }
+    return det;
+  }
+
+  function renderSupervisor(sup) {
+    var frag = document.createDocumentFragment();
+    var info = document.createElement("div");
+    info.className = "root-node";
+    info.innerHTML =
+      '<span class="badge ' + stateBadgeClass(sup.state) + '">' + (sup.state || "Unknown") + '</span> ' +
+      '<span class="meta">strategy: ' + (sup.strategy || "?") + '</span>';
+    var exitStr = formatExit(sup.last_exit);
+    if (exitStr) info.innerHTML += ' <span class="meta">last_exit: ' + esc(exitStr) + '</span>';
+    frag.appendChild(info);
+
+    if (sup.children && sup.children.length > 0) {
+      sup.children.forEach(function (c) {
+        frag.appendChild(renderChild(c));
+      });
+    }
+    return frag;
+  }
+
+  function esc(s) {
+    var d = document.createElement("span");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function renderTree() {
+    var root = document.getElementById("tree-root");
+    root.innerHTML = "";
+    if (!snapshot) {
+      root.innerHTML = '<div class="empty-state">Waiting for snapshot...</div>';
+      return;
+    }
+    root.appendChild(renderSupervisor(snapshot));
+  }
+
+  // --- Rendering: Stats ---
+  function countChildren(sup) {
+    var counts = { total: 0, Running: 0, Starting: 0, Stopping: 0, Stopped: 0 };
+    if (!sup || !sup.children) return counts;
+    sup.children.forEach(function (c) {
+      counts.total++;
+      if (counts[c.state] !== undefined) counts[c.state]++;
+      if (c.supervisor) {
+        var nested = countChildren(c.supervisor);
+        counts.total += nested.total;
+        counts.Running += nested.Running;
+        counts.Starting += nested.Starting;
+        counts.Stopping += nested.Stopping;
+        counts.Stopped += nested.Stopped;
+      }
+    });
+    return counts;
+  }
+
+  function renderStats() {
+    var root = document.getElementById("stats-root");
+    if (!snapshot) { root.innerHTML = '<div class="empty-state">No data yet</div>'; return; }
+    var c = countChildren(snapshot);
+    var exitStr = formatExit(snapshot.last_exit);
+
+    root.innerHTML =
+      '<div class="stat-card">' +
+        '<div class="stat-row"><span class="stat-label">Supervisor State</span>' +
+          '<span class="stat-value badge ' + stateBadgeClass(snapshot.state) + '">' + (snapshot.state || "?") + '</span></div>' +
+        '<div class="stat-row"><span class="stat-label">Strategy</span><span class="stat-value">' + (snapshot.strategy || "?") + '</span></div>' +
+        (exitStr ? '<div class="stat-row"><span class="stat-label">Last Exit</span><span class="stat-value" style="color:#f87171">' + esc(exitStr) + '</span></div>' : '') +
+      '</div>' +
+      '<div class="stat-card">' +
+        '<div class="stat-row"><span class="stat-label">Total Children</span><span class="stat-value">' + c.total + '</span></div>' +
+        '<div class="stat-row"><span class="stat-label">Running</span><span class="stat-value" style="color:#4ade80">' + c.Running + '</span></div>' +
+        '<div class="stat-row"><span class="stat-label">Starting</span><span class="stat-value" style="color:#60a5fa">' + c.Starting + '</span></div>' +
+        '<div class="stat-row"><span class="stat-label">Stopping</span><span class="stat-value" style="color:#fbbf24">' + c.Stopping + '</span></div>' +
+        '<div class="stat-row"><span class="stat-label">Stopped</span><span class="stat-value" style="color:#9ca3af">' + c.Stopped + '</span></div>' +
+      '</div>';
+  }
+
+  // --- Rendering: Event Log ---
+  function describeEvent(ev) {
+    if (typeof ev === "string") {
+      switch (ev) {
+        case "SupervisorStarted": return "Supervisor started";
+        case "SupervisorStopping": return "Supervisor stopping";
+        case "SupervisorStopped": return "Supervisor stopped";
+        case "RestartIntensityExceeded": return "Restart intensity exceeded";
+        default: return ev;
+      }
+    }
+    if (ev.ChildStarted) return "Child '" + ev.ChildStarted.id + "' started (gen " + ev.ChildStarted.generation + ")";
+    if (ev.ChildExited) {
+      var st = formatExit(ev.ChildExited.status) || "unknown";
+      return "Child '" + ev.ChildExited.id + "' exited: " + st + " (gen " + ev.ChildExited.generation + ")";
+    }
+    if (ev.ChildRestarted) return "Child '" + ev.ChildRestarted.id + "' restarted (gen " + ev.ChildRestarted.old_generation + " -> " + ev.ChildRestarted.new_generation + ")";
+    if (ev.ChildRestartScheduled) return "Restart scheduled for '" + ev.ChildRestartScheduled.id + "' in " + ev.ChildRestartScheduled.delay.secs + "s";
+    if (ev.ChildRemoveRequested) return "Remove requested for '" + ev.ChildRemoveRequested.id + "'";
+    if (ev.ChildRemoved) return "Child '" + ev.ChildRemoved.id + "' removed";
+    if (ev.GroupRestartScheduled) return "Group restart scheduled in " + ev.GroupRestartScheduled.delay.secs + "s";
+    if (ev.Nested) return "[" + ev.Nested.id + " gen:" + ev.Nested.generation + "] " + describeEvent(ev.Nested.event);
+    return JSON.stringify(ev);
+  }
+
+  function formatTime(d) {
+    return d.toLocaleTimeString("en-GB", { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  }
+
+  function addLogEntry(ev) {
+    logEntries.unshift({ time: new Date(), event: ev });
+    if (logEntries.length > MAX_LOG) logEntries.length = MAX_LOG;
+    renderLog();
+  }
+
+  function renderLog() {
+    var root = document.getElementById("log-entries");
+    var frag = document.createDocumentFragment();
+    logEntries.forEach(function (entry) {
+      var row = document.createElement("div");
+      row.className = "log-entry";
+      var ts = document.createElement("span");
+      ts.className = "log-ts";
+      ts.textContent = formatTime(entry.time);
+      var msg = document.createElement("span");
+      msg.className = "log-msg";
+      msg.textContent = describeEvent(entry.event);
+      row.appendChild(ts);
+      row.appendChild(msg);
+      frag.appendChild(row);
+    });
+    root.innerHTML = "";
+    root.appendChild(frag);
+  }
+
+  // --- Init ---
+  connect();
+})();
+</script>
+</body>
+</html>

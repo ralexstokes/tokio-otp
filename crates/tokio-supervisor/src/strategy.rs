@@ -3,6 +3,7 @@
 ///
 /// Modelled after Erlang/OTP supervisor strategies.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Strategy {
     /// Only the exited child is restarted. Other children are unaffected.
     #[default]

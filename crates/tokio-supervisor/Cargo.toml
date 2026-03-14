@@ -10,9 +10,11 @@ categories = ["asynchronous", "concurrency"]
 
 [features]
 metrics = ["dep:metrics"]
+serde = ["dep:serde"]
 
 [dependencies]
 metrics = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 slab.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

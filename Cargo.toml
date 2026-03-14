@@ -8,6 +8,7 @@ members = [
     "crates/tokio-supervisor",
     "crates/tokio-actor",
     "crates/tokio-otp",
+    "crates/tokio-otp-console",
 ]
 resolver = "3"
 
@@ -15,15 +16,18 @@ resolver = "3"
 name = "tokio-otp"
 
 [workspace.dependencies]
+axum = "0.8"
 bytes = "1.11.0"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 metrics-util = { version = "0.20", features = ["debugging"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 slab = "0.4"
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-actor = { path = "crates/tokio-actor" }
+tokio-otp-console = { path = "crates/tokio-otp-console" }
 tokio-supervisor = { path = "crates/tokio-supervisor" }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tracing = "0.1.44"
