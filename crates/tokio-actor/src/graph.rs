@@ -11,6 +11,7 @@ use std::{
 use tokio::{
     sync::mpsc,
     task::{Id as TaskId, JoinSet},
+    time::{Instant as TokioInstant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -45,6 +46,7 @@ pub(crate) struct GraphInner {
     pub(crate) mailbox_capacity: usize,
     pub(crate) max_envelope_bytes: Option<usize>,
     pub(crate) max_blocking_tasks_per_actor: Option<usize>,
+    pub(crate) actor_shutdown_timeout: Duration,
     pub(crate) blocking_shutdown_timeout: Duration,
     pub(crate) ingresses: HashMap<Arc<str>, IngressDefinition>,
     pub(crate) ingress_names_by_actor: HashMap<Arc<str>, Vec<Arc<str>>>,
@@ -265,6 +267,8 @@ impl GraphRuntime {
         self.spawn_actors(&mut receivers, &mut bindings)?;
 
         let mut shutdown_requested = false;
+        let mut shutdown_deadline = None;
+        let mut actors_aborted = false;
         let mut failure = None;
 
         while !self.join_set.is_empty() {
@@ -286,8 +290,15 @@ impl GraphRuntime {
                                 exit_error.as_deref(),
                             );
 
-                            if !shutdown_requested || exit.result.is_err() {
-                                self.request_shutdown(exit.shutdown_cause(shutdown_requested));
+                            let should_request_shutdown =
+                                !shutdown_requested || exit.result.is_err();
+                            if should_request_shutdown
+                                && self.request_shutdown(exit.shutdown_cause(shutdown_requested))
+                            {
+                                set_shutdown_deadline(
+                                    &mut shutdown_deadline,
+                                    self.inner.actor_shutdown_timeout,
+                                );
                             }
 
                             if let Some(error) = classify_actor_exit(exit, shutdown_requested) {
@@ -295,14 +306,31 @@ impl GraphRuntime {
                             }
                         }
                         Err(error) => {
-                            self.request_shutdown(graph_shutdown_cause_for_error(&error));
+                            if actors_aborted && matches!(error, GraphError::ActorCancelled { .. }) {
+                                continue;
+                            }
+                            if self.request_shutdown(graph_shutdown_cause_for_error(&error)) {
+                                set_shutdown_deadline(
+                                    &mut shutdown_deadline,
+                                    self.inner.actor_shutdown_timeout,
+                                );
+                            }
                             failure.get_or_insert(error);
                         }
                     }
                 }
                 _ = shutdown.as_mut(), if !shutdown_requested => {
                     shutdown_requested = true;
-                    self.request_shutdown(GraphShutdownCause::External);
+                    if self.request_shutdown(GraphShutdownCause::External) {
+                        set_shutdown_deadline(
+                            &mut shutdown_deadline,
+                            self.inner.actor_shutdown_timeout,
+                        );
+                    }
+                }
+                _ = wait_for_shutdown_deadline(shutdown_deadline), if shutdown_deadline.is_some() && !actors_aborted => {
+                    actors_aborted = true;
+                    self.join_set.abort_all();
                 }
             }
         }
@@ -313,13 +341,14 @@ impl GraphRuntime {
         }
     }
 
-    fn request_shutdown(&self, cause: GraphShutdownCause) {
+    fn request_shutdown(&self, cause: GraphShutdownCause) -> bool {
         if self.shutdown.is_cancelled() {
-            return;
+            return false;
         }
 
         self.inner.observability.emit_shutdown_requested(cause);
         self.shutdown.cancel();
+        true
     }
 
     fn create_mailboxes(&self) -> (MailboxSenders, MailboxReceivers) {
@@ -528,6 +557,17 @@ impl GraphRuntime {
                 }
             }
         }
+    }
+}
+
+fn set_shutdown_deadline(deadline: &mut Option<TokioInstant>, timeout: Duration) {
+    deadline.get_or_insert_with(|| TokioInstant::now() + timeout);
+}
+
+async fn wait_for_shutdown_deadline(deadline: Option<TokioInstant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
     }
 }
 

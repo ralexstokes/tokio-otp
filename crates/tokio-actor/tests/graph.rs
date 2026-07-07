@@ -325,6 +325,108 @@ async fn graph_shutdown_is_cooperative() {
 }
 
 #[tokio::test]
+async fn graph_shutdown_aborts_uncooperative_actor_after_timeout() {
+    struct LiveGuard(Arc<AtomicBool>);
+
+    impl Drop for LiveGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
+    let (started_tx, started_rx) = oneshot::channel();
+    let started_tx = oneshot_slot(started_tx);
+    let live = Arc::new(AtomicBool::new(false));
+
+    let graph = GraphBuilder::new()
+        .actor_shutdown_timeout(Duration::from_millis(50))
+        .actor(ActorSpec::from_actor("worker", {
+            let started_tx = Arc::clone(&started_tx);
+            let live = Arc::clone(&live);
+            move |_ctx: ActorContext| {
+                let started_tx = Arc::clone(&started_tx);
+                let live = Arc::clone(&live);
+                async move {
+                    live.store(true, Ordering::Release);
+                    let _guard = LiveGuard(live);
+                    send_once(&started_tx, ());
+                    pending::<()>().await;
+                    Ok(())
+                }
+            }
+        }))
+        .build()
+        .expect("valid graph");
+
+    let (stop, task) = start_graph(&graph);
+
+    started_rx.await.expect("actor started");
+    stop_graph(stop, task).await;
+    assert!(
+        !live.load(Ordering::Acquire),
+        "uncooperative actor should be aborted before graph shutdown returns"
+    );
+}
+
+#[tokio::test]
+async fn actor_failure_aborts_uncooperative_peers_after_timeout() {
+    struct LiveGuard(Arc<AtomicBool>);
+
+    impl Drop for LiveGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
+    let peer_started = Arc::new(Notify::new());
+    let peer_live = Arc::new(AtomicBool::new(false));
+
+    let graph = GraphBuilder::new()
+        .actor_shutdown_timeout(Duration::from_millis(50))
+        .actor(ActorSpec::from_actor("failing", {
+            let peer_started = Arc::clone(&peer_started);
+            move |_ctx: ActorContext| {
+                let peer_started = Arc::clone(&peer_started);
+                async move {
+                    peer_started.notified().await;
+                    Err::<(), _>(Box::<dyn std::error::Error + Send + Sync>::from(
+                        io::Error::other("boom"),
+                    ))
+                }
+            }
+        }))
+        .actor(ActorSpec::from_actor("stubborn", {
+            let peer_started = Arc::clone(&peer_started);
+            let peer_live = Arc::clone(&peer_live);
+            move |_ctx: ActorContext| {
+                let peer_started = Arc::clone(&peer_started);
+                let peer_live = Arc::clone(&peer_live);
+                async move {
+                    peer_live.store(true, Ordering::Release);
+                    let _guard = LiveGuard(peer_live);
+                    peer_started.notify_one();
+                    pending::<()>().await;
+                    Ok(())
+                }
+            }
+        }))
+        .build()
+        .expect("valid graph");
+
+    let result = timeout(Duration::from_secs(1), graph.run_until(pending::<()>()))
+        .await
+        .expect("graph should stop after aborting uncooperative peer");
+    match result {
+        Err(GraphError::ActorFailed { actor_id, .. }) => assert_eq!(actor_id, "failing"),
+        other => panic!("unexpected graph result: {other:?}"),
+    }
+    assert!(
+        !peer_live.load(Ordering::Acquire),
+        "uncooperative peer should be aborted before graph failure returns"
+    );
+}
+
+#[tokio::test]
 async fn graph_can_only_run_once_at_a_time() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let entered_tx = oneshot_slot(entered_tx);
