@@ -28,26 +28,35 @@
 //! # Example
 //!
 //! ```no_run
-//! use tokio_actor_typed::{ActorContext, GraphBuilder, Reply};
+//! use tokio_actor_typed::{Actor, ActorContext, ActorResult, GraphBuilder, Reply};
 //!
 //! enum CounterMsg {
 //!     Add(u64),
 //!     Total(Reply<u64>),
 //! }
 //!
+//! #[derive(Clone)]
+//! struct Counter;
+//!
+//! impl Actor for Counter {
+//!     type Msg = CounterMsg;
+//!
+//!     async fn run(&self, mut ctx: ActorContext<CounterMsg>) -> ActorResult {
+//!         let mut total = 0;
+//!         while let Some(message) = ctx.recv().await {
+//!             match message {
+//!                 CounterMsg::Add(n) => total += n,
+//!                 CounterMsg::Total(reply) => reply.send(total),
+//!             }
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut builder = GraphBuilder::new();
-//! let mut counter = builder.actor_fn("counter", |mut ctx: ActorContext<CounterMsg>| async move {
-//!     let mut total = 0;
-//!     while let Some(message) = ctx.recv().await {
-//!         match message {
-//!             CounterMsg::Add(n) => total += n,
-//!             CounterMsg::Total(reply) => reply.send(total),
-//!         }
-//!     }
-//!     Ok(())
-//! });
+//! let mut counter = builder.actor("counter", Counter);
 //! let graph = builder.build()?;
 //!
 //! let stop = tokio_util::sync::CancellationToken::new();
@@ -78,12 +87,13 @@
 //! with itself; reruns after a previous run finishes are supported and
 //! restart-stable refs follow the new mailboxes.
 //!
-//! # Open questions surfaced by the prototype
+//! # Design decisions surfaced by the prototype
 //!
-//! - `Actor` uses an associated `Msg` type, which reads well but makes a
-//!   blanket closure impl impossible (the message type parameter would be
-//!   unconstrained, E0207). [`GraphBuilder::actor_fn`] papers over this with
-//!   an adapter; a generic `Actor<M>` trait is the alternative trade-off.
+//! - Actors are named types implementing [`Actor`]; plain closures are
+//!   deliberately not actors. A blanket closure impl would be impossible
+//!   with the associated `Msg` type anyway (the message type parameter would
+//!   be unconstrained, E0207), and requiring a type keeps actor state and
+//!   its message contract explicit at the definition site.
 //! - Edge/link metadata for the console and validation would be recorded via
 //!   a wiring API (`wire.peer(&ref)`) in the real implementation.
 

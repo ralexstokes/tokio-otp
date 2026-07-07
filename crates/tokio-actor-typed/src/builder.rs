@@ -1,14 +1,13 @@
 use std::{
     any::{Any, TypeId, type_name},
     collections::HashMap,
-    future::Future,
     sync::Arc,
 };
 
 use crate::{
-    actor::{Actor, ActorResult, FnActor},
+    actor::Actor,
     binding::BindingCore,
-    context::{ActorContext, ActorRef},
+    context::ActorRef,
     error::BuildError,
     graph::{ErasedRunner, Graph, GraphActor, TypedRunner},
 };
@@ -100,20 +99,6 @@ impl GraphBuilder {
         };
         slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
         actor_ref
-    }
-
-    /// Registers a closure actor and returns its typed, restart-stable ref.
-    ///
-    /// The message type is inferred from the closure's [`ActorContext<M>`]
-    /// parameter. This exists because a blanket `Actor` impl for closures
-    /// would leave the message type parameter unconstrained.
-    pub fn actor_fn<M, F, Fut>(&mut self, actor_id: &str, f: F) -> ActorRef<M>
-    where
-        M: Send + 'static,
-        F: Fn(ActorContext<M>) -> Fut + Clone + Send + Sync + 'static,
-        Fut: Future<Output = ActorResult> + Send,
-    {
-        self.actor(actor_id, FnActor::new(f))
     }
 
     /// Validates the graph and returns the immutable, rerunnable spec.

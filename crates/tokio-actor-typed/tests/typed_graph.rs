@@ -1,4 +1,4 @@
-use std::future::pending;
+use std::{future::pending, marker::PhantomData};
 
 use tokio::sync::mpsc;
 use tokio_actor_typed::{
@@ -7,11 +7,67 @@ use tokio_actor_typed::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Test actor that drains its mailbox and exits cleanly on shutdown.
+struct Drain<M>(PhantomData<fn(M)>);
+
+impl<M> Drain<M> {
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> Clone for Drain<M> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: Send + 'static> Actor for Drain<M> {
+    type Msg = M;
+
+    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
+
 struct Request(&'static str);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Job {
     payload: &'static str,
+}
+
+#[derive(Clone)]
+struct Frontend {
+    worker: ActorRef<Job>,
+}
+
+impl Actor for Frontend {
+    type Msg = Request;
+
+    async fn run(&self, mut ctx: ActorContext<Request>) -> ActorResult {
+        while let Some(Request(payload)) = ctx.recv().await {
+            self.worker.send(Job { payload }).await?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct Worker {
+    seen: mpsc::UnboundedSender<Job>,
+}
+
+impl Actor for Worker {
+    type Msg = Job;
+
+    async fn run(&self, mut ctx: ActorContext<Job>) -> ActorResult {
+        while let Some(job) = ctx.recv().await {
+            self.seen.send(job).expect("receiver alive");
+        }
+        Ok(())
+    }
 }
 
 /// Two actors with different message types, wired through a typed ref minted
@@ -23,24 +79,8 @@ async fn typed_pipeline_end_to_end() {
 
     let mut builder = GraphBuilder::new();
     let worker = builder.declare::<Job>("worker");
-    let mut frontend = builder.actor_fn("frontend", move |mut ctx: ActorContext<Request>| {
-        let worker = worker.clone();
-        async move {
-            while let Some(Request(payload)) = ctx.recv().await {
-                worker.send(Job { payload }).await?;
-            }
-            Ok(())
-        }
-    });
-    builder.actor_fn("worker", move |mut ctx: ActorContext<Job>| {
-        let seen_tx = seen_tx.clone();
-        async move {
-            while let Some(job) = ctx.recv().await {
-                seen_tx.send(job).expect("receiver alive");
-            }
-            Ok(())
-        }
-    });
+    let mut frontend = builder.actor("frontend", Frontend { worker });
+    builder.actor("worker", Worker { seen: seen_tx });
     let graph = builder.build().expect("valid graph");
 
     let stop = CancellationToken::new();
@@ -59,21 +99,29 @@ async fn typed_pipeline_end_to_end() {
     run.await.expect("joined").expect("clean stop");
 }
 
+#[derive(Clone)]
+struct Echo {
+    seen: mpsc::UnboundedSender<u32>,
+}
+
+impl Actor for Echo {
+    type Msg = u32;
+
+    async fn run(&self, mut ctx: ActorContext<u32>) -> ActorResult {
+        while let Some(n) = ctx.recv().await {
+            self.seen.send(n).expect("receiver alive");
+        }
+        Ok(())
+    }
+}
+
 /// Builder-minted refs survive a full stop and rerun of the same graph.
 #[tokio::test]
 async fn refs_survive_graph_rerun() {
     let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let mut echo = builder.actor_fn("echo", move |mut ctx: ActorContext<u32>| {
-        let seen_tx = seen_tx.clone();
-        async move {
-            while let Some(n) = ctx.recv().await {
-                seen_tx.send(n).expect("receiver alive");
-            }
-            Ok(())
-        }
-    });
+    let mut echo = builder.actor("echo", Echo { seen: seen_tx });
     let graph = builder.build().expect("valid graph");
 
     let stop = CancellationToken::new();
@@ -112,10 +160,13 @@ enum CounterMsg {
     Total(Reply<u64>),
 }
 
-#[tokio::test]
-async fn call_reply_roundtrip() {
-    let mut builder = GraphBuilder::new();
-    let mut counter = builder.actor_fn("counter", |mut ctx: ActorContext<CounterMsg>| async move {
+#[derive(Clone)]
+struct Counter;
+
+impl Actor for Counter {
+    type Msg = CounterMsg;
+
+    async fn run(&self, mut ctx: ActorContext<CounterMsg>) -> ActorResult {
         let mut total = 0;
         while let Some(message) = ctx.recv().await {
             match message {
@@ -124,7 +175,13 @@ async fn call_reply_roundtrip() {
             }
         }
         Ok(())
-    });
+    }
+}
+
+#[tokio::test]
+async fn call_reply_roundtrip() {
+    let mut builder = GraphBuilder::new();
+    let mut counter = builder.actor("counter", Counter);
     let graph = builder.build().expect("valid graph");
 
     let stop = CancellationToken::new();
@@ -216,10 +273,7 @@ async fn cyclic_wiring_via_declare() {
 fn build_rejects_message_type_mismatch() {
     let mut builder = GraphBuilder::new();
     let _declared = builder.declare::<u32>("worker");
-    let _registered = builder.actor_fn("worker", |mut ctx: ActorContext<String>| async move {
-        ctx.recv().await;
-        Ok(())
-    });
+    let _registered = builder.actor("worker", Drain::<String>::new());
     assert!(matches!(
         builder.build(),
         Err(BuildError::MessageTypeMismatch { actor_id, registered, requested })
@@ -239,14 +293,9 @@ fn build_rejects_declared_but_missing_actor() {
 
 #[test]
 fn build_rejects_duplicate_actor() {
-    async fn noop(mut ctx: ActorContext<u32>) -> ActorResult {
-        ctx.recv().await;
-        Ok(())
-    }
-
     let mut builder = GraphBuilder::new();
-    builder.actor_fn("worker", noop);
-    builder.actor_fn("worker", noop);
+    builder.actor("worker", Drain::<u32>::new());
+    builder.actor("worker", Drain::<u32>::new());
     assert!(matches!(
         builder.build(),
         Err(BuildError::DuplicateActor { actor_id }) if actor_id == "worker"
@@ -264,10 +313,7 @@ fn build_rejects_empty_graph() {
 #[tokio::test]
 async fn runtime_lookup_checks_message_type() {
     let mut builder = GraphBuilder::new();
-    builder.actor_fn("echo", |mut ctx: ActorContext<u32>| async move {
-        while ctx.recv().await.is_some() {}
-        Ok(())
-    });
+    builder.actor("echo", Drain::<u32>::new());
     let graph = builder.build().expect("valid graph");
 
     assert!(graph.actor_ref::<u32>("echo").is_ok());
@@ -281,16 +327,22 @@ async fn runtime_lookup_checks_message_type() {
     ));
 }
 
+#[derive(Clone)]
+struct Fail;
+
+impl Actor for Fail {
+    type Msg = u32;
+
+    async fn run(&self, _ctx: ActorContext<u32>) -> ActorResult {
+        Err("boom".into())
+    }
+}
+
 #[tokio::test]
 async fn actor_error_fails_the_run() {
     let mut builder = GraphBuilder::new();
-    builder.actor_fn("healthy", |mut ctx: ActorContext<u32>| async move {
-        while ctx.recv().await.is_some() {}
-        Ok(())
-    });
-    builder.actor_fn("bad", |_ctx: ActorContext<u32>| async move {
-        Err("boom".into())
-    });
+    builder.actor("healthy", Drain::<u32>::new());
+    builder.actor("bad", Fail);
     let graph = builder.build().expect("valid graph");
 
     let result = graph.run_until(pending::<()>()).await;
@@ -300,10 +352,21 @@ async fn actor_error_fails_the_run() {
     ));
 }
 
+#[derive(Clone)]
+struct Quit;
+
+impl Actor for Quit {
+    type Msg = u32;
+
+    async fn run(&self, _ctx: ActorContext<u32>) -> ActorResult {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn early_clean_exit_fails_the_run() {
     let mut builder = GraphBuilder::new();
-    builder.actor_fn("quitter", |_ctx: ActorContext<u32>| async move { Ok(()) });
+    builder.actor("quitter", Quit);
     let graph = builder.build().expect("valid graph");
 
     let result = graph.run_until(pending::<()>()).await;
@@ -316,10 +379,7 @@ async fn early_clean_exit_fails_the_run() {
 #[tokio::test]
 async fn dropped_graph_releases_waiting_refs() {
     let mut builder = GraphBuilder::new();
-    let mut echo = builder.actor_fn("echo", |mut ctx: ActorContext<u32>| async move {
-        while ctx.recv().await.is_some() {}
-        Ok(())
-    });
+    let mut echo = builder.actor("echo", Drain::<u32>::new());
     let graph = builder.build().expect("valid graph");
 
     drop(graph);
