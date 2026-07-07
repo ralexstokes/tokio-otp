@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     future::pending,
     io,
     sync::{
@@ -14,10 +15,12 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    ActorContext, ActorRunError, ActorSet, ActorSpec, BoxError, Envelope, GraphBuilder,
-    RunnableActor, SendError,
+    ActorContext, ActorRunError, ActorSet, ActorSpec, BlockingOptions, BoxError, Envelope,
+    GraphBuilder, IngressError, RunnableActor, SendError,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::{Dispatch, field::Visit};
+use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
 fn start_actor(actor: RunnableActor) -> (CancellationToken, JoinHandle<Result<(), ActorRunError>>) {
     let stop = CancellationToken::new();
@@ -41,6 +44,110 @@ async fn stop_actor(
 
 fn single_actor_set(actor_set: &ActorSet, id: &str) -> RunnableActor {
     actor_set.actor(id).expect("actor exists").clone()
+}
+
+#[derive(Clone, Default)]
+struct MailboxClosedCounter {
+    count: Arc<AtomicUsize>,
+}
+
+impl MailboxClosedCounter {
+    fn count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl<S> Layer<S> for MailboxClosedCounter
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = RejectionVisitor::default();
+        event.record(&mut visitor);
+        if visitor.mailbox_closed {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Default)]
+struct RejectionVisitor {
+    mailbox_closed: bool,
+}
+
+impl Visit for RejectionVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "reason" && value == "mailbox_closed" {
+            self.mailbox_closed = true;
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        if field.name() == "reason" && format!("{value:?}").contains("mailbox_closed") {
+            self.mailbox_closed = true;
+        }
+    }
+}
+
+fn stale_mailbox_actor(started_tx: mpsc::UnboundedSender<()>) -> ActorSpec {
+    ActorSpec::from_actor("worker", move |ctx: ActorContext| {
+        let started_tx = started_tx.clone();
+        async move {
+            ctx.spawn_blocking(BlockingOptions::default(), |_ctx| {
+                std::thread::sleep(Duration::from_millis(400));
+                Ok(())
+            })
+            .expect("blocking task should spawn");
+            started_tx.send(()).expect("receiver alive");
+            Ok(())
+        }
+    })
+}
+
+async fn wait_for_actor_ref_stale_mailbox(actor_ref: &tokio_actor::ActorRef) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            match actor_ref.try_send(Envelope::from_static(b"probe")) {
+                Err(SendError::MailboxClosed { .. }) => break,
+                Err(SendError::ActorNotRunning { .. }) => {
+                    panic!("binding cleared before stale mailbox was observed");
+                }
+                Ok(()) | Err(SendError::MailboxFull { .. }) => {
+                    sleep(Duration::from_millis(1)).await;
+                }
+                Err(err) => panic!("unexpected send error while probing stale mailbox: {err:?}"),
+            }
+        }
+    })
+    .await
+    .expect("stale mailbox observed in time");
+}
+
+async fn wait_for_ingress_stale_mailbox(ingress: &tokio_actor::IngressHandle) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            match ingress.try_send(Envelope::from_static(b"probe")) {
+                Err(IngressError::MailboxClosed { .. }) => break,
+                Err(IngressError::NotRunning { .. }) => {
+                    panic!("binding cleared before stale ingress mailbox was observed");
+                }
+                Ok(()) | Err(IngressError::MailboxFull { .. }) => {
+                    sleep(Duration::from_millis(1)).await;
+                }
+                Err(err) => panic!("unexpected ingress error while probing stale mailbox: {err:?}"),
+            }
+        }
+    })
+    .await
+    .expect("stale ingress mailbox observed in time");
+}
+
+fn mailbox_closed_counter_dispatch(counter: MailboxClosedCounter) -> Dispatch {
+    Dispatch::new(
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(counter),
+    )
 }
 
 #[tokio::test]
@@ -137,6 +244,95 @@ async fn send_when_ready_returns_promptly_on_shutdown() {
     stop_actor(stop, task)
         .await
         .expect("frontend stopped cleanly while waiting for worker restart");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actor_ref_send_when_ready_waits_for_stale_binding_to_change() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let actor_set = GraphBuilder::new()
+        .blocking_shutdown_timeout(Duration::from_millis(250))
+        .actor(stale_mailbox_actor(started_tx))
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+
+    let worker = single_actor_set(&actor_set, "worker");
+    let mut actor_ref = worker.actor_ref();
+    let (_stop, task) = start_actor(worker);
+
+    timeout(Duration::from_secs(1), started_rx.recv())
+        .await
+        .expect("actor started in time")
+        .expect("actor reported start");
+    wait_for_actor_ref_stale_mailbox(&actor_ref).await;
+
+    let counter = MailboxClosedCounter::default();
+    let dispatch = mailbox_closed_counter_dispatch(counter.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+
+    timeout(
+        Duration::from_millis(40),
+        actor_ref.send_when_ready(Envelope::from_static(b"held")),
+    )
+    .await
+    .expect_err("send_when_ready should wait for a binding change");
+
+    drop(_guard);
+    assert_eq!(
+        counter.count(),
+        1,
+        "stale closed mailbox should be observed once before waiting"
+    );
+
+    task.await
+        .expect("actor run task joined")
+        .expect("actor run completed cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ingress_send_when_ready_waits_for_stale_binding_to_change() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let actor_set = GraphBuilder::new()
+        .blocking_shutdown_timeout(Duration::from_millis(250))
+        .actor(stale_mailbox_actor(started_tx))
+        .ingress("requests", "worker")
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+
+    let worker = single_actor_set(&actor_set, "worker");
+    let mut ingress = actor_set.ingress("requests").expect("ingress exists");
+    let (_stop, task) = start_actor(worker);
+
+    timeout(Duration::from_secs(1), started_rx.recv())
+        .await
+        .expect("actor started in time")
+        .expect("actor reported start");
+    wait_for_ingress_stale_mailbox(&ingress).await;
+
+    let counter = MailboxClosedCounter::default();
+    let dispatch = mailbox_closed_counter_dispatch(counter.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+
+    timeout(
+        Duration::from_millis(40),
+        ingress.send_when_ready(Envelope::from_static(b"held")),
+    )
+    .await
+    .expect_err("send_when_ready should wait for a binding change");
+
+    drop(_guard);
+    assert_eq!(
+        counter.count(),
+        1,
+        "stale closed ingress mailbox should be observed once before waiting"
+    );
+
+    task.await
+        .expect("actor run task joined")
+        .expect("actor run completed cleanly");
 }
 
 #[tokio::test]
