@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::{
     sync::{Notify, mpsc},
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_supervisor::{
     ChildSpec, ControlError, Restart, ShutdownMode, ShutdownPolicy, SupervisorBuilder,
@@ -441,6 +441,77 @@ async fn remove_child_completes_promptly_during_restart_backoff() {
     }
 
     common::assert_no_event(&mut starts_rx).await;
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert!(matches!(exit, SupervisorExit::Shutdown));
+}
+
+#[tokio::test]
+async fn removed_child_does_not_restart_recycled_slot_after_backoff() {
+    let (removable_tx, mut removable_rx) = mpsc::unbounded_channel();
+    let (replacement_tx, mut replacement_rx) = mpsc::unbounded_channel();
+    let backoff = std::time::Duration::from_millis(80);
+
+    let handle = SupervisorBuilder::new()
+        .restart_intensity(tokio_supervisor::RestartIntensity {
+            max_restarts: 4,
+            within: std::time::Duration::from_secs(1),
+            backoff: tokio_supervisor::BackoffPolicy::Fixed(backoff),
+        })
+        .child(
+            ChildSpec::new("removable", move |ctx| {
+                let removable_tx = removable_tx.clone();
+                async move {
+                    removable_tx
+                        .send(ctx.generation)
+                        .expect("test receiver dropped");
+                    Err(common::test_error("restart me later"))
+                }
+            })
+            .restart(Restart::Transient),
+        )
+        .child(ChildSpec::new("keeper", |ctx| async move {
+            ctx.token.cancelled().await;
+            Ok(())
+        }))
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+    let mut events = handle.subscribe();
+
+    assert_eq!(common::recv_event(&mut removable_rx).await, 0);
+
+    loop {
+        if matches!(
+            common::recv_supervisor_event(&mut events).await,
+            SupervisorEvent::ChildRestartScheduled { id, .. } if id == "removable"
+        ) {
+            break;
+        }
+    }
+
+    handle
+        .remove_child("removable")
+        .await
+        .expect("child removal should succeed during backoff");
+    handle
+        .add_child(ChildSpec::new("replacement", move |ctx| {
+            let replacement_tx = replacement_tx.clone();
+            async move {
+                replacement_tx
+                    .send(ctx.generation)
+                    .expect("test receiver dropped");
+                ctx.token.cancelled().await;
+                Ok(())
+            }
+        }))
+        .await
+        .expect("replacement child should be accepted");
+
+    assert_eq!(common::recv_event(&mut replacement_rx).await, 0);
+    sleep(backoff + common::QUIET_TIMEOUT).await;
+    common::assert_no_event(&mut replacement_rx).await;
 
     handle.shutdown();
     let exit = handle.wait().await.expect("shutdown should succeed");

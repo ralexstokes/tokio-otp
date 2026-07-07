@@ -5,7 +5,7 @@ use std::sync::{
 
 use tokio::{
     sync::{Barrier, Notify, mpsc},
-    time::{Duration, timeout},
+    time::{Duration, sleep, timeout},
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildSpec, Restart, RestartIntensity, ShutdownMode, ShutdownPolicy, Strategy,
@@ -529,6 +529,72 @@ async fn group_restart_scheduled_precedes_child_restart_events() {
         peer_started < peer_restarted,
         "peer restart event ordering regressed: {sequence:?}"
     );
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert!(matches!(exit, SupervisorExit::Shutdown));
+}
+
+#[tokio::test]
+async fn removing_failed_child_abandons_pending_group_restart() {
+    let (replacement_tx, mut replacement_rx) = mpsc::unbounded_channel();
+    let backoff = Duration::from_millis(80);
+
+    let trigger = ChildSpec::new("trigger", |_ctx| async move {
+        Err(common::test_error("restart group later"))
+    })
+    .restart(Restart::Transient);
+
+    let peer = ChildSpec::new("peer", |ctx| async move {
+        ctx.token.cancelled().await;
+        Ok(())
+    })
+    .restart(Restart::Permanent);
+
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .restart_intensity(RestartIntensity {
+            max_restarts: 2,
+            within: Duration::from_secs(1),
+            backoff: BackoffPolicy::Fixed(backoff),
+        })
+        .child(trigger)
+        .child(peer)
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+    let mut events = handle.subscribe();
+
+    loop {
+        if matches!(
+            common::recv_supervisor_event(&mut events).await,
+            SupervisorEvent::GroupRestartScheduled { .. }
+        ) {
+            break;
+        }
+    }
+
+    handle
+        .remove_child("trigger")
+        .await
+        .expect("failed child removal should succeed during group backoff");
+    handle
+        .add_child(ChildSpec::new("replacement", move |ctx| {
+            let replacement_tx = replacement_tx.clone();
+            async move {
+                replacement_tx
+                    .send(ctx.generation)
+                    .expect("test receiver dropped");
+                ctx.token.cancelled().await;
+                Ok(())
+            }
+        }))
+        .await
+        .expect("replacement child should be accepted");
+
+    assert_eq!(common::recv_event(&mut replacement_rx).await, 0);
+    sleep(backoff + common::QUIET_TIMEOUT).await;
+    common::assert_no_event(&mut replacement_rx).await;
 
     handle.shutdown();
     let exit = handle.wait().await.expect("shutdown should succeed");
