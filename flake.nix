@@ -54,6 +54,9 @@
             nixfmt --check ${./nix/crane-checks.nix}
             touch $out
           '';
+          book = pkgs.runCommandLocal "mdbook-build" { nativeBuildInputs = [ pkgs.mdbook ]; } ''
+            mdbook build ${./docs} --dest-dir $out
+          '';
         }
         // cargoChecks;
 

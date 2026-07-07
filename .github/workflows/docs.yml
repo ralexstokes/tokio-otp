@@ -33,14 +33,19 @@ jobs:
 
       - name: Build docs
         run: |
+          nix develop --command mdbook build docs
           nix develop --command cargo doc --workspace --no-deps --all-features
           echo '<meta http-equiv="refresh" content="0; url=tokio_supervisor/index.html">' > target/doc/index.html
+
+          mkdir -p _site/api
+          cp -r docs/book/. _site/
+          cp -r target/doc/. _site/api/
 
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: target/doc
+          path: _site
 
       - id: deploy
         uses: actions/deploy-pages@v4
