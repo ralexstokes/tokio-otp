@@ -24,6 +24,7 @@ pub struct GraphBuilder {
     mailbox_capacity: usize,
     max_envelope_bytes: Option<usize>,
     max_blocking_tasks_per_actor: Option<usize>,
+    actor_shutdown_timeout: Duration,
     blocking_shutdown_timeout: Duration,
 }
 
@@ -50,6 +51,7 @@ impl GraphBuilder {
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
             max_envelope_bytes: Some(DEFAULT_MAX_ENVELOPE_BYTES),
             max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
+            actor_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
             blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
         }
     }
@@ -127,6 +129,17 @@ impl GraphBuilder {
     #[must_use]
     pub fn unbounded_blocking_tasks_per_actor(mut self) -> Self {
         self.max_blocking_tasks_per_actor = None;
+        self
+    }
+
+    /// Sets how long graph shutdown waits for actor tasks to stop after
+    /// cancellation is requested.
+    ///
+    /// The default timeout is 5 seconds. Any actor task still running after the
+    /// timeout is aborted so graph shutdown can complete.
+    #[must_use]
+    pub fn actor_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.actor_shutdown_timeout = timeout;
         self
     }
 
@@ -228,6 +241,7 @@ impl GraphBuilder {
             mailbox_capacity: self.mailbox_capacity,
             max_envelope_bytes: self.max_envelope_bytes,
             max_blocking_tasks_per_actor: self.max_blocking_tasks_per_actor,
+            actor_shutdown_timeout: self.actor_shutdown_timeout,
             blocking_shutdown_timeout: self.blocking_shutdown_timeout,
             ingresses,
             ingress_names_by_actor,

@@ -147,6 +147,10 @@ impl MailboxRef {
         self.try_send(envelope)
     }
 
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        self.sender.same_channel(&other.sender)
+    }
+
     fn validate_envelope(&self, envelope: &Envelope) -> Result<(), MailboxError> {
         let Some(max_envelope_bytes) = self.max_envelope_bytes else {
             return Ok(());

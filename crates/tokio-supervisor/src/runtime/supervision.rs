@@ -528,6 +528,7 @@ impl SupervisorRuntime {
 
         Ok(())
     }
+
     fn cancel_child(&mut self, key: ChildKey) {
         if let Some(token) = self.children[key].runtime.active_token.as_ref() {
             token.cancel();
@@ -720,6 +721,7 @@ impl SupervisorRuntime {
         key: ChildKey,
         previous_generation: u64,
     ) -> Result<(), SupervisorError> {
+        let restart_instance = self.children[key].instance;
         let delay = self.schedule_restart(key)?;
         self.send_event(SupervisorEvent::ChildRestartScheduled {
             id: self.children[key].id.clone(),
@@ -729,7 +731,10 @@ impl SupervisorRuntime {
         if !self.wait_for_restart_delay(delay).await? {
             return Ok(());
         }
-        if self.children[key].membership != MembershipState::Active {
+        let Some(entry) = self.children.get(key) else {
+            return Ok(());
+        };
+        if entry.instance != restart_instance || entry.membership != MembershipState::Active {
             return Ok(());
         }
         let (old_generation, new_generation) = self.spawn_child(key)?;
@@ -745,15 +750,24 @@ impl SupervisorRuntime {
         &mut self,
         failing_key: ChildKey,
     ) -> Result<(), SupervisorError> {
+        let failing_instance = self.children[failing_key].instance;
         let delay = self.schedule_restart(failing_key)?;
         self.send_event(SupervisorEvent::GroupRestartScheduled { delay });
         if !self.wait_for_restart_delay(delay).await? {
             return Ok(());
         }
 
+        let Some(failing_child) = self.children.get(failing_key) else {
+            return Ok(());
+        };
+        if failing_child.instance != failing_instance
+            || failing_child.membership != MembershipState::Active
+        {
+            return Ok(());
+        }
         debug!(
             "restarting child group after exit from {}",
-            self.children[failing_key].id
+            failing_child.id
         );
         // Drain the old generation completely before creating a fresh group
         // token so `OneForAll` restarts never overlap old and new tasks.

@@ -20,6 +20,17 @@ pub(crate) fn anonymous_graph_name() -> Arc<str> {
     format!("graph-{}", NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed)).into()
 }
 
+fn saturating_decrement(counter: &AtomicUsize) -> usize {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let next = current.saturating_sub(1);
+        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return next,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GraphObservability {
     graph_name: Arc<str>,
@@ -193,7 +204,7 @@ impl GraphObservability {
         status: ActorExitStatus,
         error: Option<&str>,
     ) {
-        let running = self.running_actors.fetch_sub(1, Ordering::AcqRel) - 1;
+        let running = saturating_decrement(&self.running_actors);
 
         if status == ActorExitStatus::Shutdown {
             debug!(
@@ -791,6 +802,16 @@ mod tests {
     }
 
     #[test]
+    fn actor_exit_running_count_saturates_at_zero() {
+        let observability = GraphObservability::new(Arc::from("orders"));
+        let worker: Arc<str> = Arc::from("worker");
+
+        observability.emit_actor_exited(&worker, ActorExitStatus::Cancelled, None);
+
+        assert_eq!(observability.running_actors.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn tracing_output_covers_graph_actor_ingress_message_and_blocking_events() {
         let observability = GraphObservability::new(Arc::from("orders"));
         let frontend: Arc<str> = Arc::from("frontend");
@@ -1231,6 +1252,27 @@ mod tests {
                 ("status", "failed"),
             ],
             1,
+        );
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn metrics_running_actor_gauge_saturates_at_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let observability = GraphObservability::new(Arc::from("orders"));
+            let worker: Arc<str> = Arc::from("worker");
+            observability.emit_actor_exited(&worker, ActorExitStatus::Cancelled, None);
+        });
+
+        let metrics = snapshotter.snapshot().into_vec();
+        assert_gauge(
+            &metrics,
+            "actor_graph.actors.running",
+            &[("graph", "orders")],
+            0.0,
         );
     }
 

@@ -5,7 +5,7 @@ use std::sync::{
 
 use tokio::{
     sync::{Barrier, Notify, mpsc},
-    time::{Duration, timeout},
+    time::{Duration, sleep, timeout},
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildSpec, Restart, RestartIntensity, ShutdownMode, ShutdownPolicy, Strategy,
@@ -58,6 +58,73 @@ async fn restartable_child_failure_restarts_the_whole_group() {
 
     assert_eq!(common::recv_n(&mut trigger_rx, 2).await, vec![0, 1]);
     assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert!(matches!(exit, SupervisorExit::Shutdown));
+}
+
+#[tokio::test]
+async fn control_plane_remains_available_after_group_restart() {
+    let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel();
+    let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
+    let (dynamic_tx, mut dynamic_rx) = mpsc::unbounded_channel();
+    let trigger_attempts = Arc::new(AtomicUsize::new(0));
+
+    let trigger = ChildSpec::new("trigger", move |ctx| {
+        let trigger_attempts = trigger_attempts.clone();
+        let trigger_tx = trigger_tx.clone();
+        async move {
+            trigger_tx
+                .send(ctx.generation)
+                .expect("test receiver dropped");
+            if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(common::test_error("restart group"));
+            }
+
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Transient);
+
+    let peer = ChildSpec::new("peer", move |ctx| {
+        let peer_tx = peer_tx.clone();
+        async move {
+            peer_tx.send(ctx.generation).expect("test receiver dropped");
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Permanent);
+
+    let supervisor = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .child(trigger)
+        .child(peer)
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+
+    assert_eq!(common::recv_n(&mut trigger_rx, 2).await, vec![0, 1]);
+    assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
+
+    handle
+        .add_child(ChildSpec::new("dynamic", move |ctx| {
+            let dynamic_tx = dynamic_tx.clone();
+            async move {
+                dynamic_tx
+                    .send(ctx.generation)
+                    .expect("test receiver dropped");
+                ctx.token.cancelled().await;
+                Ok(())
+            }
+        }))
+        .await
+        .expect("control plane should remain available after group restart");
+
+    assert_eq!(common::recv_event(&mut dynamic_rx).await, 0);
 
     handle.shutdown();
     let exit = handle.wait().await.expect("shutdown should succeed");
@@ -529,6 +596,72 @@ async fn group_restart_scheduled_precedes_child_restart_events() {
         peer_started < peer_restarted,
         "peer restart event ordering regressed: {sequence:?}"
     );
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert!(matches!(exit, SupervisorExit::Shutdown));
+}
+
+#[tokio::test]
+async fn removing_failed_child_abandons_pending_group_restart() {
+    let (replacement_tx, mut replacement_rx) = mpsc::unbounded_channel();
+    let backoff = Duration::from_millis(80);
+
+    let trigger = ChildSpec::new("trigger", |_ctx| async move {
+        Err(common::test_error("restart group later"))
+    })
+    .restart(Restart::Transient);
+
+    let peer = ChildSpec::new("peer", |ctx| async move {
+        ctx.token.cancelled().await;
+        Ok(())
+    })
+    .restart(Restart::Permanent);
+
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .restart_intensity(RestartIntensity {
+            max_restarts: 2,
+            within: Duration::from_secs(1),
+            backoff: BackoffPolicy::Fixed(backoff),
+        })
+        .child(trigger)
+        .child(peer)
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+    let mut events = handle.subscribe();
+
+    loop {
+        if matches!(
+            common::recv_supervisor_event(&mut events).await,
+            SupervisorEvent::GroupRestartScheduled { .. }
+        ) {
+            break;
+        }
+    }
+
+    handle
+        .remove_child("trigger")
+        .await
+        .expect("failed child removal should succeed during group backoff");
+    handle
+        .add_child(ChildSpec::new("replacement", move |ctx| {
+            let replacement_tx = replacement_tx.clone();
+            async move {
+                replacement_tx
+                    .send(ctx.generation)
+                    .expect("test receiver dropped");
+                ctx.token.cancelled().await;
+                Ok(())
+            }
+        }))
+        .await
+        .expect("replacement child should be accepted");
+
+    assert_eq!(common::recv_event(&mut replacement_rx).await, 0);
+    sleep(backoff + common::QUIET_TIMEOUT).await;
+    common::assert_no_event(&mut replacement_rx).await;
 
     handle.shutdown();
     let exit = handle.wait().await.expect("shutdown should succeed");
