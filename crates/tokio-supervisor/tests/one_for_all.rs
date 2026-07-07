@@ -65,6 +65,73 @@ async fn restartable_child_failure_restarts_the_whole_group() {
 }
 
 #[tokio::test]
+async fn control_plane_remains_available_after_group_restart() {
+    let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel();
+    let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
+    let (dynamic_tx, mut dynamic_rx) = mpsc::unbounded_channel();
+    let trigger_attempts = Arc::new(AtomicUsize::new(0));
+
+    let trigger = ChildSpec::new("trigger", move |ctx| {
+        let trigger_attempts = trigger_attempts.clone();
+        let trigger_tx = trigger_tx.clone();
+        async move {
+            trigger_tx
+                .send(ctx.generation)
+                .expect("test receiver dropped");
+            if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(common::test_error("restart group"));
+            }
+
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Transient);
+
+    let peer = ChildSpec::new("peer", move |ctx| {
+        let peer_tx = peer_tx.clone();
+        async move {
+            peer_tx.send(ctx.generation).expect("test receiver dropped");
+            ctx.token.cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(Restart::Permanent);
+
+    let supervisor = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .child(trigger)
+        .child(peer)
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+
+    assert_eq!(common::recv_n(&mut trigger_rx, 2).await, vec![0, 1]);
+    assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
+
+    handle
+        .add_child(ChildSpec::new("dynamic", move |ctx| {
+            let dynamic_tx = dynamic_tx.clone();
+            async move {
+                dynamic_tx
+                    .send(ctx.generation)
+                    .expect("test receiver dropped");
+                ctx.token.cancelled().await;
+                Ok(())
+            }
+        }))
+        .await
+        .expect("control plane should remain available after group restart");
+
+    assert_eq!(common::recv_event(&mut dynamic_rx).await, 0);
+
+    handle.shutdown();
+    let exit = handle.wait().await.expect("shutdown should succeed");
+    assert!(matches!(exit, SupervisorExit::Shutdown));
+}
+
+#[tokio::test]
 async fn completed_temporary_child_is_not_respawned_during_group_restart() {
     let release_failure = Arc::new(Notify::new());
     let trigger_attempts = Arc::new(AtomicUsize::new(0));
