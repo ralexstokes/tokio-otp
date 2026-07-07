@@ -286,6 +286,7 @@ impl RunnableActor {
             }
             .instrument(actor_span)
         }));
+        let _cancel_actor_on_drop = CancelOnDrop::new(actor_shutdown.clone());
 
         self.inner.observability.emit_actor_started(&actor_id);
 
@@ -498,11 +499,13 @@ impl<T> AbortOnDrop<T> {
     }
 
     async fn join(&mut self) -> Result<T, tokio::task::JoinError> {
-        let handle = self
+        let result = self
             .handle
-            .take()
-            .expect("join handle is present until joined");
-        handle.await
+            .as_mut()
+            .expect("join handle is present until joined")
+            .await;
+        self.handle = None;
+        result
     }
 }
 
@@ -511,5 +514,21 @@ impl<T> Drop for AbortOnDrop<T> {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
+    }
+}
+
+struct CancelOnDrop {
+    token: CancellationToken,
+}
+
+impl CancelOnDrop {
+    fn new(token: CancellationToken) -> Self {
+        Self { token }
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.token.cancel();
     }
 }
