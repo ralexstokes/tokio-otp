@@ -43,6 +43,19 @@ fn single_actor_set(actor_set: &ActorSet, id: &str) -> RunnableActor {
     actor_set.actor(id).expect("actor exists").clone()
 }
 
+async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if counter.load(Ordering::SeqCst) == expected {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("counter reached expected value in time");
+}
+
 #[tokio::test]
 async fn actor_ref_reports_not_running_for_stopped_peer() {
     let (errors_tx, mut errors_rx) = mpsc::unbounded_channel();
@@ -166,6 +179,85 @@ async fn runnable_actor_rejects_concurrent_runs() {
     stop_actor(stop, task)
         .await
         .expect("worker stopped cleanly");
+}
+
+#[tokio::test]
+async fn aborting_run_until_aborts_inner_actor_task() {
+    struct LiveGuard(Arc<AtomicUsize>);
+
+    impl Drop for LiveGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+
+    let actor_set = GraphBuilder::new()
+        .actor(ActorSpec::from_actor("worker", {
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            let started_tx = started_tx.clone();
+            move |_ctx: ActorContext| {
+                let active = Arc::clone(&active);
+                let max_active = Arc::clone(&max_active);
+                let started_tx = started_tx.clone();
+                async move {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(current, Ordering::SeqCst);
+                    let _guard = LiveGuard(active);
+                    started_tx.send(()).expect("receiver alive");
+                    pending::<()>().await;
+                    Ok(())
+                }
+            }
+        }))
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+
+    let worker = single_actor_set(&actor_set, "worker");
+    let first_worker = worker.clone();
+    let first_task = tokio::spawn(async move { first_worker.run_until(pending::<()>()).await });
+
+    timeout(Duration::from_secs(1), started_rx.recv())
+        .await
+        .expect("first actor started in time")
+        .expect("first actor reported start");
+
+    first_task.abort();
+    assert!(
+        first_task
+            .await
+            .expect_err("outer run task should be cancelled")
+            .is_cancelled()
+    );
+    wait_for_count(&active, 0).await;
+
+    let second_worker = worker.clone();
+    let second_task = tokio::spawn(async move { second_worker.run_until(pending::<()>()).await });
+    timeout(Duration::from_secs(1), started_rx.recv())
+        .await
+        .expect("second actor started in time")
+        .expect("second actor reported start");
+
+    assert_eq!(
+        max_active.load(Ordering::SeqCst),
+        1,
+        "actor instances must not overlap across aborted run_until restarts"
+    );
+
+    second_task.abort();
+    assert!(
+        second_task
+            .await
+            .expect_err("outer run task should be cancelled")
+            .is_cancelled()
+    );
+    wait_for_count(&active, 0).await;
 }
 
 #[tokio::test]
