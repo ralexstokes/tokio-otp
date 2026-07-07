@@ -254,9 +254,17 @@ impl RuntimeHandle {
             .dynamic
             .as_ref()
             .ok_or(DynamicActorError::Unsupported)?;
-        self.supervisor.remove_child(actor_id.to_owned()).await?;
-        dynamic.registry.deregister(actor_id)?;
-        Ok(())
+        match self.supervisor.remove_child(actor_id.to_owned()).await {
+            Ok(()) => {
+                dynamic.registry.deregister(actor_id)?;
+                Ok(())
+            }
+            Err(ControlError::ShutdownTimedOut(id)) if id == actor_id => {
+                let _ = dynamic.registry.deregister(actor_id);
+                Err(ControlError::ShutdownTimedOut(id).into())
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Like [`Self::remove_child`], but returns immediately if the control
