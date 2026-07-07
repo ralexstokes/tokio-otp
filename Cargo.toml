@@ -7,6 +7,7 @@ default-members = [
 members = [
     "crates/tokio-supervisor",
     "crates/tokio-actor",
+    "crates/tokio-actor-typed",
     "crates/tokio-otp",
     "crates/tokio-otp-console",
 ]
