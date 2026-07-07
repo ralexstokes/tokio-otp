@@ -21,7 +21,8 @@ impl SupervisorRuntime {
             child_id,
             generation,
             old_generation,
-            future,
+            factory,
+            ctx,
             counted_before,
             instance,
             snapshot_state,
@@ -61,13 +62,14 @@ impl SupervisorRuntime {
                 token: child_token,
                 supervisor_token: SupervisorToken::new(self.group_token.clone()),
             };
-            let future = child.spec.factory.make(ctx);
+            let factory = child.spec.factory.clone();
 
             (
                 child_id,
                 generation,
                 old_generation,
-                future,
+                factory,
+                ctx,
                 counted_before,
                 instance,
                 snapshot_state,
@@ -100,6 +102,7 @@ impl SupervisorRuntime {
             async move {
                 let result = with_nested_control_scope(control_scope, async move {
                     with_nested_snapshot_forwarder(snapshot_forwarder, async move {
+                        let future = factory.make(ctx);
                         with_nested_event_forwarder(forwarder, future).await
                     })
                     .await
