@@ -1,0 +1,9 @@
+[book]
+title = "tokio-otp"
+description = "A user tutorial for the tokio-otp crates"
+authors = ["Alex Stokes"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/ralexstokes/tokio-otp"

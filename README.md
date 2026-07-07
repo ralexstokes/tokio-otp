@@ -7,6 +7,8 @@ Crates for the tokio ecosystem that are inspired by Erlang/OTP.
 
 ## Getting started
 
+Start with the tutorial book under [`docs/`](docs/src/SUMMARY.md), e.g. `just serve-book`.
+
 Check the Rust docs for more information, e.g. `just doc`.
 
 ## Development

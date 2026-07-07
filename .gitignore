@@ -24,4 +24,7 @@ target
 .env
 result
 
+# mdBook output
+docs/book/
+
 .claude/
