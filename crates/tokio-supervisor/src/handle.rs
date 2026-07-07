@@ -247,9 +247,9 @@ impl SupervisorHandle {
 
     /// Adds a new child to the supervisor at runtime.
     ///
-    /// Waits if the control channel is full. Returns [`ControlError::Busy`] is
-    /// not possible with this variant; use [`try_add_child`](Self::try_add_child)
-    /// if you need non-blocking back-pressure semantics.
+    /// Waits if the control channel is full. This variant cannot return
+    /// [`ControlError::Busy`]; use [`try_add_child`](Self::try_add_child) if
+    /// you need non-blocking back-pressure semantics.
     pub async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
         self.control_endpoint().add_child(child).await
     }

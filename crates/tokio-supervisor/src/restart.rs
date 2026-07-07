@@ -40,7 +40,8 @@ pub enum BackoffPolicy {
     Fixed(Duration),
     /// Wait an exponentially increasing duration: `base * factor^attempt`,
     /// clamped to `max`. The attempt count is the number of restarts recorded
-    /// within the current intensity window.
+    /// within the current restart-intensity window, so it decreases as older
+    /// restart timestamps age out of that sliding window.
     Exponential {
         /// Initial delay applied on the first restart.
         base: Duration,
