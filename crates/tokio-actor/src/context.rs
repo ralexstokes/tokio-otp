@@ -57,6 +57,22 @@ impl ActorRef {
         self.binding.wait_for(|slot| slot.is_some()).await.is_ok()
     }
 
+    async fn wait_for_binding_change_from(&mut self, mailbox: &MailboxRef) -> bool {
+        loop {
+            let unchanged = self
+                .binding
+                .borrow_and_update()
+                .as_ref()
+                .is_some_and(|current| current.same_channel(mailbox));
+            if !unchanged {
+                return true;
+            }
+            if self.binding.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+
     /// Returns the target actor id.
     pub fn id(&self) -> &str {
         &self.actor_id
@@ -140,7 +156,7 @@ impl ActorRef {
                             &result,
                         );
                         envelope = returned;
-                        if !self.wait_for_next_binding().await {
+                        if !self.wait_for_binding_change_from(&mailbox).await {
                             return Err(error);
                         }
                     }
