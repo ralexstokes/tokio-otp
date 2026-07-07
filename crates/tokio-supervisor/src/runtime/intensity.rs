@@ -90,6 +90,8 @@ struct JitterRng {
 
 impl JitterRng {
     fn new() -> Self {
+        // This is only for decorrelating restart delays, not for secrets or
+        // adversarial randomness.
         Self {
             state: seed_jitter_rng(),
         }

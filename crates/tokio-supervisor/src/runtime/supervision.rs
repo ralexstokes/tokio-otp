@@ -528,6 +528,7 @@ impl SupervisorRuntime {
 
         Ok(())
     }
+
     fn cancel_child(&mut self, key: ChildKey) {
         if let Some(token) = self.children[key].runtime.active_token.as_ref() {
             token.cancel();

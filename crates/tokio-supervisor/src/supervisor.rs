@@ -67,6 +67,8 @@ impl Supervisor {
     pub async fn run(self) -> Result<SupervisorExit, SupervisorError> {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(self.config.event_channel_capacity);
+        // Handle-less runs intentionally start with a closed control channel.
+        // There is no `SupervisorHandle`, so no caller can send commands.
         let (_command_tx, command_rx) = mpsc::channel(self.config.control_channel_capacity);
         let (snapshots_tx, _) = watch::channel(initial_snapshot(&self.config));
         self.run_with_channels(
