@@ -1,3 +1,6 @@
+# Authoritative CI check definitions (run via `nix flake check` / `just ci-nix`).
+# The `ci` recipe in the top-level justfile mirrors these for fast local runs —
+# keep the cargo flags in sync.
 {
   pkgs,
   crane,
