@@ -45,7 +45,7 @@ cargo run -p <crate> --example <name>
 | `blocking_limits` | Per-actor blocking concurrency limits. |
 | `graph_failures` | Error propagation from actor failures. |
 | `builder_validation` | Build-time graph validation errors. |
-| `tracing` / `metrics` | Observability integration. |
+| `actor_tracing` / `actor_metrics` | Observability integration. |
 
 ### `tokio-otp`
 

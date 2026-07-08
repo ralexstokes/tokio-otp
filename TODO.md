@@ -69,8 +69,5 @@ common supervised-actor setup.
 
 ## 5. Housekeeping
 
-- Example output filename collisions: both `tokio-supervisor` and
-  `tokio-actor` have examples named `metrics` and `tracing`; cargo warns
-  this will become a hard error. Rename one pair.
 - `ActorSet::from_graph` returns `Result` but is infallible; the lib.rs
   quick start discards `wait_for_binding()`'s `bool`.
