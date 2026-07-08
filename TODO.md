@@ -75,17 +75,21 @@ with docs making the registry discard explicit.
 Either thread the timeout through `RunnableActor` or document the asymmetry
 on both the builder setter and `RunnableActor::run_until`.
 
-## 6. Registry consistency and lookup diagnostics
+## 6. ~~Registry consistency and lookup diagnostics~~ — done
 
 - ~~Registry entries go stale when a dynamic actor is removed outside
   `RuntimeHandle::remove_actor` (direct `remove_child`, or a transient actor
   exiting for good): `actor_ids()`/`contains()` keep advertising an actor
   whose ref only returns `ActorNotRunning`. Document or add event-driven
   cleanup.~~
-- `RuntimeHandle::actor_ref` on a runtime built without a dynamic registry
+- ~~`RuntimeHandle::actor_ref` on a runtime built without a dynamic registry
   (`Runtime::new`) returns `LookupError::UnknownActor` for every id,
   conflating "no registry configured" with "no such actor" (`add_actor`
-  distinguishes the same case as `DynamicActorError::Unsupported`).
+  distinguishes the same case as `DynamicActorError::Unsupported`).~~
+
+Done by changing `RuntimeHandle::actor_ref` to return `DynamicActorError`:
+`Unsupported` when no registry is configured, `Lookup(LookupError)` for real
+lookup failures.
 
 ## 7. Naming and diagnostics polish
 

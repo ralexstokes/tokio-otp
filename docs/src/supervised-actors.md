@@ -104,8 +104,10 @@ the integration level:
 - `build()` returns `Vec<ChildSpec>` for integrating actor children into a
   larger supervisor manually.
 
-`RuntimeHandle::actor_ref::<M>(id)` performs a typed registry lookup. A
-mismatched message type returns `LookupError::MessageTypeMismatch`.
+`RuntimeHandle::actor_ref::<M>(id)` performs a typed registry lookup. Lookup
+failures such as `LookupError::MessageTypeMismatch` arrive wrapped in
+`DynamicActorError::Lookup`, and a runtime built without a dynamic registry
+returns `DynamicActorError::Unsupported`.
 
 Whole-graph supervision is still available through `SupervisedGraph` when a
 group of actors should restart as one child.
