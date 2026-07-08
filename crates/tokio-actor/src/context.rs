@@ -10,7 +10,7 @@ use tokio::sync::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    binding::{BindingCore, MailboxRef},
+    binding::{BindingCore, BindingState, MailboxRef},
     blocking::{
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions, BlockingSpawner,
         BlockingTaskError, SpawnBlockingError,
@@ -28,7 +28,7 @@ use crate::{
 /// transparently follows the new mailbox.
 pub struct ActorRef<M> {
     actor_id: Arc<str>,
-    binding: watch::Receiver<Option<MailboxRef<M>>>,
+    binding: watch::Receiver<BindingState<M>>,
     observability: Arc<OnceLock<GraphObservability>>,
     source_actor_id: Option<Arc<str>>,
 }
@@ -64,7 +64,7 @@ impl<M> ActorRef<M> {
 
     pub(crate) fn from_parts(
         actor_id: Arc<str>,
-        binding: watch::Receiver<Option<MailboxRef<M>>>,
+        binding: watch::Receiver<BindingState<M>>,
         observability: Arc<OnceLock<GraphObservability>>,
         source_actor_id: Option<Arc<str>>,
     ) -> Self {
@@ -87,27 +87,70 @@ impl<M> ActorRef<M> {
     }
 
     fn current_mailbox(&self) -> Result<MailboxRef<M>, SendError> {
-        self.binding
-            .borrow()
-            .clone()
-            .ok_or_else(|| SendError::ActorNotRunning {
+        match self.binding.borrow().clone() {
+            BindingState::Bound(mailbox) => Ok(mailbox),
+            BindingState::Unbound if self.binding.has_changed().is_err() => {
+                Err(self.actor_terminated())
+            }
+            BindingState::Unbound => Err(SendError::ActorNotRunning {
                 actor_id: self.actor_id.to_string(),
-            })
+            }),
+            BindingState::Terminated => Err(self.actor_terminated()),
+        }
     }
 
-    /// Sends a message to the target actor, waiting for mailbox capacity.
+    /// Sends a message to the target actor.
+    ///
+    /// This waits until the actor has a bound mailbox, waits for mailbox
+    /// capacity, and rides through restart windows when the actor is expected
+    /// to rebind. It returns an error only when the actor has terminated with
+    /// no restart scheduled, or when the binding source has been dropped.
+    ///
+    /// Cancelling this future while it is waiting drops the message.
     pub async fn send(&self, message: M) -> Result<(), SendError> {
-        let started_at = self.start_message_timing();
-        let result = match self.current_mailbox() {
-            Ok(mailbox) => mailbox.send(message).await,
-            Err(error) => Err(error),
-        };
-        self.observe_send(
-            MessageOperation::Send,
-            Self::finish_message_timing(started_at),
-            &result,
-        );
-        result
+        let mut binding = self.binding.clone();
+        let mut message = message;
+
+        loop {
+            let started_at = self.start_message_timing();
+            let mailbox = match self.wait_for_next_mailbox(&mut binding).await {
+                Ok(mailbox) => mailbox,
+                Err(error) => {
+                    let result = Err(error);
+                    self.observe_send(
+                        MessageOperation::Send,
+                        Self::finish_message_timing(started_at),
+                        &result,
+                    );
+                    return result;
+                }
+            };
+
+            match mailbox.send_retaining(message).await {
+                Ok(()) => {
+                    let result = Ok(());
+                    self.observe_send(
+                        MessageOperation::Send,
+                        Self::finish_message_timing(started_at),
+                        &result,
+                    );
+                    return result;
+                }
+                Err(returned) => {
+                    let result = Err(SendError::MailboxClosed {
+                        actor_id: self.actor_id.to_string(),
+                    });
+                    self.observe_send(
+                        MessageOperation::Send,
+                        Self::finish_message_timing(started_at),
+                        &result,
+                    );
+                    message = returned;
+                    self.wait_for_rebind_or_termination(&mut binding, &mailbox)
+                        .await?;
+                }
+            }
+        }
     }
 
     /// Attempts to send a message without waiting for mailbox capacity.
@@ -125,74 +168,11 @@ impl<M> ActorRef<M> {
         result
     }
 
-    /// Sends a message from blocking code without requiring an async context.
-    ///
-    /// This uses try-send semantics and never blocks the current thread.
-    pub fn blocking_send(&self, message: M) -> Result<(), SendError> {
-        let started_at = self.start_message_timing();
-        let result = match self.current_mailbox() {
-            Ok(mailbox) => mailbox.blocking_send(message),
-            Err(error) => Err(error),
-        };
-        self.observe_send(
-            MessageOperation::BlockingSend,
-            Self::finish_message_timing(started_at),
-            &result,
-        );
-        result
-    }
-
-    /// Retries a send across transient restart windows until the actor is
-    /// rebound or the binding source is dropped.
-    pub async fn send_when_ready(&mut self, message: M) -> Result<(), SendError> {
-        let mut message = message;
-
-        loop {
-            let started_at = self.start_message_timing();
-            match self.current_mailbox() {
-                Ok(mailbox) => match mailbox.send_retaining(message).await {
-                    Ok(()) => {
-                        let result = Ok(());
-                        self.observe_send(
-                            MessageOperation::Send,
-                            Self::finish_message_timing(started_at),
-                            &result,
-                        );
-                        return result;
-                    }
-                    Err(returned) => {
-                        let error = SendError::MailboxClosed {
-                            actor_id: self.actor_id.to_string(),
-                        };
-                        let result = Err(error.clone());
-                        self.observe_send(
-                            MessageOperation::Send,
-                            Self::finish_message_timing(started_at),
-                            &result,
-                        );
-                        message = returned;
-                        if !self.wait_for_rebind(&mailbox).await {
-                            return Err(error);
-                        }
-                    }
-                },
-                Err(error) => {
-                    let result = Err(error.clone());
-                    self.observe_send(
-                        MessageOperation::Send,
-                        Self::finish_message_timing(started_at),
-                        &result,
-                    );
-                    if !self.wait_for_next_binding().await {
-                        return Err(error);
-                    }
-                }
-            }
-        }
-    }
-
     /// Sends a request and waits for the actor to answer through the
     /// [`Reply`] carried inside the message.
+    ///
+    /// This waits for the same actor binding conditions as [`send`](Self::send).
+    /// Cancelling this future while it is waiting drops the request message.
     ///
     /// ```ignore
     /// enum Msg { Get(Reply<u64>) }
@@ -206,17 +186,22 @@ impl<M> ActorRef<M> {
         })
     }
 
-    /// Waits until the actor is bound to a running mailbox.
-    ///
-    /// Returns immediately with `true` if the actor is already running.
-    /// Returns `false` if the binding source has been dropped (the graph no
-    /// longer exists).
-    pub async fn wait_for_binding(&mut self) -> bool {
-        self.wait_for_next_binding().await
-    }
+    async fn wait_for_next_mailbox(
+        &self,
+        binding: &mut watch::Receiver<BindingState<M>>,
+    ) -> Result<MailboxRef<M>, SendError> {
+        loop {
+            match binding.borrow().clone() {
+                BindingState::Bound(mailbox) => return Ok(mailbox),
+                BindingState::Unbound => {}
+                BindingState::Terminated => return Err(self.actor_terminated()),
+            }
 
-    async fn wait_for_next_binding(&mut self) -> bool {
-        self.binding.wait_for(Option::is_some).await.is_ok()
+            binding
+                .changed()
+                .await
+                .map_err(|_| self.actor_terminated())?;
+        }
     }
 
     /// Waits until the stale mailbox is unbound and a fresh one is bound.
@@ -224,16 +209,29 @@ impl<M> ActorRef<M> {
     /// Waiting for the stale mailbox to clear first avoids busy-looping in
     /// the window where an actor's mailbox is already closed but its binding
     /// has not been cleared yet.
-    async fn wait_for_rebind(&mut self, stale: &MailboxRef<M>) -> bool {
-        if self
-            .binding
-            .wait_for(|slot| !matches!(slot, Some(current) if current.same_channel(stale)))
-            .await
-            .is_err()
-        {
-            return false;
+    async fn wait_for_rebind_or_termination(
+        &self,
+        binding: &mut watch::Receiver<BindingState<M>>,
+        stale: &MailboxRef<M>,
+    ) -> Result<(), SendError> {
+        loop {
+            match binding.borrow().clone() {
+                BindingState::Bound(current) if !current.same_channel(stale) => return Ok(()),
+                BindingState::Bound(_) | BindingState::Unbound => {}
+                BindingState::Terminated => return Err(self.actor_terminated()),
+            }
+
+            binding
+                .changed()
+                .await
+                .map_err(|_| self.actor_terminated())?;
         }
-        self.wait_for_next_binding().await
+    }
+
+    fn actor_terminated(&self) -> SendError {
+        SendError::ActorTerminated {
+            actor_id: self.actor_id.to_string(),
+        }
     }
 
     fn start_message_timing(&self) -> Option<std::time::Instant> {
@@ -416,6 +414,7 @@ impl<M: Send + 'static> ActorContext<M> {
 fn send_rejection(error: &SendError) -> SendRejection {
     match error {
         SendError::ActorNotRunning { .. } => SendRejection::NotRunning,
+        SendError::ActorTerminated { .. } => SendRejection::ActorTerminated,
         SendError::MailboxFull { .. } => SendRejection::MailboxFull,
         SendError::MailboxClosed { .. } => SendRejection::MailboxClosed,
     }

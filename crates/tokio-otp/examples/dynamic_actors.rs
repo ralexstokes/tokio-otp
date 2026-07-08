@@ -12,11 +12,11 @@ impl MessageHandler for Frontend {
     type Msg = String;
 
     async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
-        let mut rush = ctx
+        let rush = ctx
             .registry()
             .expect("registry installed")
             .actor_ref::<String>("rush-press")?;
-        rush.send_when_ready(order).await?;
+        rush.send(order).await?;
         Ok(())
     }
 }
@@ -45,10 +45,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build()?;
     let handle = runtime.spawn();
 
-    let mut orders = handle
+    let orders = handle
         .add_actor("front-desk", Frontend, DynamicActorOptions::default())
         .await?;
-    let mut rush = handle
+    let rush = handle
         .add_actor(
             "rush-press",
             RushPress {
@@ -57,9 +57,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             DynamicActorOptions::default(),
         )
         .await?;
-
-    orders.wait_for_binding().await;
-    rush.wait_for_binding().await;
 
     orders.send("wedding invites x50".to_owned()).await?;
     let observed = observed_rx.recv().await.expect("rush job");

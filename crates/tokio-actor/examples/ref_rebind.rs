@@ -1,10 +1,7 @@
 use std::{error::Error, marker::PhantomData};
 
 use tokio::sync::mpsc;
-use tokio_actor::{
-    ActorContext, ActorResult, Graph, GraphBuilder, GraphError, MessageHandler, SendError,
-};
-use tokio_util::sync::CancellationToken;
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, MessageHandler, SendError};
 
 struct Observe<M> {
     observed: mpsc::UnboundedSender<M>,
@@ -38,47 +35,30 @@ impl<M: Send + 'static> MessageHandler for Observe<M> {
     }
 }
 
-fn spawn_graph(
-    graph: Graph,
-) -> (
-    CancellationToken,
-    tokio::task::JoinHandle<Result<(), GraphError>>,
-) {
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
-    (stop, task)
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let mut frontend = builder.actor("frontend", Observe::<String>::new(observed_tx));
+    let frontend = builder.actor("frontend", Observe::<String>::new(observed_tx));
     let graph = builder.build()?;
 
-    let (stop, task) = spawn_graph(graph.clone());
-    frontend.wait_for_binding().await;
+    let handle = graph.spawn()?;
     frontend.send("first".to_owned()).await?;
     println!("observed {:?}", observed_rx.recv().await);
-    stop.cancel();
-    task.await??;
+    handle.shutdown_and_wait().await?;
 
     match frontend.try_send("between-runs".to_owned()) {
-        Err(SendError::ActorNotRunning { actor_id }) => {
-            println!("`{actor_id}` is unbound between graph runs");
+        Err(SendError::ActorTerminated { actor_id }) => {
+            println!("`{actor_id}` has no running graph instance");
         }
         other => println!("unexpected send result: {other:?}"),
     }
 
-    let (stop, task) = spawn_graph(graph);
-    frontend.send_when_ready("second".to_owned()).await?;
+    let handle = graph.spawn()?;
+    frontend.send("second".to_owned()).await?;
     println!("observed {:?}", observed_rx.recv().await);
-    stop.cancel();
-    task.await??;
+    handle.shutdown_and_wait().await?;
 
     Ok(())
 }

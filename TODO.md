@@ -5,32 +5,35 @@ review of the public API surfaces, examples, the README, and the tutorial
 book. Items near the top change what the items below them look like, so work
 roughly in order.
 
-## 1. `ActorRef` send-method signatures and waiting semantics
+## 1. ~~`ActorRef` send-method signatures and waiting semantics~~ — done
 
-- `send_when_ready` and `wait_for_binding` take `&mut self` (they wait on a
+- ~~`send_when_ready` and `wait_for_binding` take `&mut self` (they wait on a
   `watch::Receiver`), so every actor storing a ref in `&self` state must
   clone per call — `let mut press = self.press.clone();` appears in the
   README's first code sample and the book. Clone the receiver internally so
-  these take `&self`, matching `send`/`try_send`/`call`.
-- Decide whether `send_when_ready` should support a caller-provided
+  these take `&self`, matching `send`/`try_send`/`call`.~~
+- ~~Decide whether `send_when_ready` should support a caller-provided
   cancellation token or timeout helper for cases where waiting forever is not
   desirable. The same question applies to `call`, which today has no deadline
   and fails immediately with `ActorNotRunning` during a restart window
-  instead of waiting for the rebind.
-- `ActorRef::blocking_send` has try-send semantics, but tokio's
+  instead of waiting for the rebind.~~
+- ~~`ActorRef::blocking_send` has try-send semantics, but tokio's
   `mpsc::Sender::blocking_send` blocks for capacity; the name imports the
   opposite expectation. Rename (e.g. `send_from_blocking`) while the API is
-  unpublished.
+  unpublished.~~
 
-These touch the same methods; do them as one pass.
+Done by folding restart-aware waiting into `send`/`call`, deleting
+`send_when_ready`, `wait_for_binding`, and `blocking_send`, and leaving
+timeouts/cancellation to `tokio::time::timeout` / `select!`.
 
 ## 2. First-class readiness and restart-waiting helpers
 
-Every example calls per-ref `wait_for_binding().await` after `spawn()`, and
-waiting for a restart means hand-matching `ChildStarted { generation > 0 }`
-events — with a subtle race if you subscribe after triggering the crash. Add
-helpers like `RuntimeHandle::wait_until_running()` (all children started) and
-`wait_for_child_restart(id)` to cover the two patterns every consumer needs.
+~~Every example calls per-ref `wait_for_binding().await` after `spawn()`. Add
+helpers like `RuntimeHandle::wait_until_running()` (all children started).~~
+Waiting for a restart still means hand-matching
+`ChildStarted { generation > 0 }` events — with a subtle race if you subscribe
+after triggering the crash. Add `wait_for_child_restart(id)` to cover that
+remaining pattern.
 
 ## 3. Umbrella prelude completeness
 
@@ -63,11 +66,11 @@ on both the builder setter and `RunnableActor::run_until`.
 
 ## 6. Registry consistency and lookup diagnostics
 
-- Registry entries go stale when a dynamic actor is removed outside
+- ~~Registry entries go stale when a dynamic actor is removed outside
   `RuntimeHandle::remove_actor` (direct `remove_child`, or a transient actor
   exiting for good): `actor_ids()`/`contains()` keep advertising an actor
   whose ref only returns `ActorNotRunning`. Document or add event-driven
-  cleanup.
+  cleanup.~~
 - `RuntimeHandle::actor_ref` on a runtime built without a dynamic registry
   (`Runtime::new`) returns `LookupError::UnknownActor` for every id,
   conflating "no registry configured" with "no such actor" (`add_actor`
@@ -132,7 +135,7 @@ single-subscription monitoring. Three gaps surfaced:
   today. The OTP analogue is `simple_one_for_one` / Elixir's
   `DynamicSupervisor`: a supervisor node whose children are added and removed
   at runtime, anywhere in the tree.
-- **Conflating (latest-wins) mailbox option.** `send_when_ready` backpressure
+- **Conflating (latest-wins) mailbox option.** `send` backpressure
   is right for command-like messages but wrong for high-rate state updates
   (market data ticks): a slow consumer should never backpressure the
   producer into falling behind its source, and draining a deep queue of
@@ -178,9 +181,8 @@ or are discouraged even in OTP).
   declaration order, each child's `init` completing before the next starts,
   so "my sibling above me is ready" is a guarantee, not a race. Our
   supervisor spawns everything concurrently into a `JoinSet`
-  (`runtime/supervision.rs`), which is why every example needs
-  `wait_for_binding()`. Section 2's readiness helpers treat the symptom; an
-  opt-in sequential start mode (child counts as started once `on_start`
+  (`runtime/supervision.rs`). Section 2's readiness helper treats the symptom;
+  an opt-in sequential start mode (child counts as started once `on_start`
   returns) would remove the race class entirely. OTP's `handle_continue` is
   the companion feature: a hook for expensive post-init work that should not
   block the start sequence.

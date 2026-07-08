@@ -21,7 +21,7 @@ impl MessageHandler for Worker {
             WorkMsg::Process(input) => {
                 ctx.run_blocking(BlockingOptions::named("uppercase"), move |job| {
                     let output = input.to_uppercase();
-                    job.myself().blocking_send(WorkMsg::Finished(output))?;
+                    job.myself().try_send(WorkMsg::Finished(output))?;
                     Ok(())
                 })
                 .await?;

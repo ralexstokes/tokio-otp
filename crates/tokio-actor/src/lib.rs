@@ -54,9 +54,9 @@
 //!
 //! Restarts also lose queued messages. Each actor run binds a fresh mailbox,
 //! so messages queued behind a poison message are dropped with the old
-//! mailbox. [`ActorRef::send_when_ready`] retries across the restart window,
-//! but it does not resurrect messages that were already accepted by the old
-//! mailbox.
+//! mailbox. [`ActorRef::send`] waits across restart windows when supervision
+//! policy says a rebind is expected, but it does not resurrect messages that
+//! were already accepted by the old mailbox.
 //!
 //! # Observability
 //!
@@ -156,13 +156,15 @@ pub mod prelude {
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
         BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BuildError, CallError, DrainPolicy,
-        Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler, RegistryError,
-        Reply, RunnableActor, RunnableActorFactory, SendError, SpawnBlockingError, TryRecvError,
+        Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler, RebindPolicy,
+        RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError, SpawnBlockingError,
+        TryRecvError,
     };
 }
 
 pub use actor::{Actor, ActorResult, BoxError};
 pub use actor_set::{ActorRunError, ActorSet, RunnableActor, RunnableActorFactory};
+pub use binding::RebindPolicy;
 pub use blocking::{
     BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions, BlockingTaskError,
     BlockingTaskFailure, BlockingTaskId, SpawnBlockingError,

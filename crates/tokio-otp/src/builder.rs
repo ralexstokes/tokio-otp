@@ -34,7 +34,7 @@ use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedAc
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut graph = GraphBuilder::new();
-/// let mut echo = graph.actor("echo", Echo);
+/// let echo = graph.actor("echo", Echo);
 ///
 /// let runtime = Runtime::builder()
 ///     .graph(graph.build()?)
@@ -43,7 +43,7 @@ use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedAc
 ///     .build()?;
 /// let handle = runtime.spawn();
 ///
-/// echo.send_when_ready("hello".to_owned()).await?;
+/// echo.send("hello".to_owned()).await?;
 /// handle.shutdown_and_wait().await?;
 /// # Ok(())
 /// # }

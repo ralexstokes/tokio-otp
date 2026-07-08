@@ -70,6 +70,9 @@ pub enum SendError {
     /// The target actor is currently unbound because it is not running.
     #[error("actor `{actor_id}` is not currently running")]
     ActorNotRunning { actor_id: String },
+    /// The target actor has terminated and no restart is scheduled.
+    #[error("actor `{actor_id}` has terminated")]
+    ActorTerminated { actor_id: String },
     /// The target actor's mailbox is full.
     #[error("mailbox for actor `{actor_id}` is full")]
     MailboxFull { actor_id: String },

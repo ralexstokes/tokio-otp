@@ -19,8 +19,8 @@ impl MessageHandler for Frontend {
     type Msg = String;
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
-        let mut worker = self.worker.clone();
-        worker.send_when_ready(order).await?;
+        let worker = self.worker.clone();
+        worker.send(order).await?;
         Ok(())
     }
 }
@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (delivered_tx, mut delivered_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     let worker_ref = builder.declare::<String>("worker");
-    let mut orders = builder.actor("front-desk", Frontend { worker: worker_ref });
+    let orders = builder.actor("front-desk", Frontend { worker: worker_ref });
     builder.actor(
         "worker",
         Worker {
@@ -73,7 +73,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let handle = runtime.spawn();
     let mut events = handle.subscribe();
 
-    orders.wait_for_binding().await;
     orders.send("business cards x100".to_owned()).await?;
     println!("delivered {}", delivered_rx.recv().await.expect("delivery"));
 

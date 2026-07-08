@@ -38,7 +38,7 @@ cargo run -p <crate> --example <name>
 | Example | Shows |
 |---------|-------|
 | `ref_rebind` | Stable typed actor refs across graph reruns. |
-| `send_vs_send_when_ready` | Retry-across-restart send semantics. |
+| `send_vs_try_send` | Waiting `send` vs fail-fast `try_send` across a restart window. |
 | `mailbox_backpressure` | Bounded mailbox back-pressure. |
 | `blocking_work` | Spawning tracked blocking tasks. |
 | `blocking_lifecycle` | Blocking task lifecycle handling. |

@@ -21,8 +21,8 @@ impl MessageHandler for Frontend {
     type Msg = String;
 
     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
-        let mut worker = self.worker.clone();
-        worker.send_when_ready(message).await?;
+        let worker = self.worker.clone();
+        worker.send(message).await?;
         Ok(())
     }
 }
@@ -54,7 +54,7 @@ impl MessageHandler for Worker {
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
     let worker_ref = builder.declare::<String>("worker");
-    let mut frontend = builder.actor("frontend", Frontend { worker: worker_ref });
+    let frontend = builder.actor("frontend", Frontend { worker: worker_ref });
     builder.actor(
         "worker",
         Worker {
@@ -78,7 +78,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    frontend.wait_for_binding().await;
     frontend.send("hello".to_owned()).await?;
     frontend.send("fail-worker".to_owned()).await?;
     loop {

@@ -34,8 +34,7 @@ impl MessageHandler for FrontDesk {
     type Msg = String;
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
-        let mut press = self.press.clone();
-        press.send_when_ready(order).await?;
+        self.press.send(order).await?;
         Ok(())
     }
 }
@@ -45,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wire a static graph with typed, restart-stable actor refs.
     let mut builder = GraphBuilder::new();
     let press_ref = builder.declare::<String>("press");
-    let mut orders = builder.actor("front-desk", FrontDesk { press: press_ref });
+    let orders = builder.actor("front-desk", FrontDesk { press: press_ref });
     builder.actor("press", Press::default()); // an actor that occasionally jams
     let graph = builder.build()?;
 
@@ -56,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let handle = runtime.spawn();
 
-    orders.send_when_ready("business cards x100".to_owned()).await?;
+    orders.send("business cards x100".to_owned()).await?;
 
     handle.shutdown_and_wait().await?;
     Ok(())

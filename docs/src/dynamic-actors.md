@@ -17,11 +17,11 @@ impl MessageHandler for FrontDesk {
     type Msg = String;
 
     async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
-        let mut rush = ctx
+        let rush = ctx
             .registry()
             .expect("registry installed")
             .actor_ref::<String>("rush-press")?;
-        rush.send_when_ready(order).await?;
+        rush.send(order).await?;
         Ok(())
     }
 }
@@ -46,15 +46,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let handle = runtime.spawn();
 
-    let mut orders = handle
+    let orders = handle
         .add_actor("front-desk", FrontDesk, DynamicActorOptions::default())
         .await?;
-    let mut rush = handle
+    let rush = handle
         .add_actor("rush-press", RushPress, DynamicActorOptions::default())
         .await?;
 
-    orders.send_when_ready("wedding invites x50".into()).await?;
-    rush.send_when_ready("vip banners x2".into()).await?;
+    orders.send("wedding invites x50".into()).await?;
+    rush.send("vip banners x2".into()).await?;
 
     handle.remove_actor("front-desk").await?;
     handle.remove_actor("rush-press").await?;

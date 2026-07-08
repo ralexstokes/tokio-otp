@@ -30,14 +30,6 @@ impl<M> MailboxRef<M> {
         self.sender.send(message).await.map_err(|err| err.0)
     }
 
-    pub(crate) async fn send(&self, message: M) -> Result<(), SendError> {
-        self.send_retaining(message)
-            .await
-            .map_err(|_| SendError::MailboxClosed {
-                actor_id: self.actor_id.to_string(),
-            })
-    }
-
     pub(crate) fn try_send(&self, message: M) -> Result<(), SendError> {
         self.sender.try_send(message).map_err(|err| match err {
             mpsc::error::TrySendError::Full(_) => SendError::MailboxFull {
@@ -49,13 +41,48 @@ impl<M> MailboxRef<M> {
         })
     }
 
-    pub(crate) fn blocking_send(&self, message: M) -> Result<(), SendError> {
-        self.try_send(message)
-    }
-
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
         self.sender.same_channel(&other.sender)
     }
+}
+
+/// The current lifecycle state of an actor mailbox binding.
+pub(crate) enum BindingState<M> {
+    /// Not yet started, or between restarts where a new mailbox is expected.
+    Unbound,
+    Bound(MailboxRef<M>),
+    /// No restart is scheduled. A later graph rerun or actor re-add may bind
+    /// a new mailbox.
+    Terminated,
+}
+
+impl<M> Clone for BindingState<M> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Unbound => Self::Unbound,
+            Self::Bound(mailbox) => Self::Bound(mailbox.clone()),
+            Self::Terminated => Self::Terminated,
+        }
+    }
+}
+
+/// Controls whether a binding should wait for another mailbox after a run
+/// exits.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RebindPolicy {
+    /// A rebind is always expected unless shutdown was requested.
+    Always,
+    /// A rebind is expected after failure, panic, cancellation, or drop.
+    OnFailure,
+    /// No rebind is expected.
+    #[default]
+    Never,
+}
+
+pub(crate) trait BindingLifecycle: Send + Sync {
+    fn unbind(&self);
+    fn terminate(&self);
 }
 
 /// Long-lived binding slot for one actor's current mailbox.
@@ -65,13 +92,13 @@ impl<M> MailboxRef<M> {
 /// restarts.
 pub(crate) struct BindingCore<M> {
     actor_id: Arc<str>,
-    current: watch::Sender<Option<MailboxRef<M>>>,
+    current: watch::Sender<BindingState<M>>,
     observability: Arc<OnceLock<GraphObservability>>,
 }
 
 impl<M> BindingCore<M> {
     pub(crate) fn new(actor_id: Arc<str>) -> Self {
-        let (current, _receiver) = watch::channel(None);
+        let (current, _receiver) = watch::channel(BindingState::Unbound);
         Self {
             actor_id,
             current,
@@ -83,7 +110,7 @@ impl<M> BindingCore<M> {
         &self.actor_id
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<Option<MailboxRef<M>>> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<BindingState<M>> {
         self.current.subscribe()
     }
 
@@ -96,11 +123,35 @@ impl<M> BindingCore<M> {
     }
 
     fn bind(&self, mailbox: MailboxRef<M>) {
-        self.current.send_replace(Some(mailbox));
+        self.current.send_replace(BindingState::Bound(mailbox));
     }
 
-    fn clear(&self) {
-        self.current.send_replace(None);
+    /// Only a bound mailbox can be unbound: once a binding is terminated, a
+    /// racing unbind from a late run teardown must not regress it to
+    /// `Unbound`, or senders would wait for a rebind that never comes.
+    pub(crate) fn unbind(&self) {
+        self.current.send_if_modified(|state| {
+            if matches!(state, BindingState::Bound(_)) {
+                *state = BindingState::Unbound;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub(crate) fn terminate(&self) {
+        self.current.send_replace(BindingState::Terminated);
+    }
+}
+
+impl<M: Send + 'static> BindingLifecycle for BindingCore<M> {
+    fn unbind(&self) {
+        BindingCore::unbind(self);
+    }
+
+    fn terminate(&self) {
+        BindingCore::terminate(self);
     }
 }
 
@@ -109,6 +160,7 @@ impl<M> BindingCore<M> {
 pub(crate) struct BindingGuard<M> {
     core: Arc<BindingCore<M>>,
     observability: GraphObservability,
+    rebind_policy: RebindPolicy,
 }
 
 impl<M> BindingGuard<M> {
@@ -116,19 +168,24 @@ impl<M> BindingGuard<M> {
         core: Arc<BindingCore<M>>,
         mailbox: MailboxRef<M>,
         observability: GraphObservability,
+        rebind_policy: RebindPolicy,
     ) -> Self {
         core.bind(mailbox);
         observability.emit_mailbox_bound(core.actor_id());
         Self {
             core,
             observability,
+            rebind_policy,
         }
     }
 }
 
 impl<M> Drop for BindingGuard<M> {
     fn drop(&mut self) {
-        self.core.clear();
+        match self.rebind_policy {
+            RebindPolicy::Always | RebindPolicy::OnFailure => self.core.unbind(),
+            RebindPolicy::Never => self.core.terminate(),
+        }
         self.observability
             .emit_mailbox_cleared(self.core.actor_id());
     }

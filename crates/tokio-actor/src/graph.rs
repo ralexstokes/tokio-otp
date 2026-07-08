@@ -21,7 +21,7 @@ use tracing::Instrument;
 use crate::{
     actor::{Actor, ActorResult},
     actor_set::ActorSet,
-    binding::{BindingCore, BindingGuard, MailboxRef},
+    binding::{BindingCore, BindingGuard, BindingLifecycle, MailboxRef, RebindPolicy},
     blocking::{BlockingRuntime, BlockingRuntimeEvent},
     context::{ActorContext, ActorRef},
     error::{GraphError, LookupError},
@@ -102,6 +102,7 @@ pub(crate) struct GraphActor {
     pub(crate) message_type: TypeId,
     pub(crate) message_type_name: &'static str,
     pub(crate) binding: Arc<dyn Any + Send + Sync>,
+    pub(crate) binding_lifecycle: Arc<dyn BindingLifecycle>,
     pub(crate) observability: Arc<OnceLock<GraphObservability>>,
     pub(crate) runner: Arc<dyn ErasedRunner>,
 }
@@ -113,6 +114,7 @@ pub(crate) struct RunnerStart {
     pub(crate) blocking_shutdown_timeout: Duration,
     pub(crate) registry: Option<ActorRegistry>,
     pub(crate) observability: GraphObservability,
+    pub(crate) rebind_policy: RebindPolicy,
 }
 
 /// Type-erased actor runner.
@@ -140,6 +142,7 @@ impl<A: Actor> ErasedRunner for TypedRunner<A> {
             self.binding.clone(),
             MailboxRef::new(actor_id.clone(), sender),
             observability.clone(),
+            start.rebind_policy,
         );
         let myself = ActorRef::from_core(&self.binding, Some(actor_id.clone()));
         let mut blocking = BlockingRuntime::new(
@@ -255,8 +258,8 @@ impl Graph {
 
     /// Spawns the graph onto the current Tokio runtime and returns a handle.
     ///
-    /// All actor mailboxes are bound when this returns, so actor refs are
-    /// immediately usable without [`ActorRef::wait_for_binding`].
+    /// Actor refs may be used immediately; [`ActorRef::send`] waits until the
+    /// target mailbox is bound.
     ///
     /// Panics if called outside a Tokio runtime, matching [`tokio::spawn`].
     pub fn spawn(&self) -> Result<GraphHandle, GraphError> {
@@ -536,6 +539,7 @@ impl GraphRuntime {
                 blocking_shutdown_timeout: self.inner.blocking_shutdown_timeout,
                 registry: None,
                 observability: self.inner.observability.clone(),
+                rebind_policy: RebindPolicy::Never,
             });
             let actor_span = self.inner.observability.actor_span(&actor_id);
 

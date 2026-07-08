@@ -16,7 +16,7 @@ use tokio::{
 };
 use tokio_actor::{
     Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-    BlockingOptions, BoxError, GraphBuilder, LookupError, RunnableActor, SendError,
+    BlockingOptions, BoxError, GraphBuilder, LookupError, RebindPolicy, RunnableActor, SendError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Dispatch, field::Visit};
@@ -128,6 +128,9 @@ async fn wait_for_stale_mailbox(actor_ref: &ActorRef<String>) {
                 Err(SendError::ActorNotRunning { .. }) => {
                     panic!("binding cleared before stale mailbox was observed");
                 }
+                Err(SendError::ActorTerminated { .. }) => {
+                    panic!("binding terminated before stale mailbox was observed");
+                }
                 Ok(()) | Err(SendError::MailboxFull { .. }) => {
                     sleep(Duration::from_millis(1)).await;
                 }
@@ -166,7 +169,7 @@ impl Actor for RebindActor {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn actor_ref_send_when_ready_waits_for_stale_binding_to_change() {
+async fn actor_ref_send_waits_for_stale_binding_to_change() {
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
@@ -188,6 +191,7 @@ async fn actor_ref_send_when_ready_waits_for_stale_binding_to_change() {
         .expect("actor set");
 
     let worker = single_actor(&actor_set, "worker");
+    worker.set_rebind_policy(RebindPolicy::Always);
     let actor_ref = worker.actor_ref::<String>().expect("typed ref");
     let (_first_stop, first_task) = start_actor(worker.clone());
 
@@ -201,9 +205,8 @@ async fn actor_ref_send_when_ready_waits_for_stale_binding_to_change() {
     let dispatch = mailbox_closed_counter_dispatch(counter.clone());
     let guard = tracing::dispatcher::set_default(&dispatch);
 
-    let mut sending_ref = actor_ref.clone();
-    let send_task =
-        tokio::spawn(async move { sending_ref.send_when_ready("held".to_owned()).await });
+    let sending_ref = actor_ref.clone();
+    let send_task = tokio::spawn(async move { sending_ref.send("held".to_owned()).await });
     timeout(Duration::from_secs(1), async {
         while counter.count() == 0 {
             sleep(Duration::from_millis(1)).await;
@@ -213,7 +216,7 @@ async fn actor_ref_send_when_ready_waits_for_stale_binding_to_change() {
     .expect("send task observed stale closed mailbox in time");
     assert!(
         !send_task.is_finished(),
-        "send_when_ready should wait for a new binding"
+        "send should wait for a new binding"
     );
 
     drop(guard);
@@ -283,8 +286,8 @@ impl Actor for Forwarder {
 
     async fn run(&self, mut ctx: ActorContext<Work>) -> ActorResult {
         while let Some(work) = ctx.recv().await {
-            let mut worker = self.worker.clone();
-            worker.send_when_ready(work).await?;
+            let worker = self.worker.clone();
+            worker.send(work).await?;
         }
         Ok(())
     }
@@ -333,13 +336,13 @@ async fn actor_set_refs_survive_individual_actor_restarts() {
 
     let frontend = single_actor(&actor_set, "frontend");
     let worker = single_actor(&actor_set, "worker");
-    let mut frontend_ref = actor_set
+    worker.set_rebind_policy(RebindPolicy::OnFailure);
+    let frontend_ref = actor_set
         .actor_ref::<Work>("frontend")
         .expect("frontend ref exists");
 
     let (frontend_stop, frontend_task) = start_actor(frontend);
     let (_first_worker_stop, first_worker_task) = start_actor(worker.clone());
-    frontend_ref.wait_for_binding().await;
 
     frontend_ref.send(Work("first")).await.expect("first send");
     assert_eq!(
@@ -430,10 +433,9 @@ async fn context_registry_lookup_checks_message_type() {
     }
 
     let probe = single_actor(&actor_set, "probe");
-    let mut probe_ref = actor_set.actor_ref::<ProbeMsg>("probe").expect("probe ref");
+    let probe_ref = actor_set.actor_ref::<ProbeMsg>("probe").expect("probe ref");
     let (stop, task) = start_actor(probe);
 
-    probe_ref.wait_for_binding().await;
     probe_ref.send(ProbeMsg::Check).await.expect("probe send");
     assert!(
         timeout(Duration::from_secs(1), result_rx.recv())
@@ -443,6 +445,47 @@ async fn context_registry_lookup_checks_message_type() {
     );
 
     stop_actor(stop, task).await.expect("probe stopped cleanly");
+}
+
+#[derive(Clone)]
+struct CleanExit;
+
+impl Actor for CleanExit {
+    type Msg = ();
+
+    async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn registry_evicts_actor_after_terminal_clean_exit() {
+    let mut builder = GraphBuilder::new();
+    builder.actor("temporary", CleanExit);
+    let actor_set = builder
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+    let actor = single_actor(&actor_set, "temporary");
+    actor.set_rebind_policy(RebindPolicy::OnFailure);
+
+    let registry = ActorRegistry::new();
+    actor.set_registry(registry.clone());
+    actor.register_with(&registry).expect("actor registered");
+    assert!(registry.contains("temporary"));
+
+    let task = tokio::spawn(async move { actor.run_until(pending::<()>()).await });
+    task.await
+        .expect("actor task joined")
+        .expect("actor exited cleanly");
+
+    assert!(!registry.contains("temporary"));
+    assert!(registry.actor_ids().is_empty());
+    assert!(matches!(
+        registry.actor_ref::<()>("temporary"),
+        Err(LookupError::UnknownActor { actor_id }) if actor_id == "temporary"
+    ));
 }
 
 enum BlockingMsg {
@@ -463,7 +506,7 @@ impl Actor for BlockingSender {
             match message {
                 BlockingMsg::Start => {
                     ctx.run_blocking(BlockingOptions::named("reply"), |job| {
-                        job.myself().blocking_send(BlockingMsg::FromBlocking)?;
+                        job.myself().try_send(BlockingMsg::FromBlocking)?;
                         Ok(())
                     })
                     .await?;
@@ -493,12 +536,11 @@ async fn blocking_context_can_send_to_own_typed_mailbox() {
         .into_actor_set()
         .expect("actor set");
     let worker = single_actor(&actor_set, "worker");
-    let mut worker_ref = actor_set
+    let worker_ref = actor_set
         .actor_ref::<BlockingMsg>("worker")
         .expect("worker ref");
 
     let (stop, task) = start_actor(worker);
-    worker_ref.wait_for_binding().await;
     worker_ref
         .send(BlockingMsg::Start)
         .await

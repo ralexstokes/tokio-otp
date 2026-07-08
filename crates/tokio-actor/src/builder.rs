@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     actor::Actor,
-    binding::BindingCore,
+    binding::{BindingCore, BindingLifecycle},
     context::ActorRef,
     error::BuildError,
     graph::{ErasedRunner, Graph, GraphActor, GraphInner, TypedRunner},
@@ -35,6 +35,7 @@ struct Slot {
     message_type: TypeId,
     message_type_name: &'static str,
     binding: Arc<dyn Any + Send + Sync>,
+    binding_lifecycle: Arc<dyn BindingLifecycle>,
     observability: Arc<OnceLock<GraphObservability>>,
     runner: Option<Arc<dyn ErasedRunner>>,
 }
@@ -194,6 +195,7 @@ impl GraphBuilder {
                 message_type: slot.message_type,
                 message_type_name: slot.message_type_name,
                 binding: slot.binding,
+                binding_lifecycle: slot.binding_lifecycle,
                 observability: slot.observability,
                 runner,
             });
@@ -247,7 +249,8 @@ impl GraphBuilder {
             actor_id,
             message_type: TypeId::of::<M>(),
             message_type_name: type_name::<M>(),
-            binding: core,
+            binding: core.clone(),
+            binding_lifecycle: core,
             observability,
             runner: None,
         });

@@ -53,11 +53,11 @@ impl Actor for ForwardToDynamic {
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
         while let Some(message) = ctx.recv().await {
-            let mut dynamic = ctx
+            let dynamic = ctx
                 .registry()
                 .expect("registry installed")
                 .actor_ref::<String>("dynamic")?;
-            dynamic.send_when_ready(message).await?;
+            dynamic.send(message).await?;
         }
         Ok(())
     }
@@ -89,7 +89,7 @@ async fn graphless_dynamic_runtime_adds_removes_and_readds_actors() {
         .expect("dynamic runtime builds without a graph");
     let handle = runtime.spawn();
 
-    let mut sink = handle
+    let sink = handle
         .add_actor(
             "sink",
             Observe {
@@ -99,13 +99,11 @@ async fn graphless_dynamic_runtime_adds_removes_and_readds_actors() {
         )
         .await
         .expect("sink added");
-    let mut forwarder = handle
+    let forwarder = handle
         .add_actor("forwarder", ForwardToSink, DynamicActorOptions::default())
         .await
         .expect("forwarder added");
 
-    sink.wait_for_binding().await;
-    forwarder.wait_for_binding().await;
     forwarder
         .send("forwarded".to_owned())
         .await
@@ -122,9 +120,13 @@ async fn graphless_dynamic_runtime_adds_removes_and_readds_actors() {
         .await
         .expect("forwarder removed");
     handle.remove_actor("sink").await.expect("sink removed");
+    assert!(matches!(
+        sink.send("after-remove".to_owned()).await,
+        Err(SendError::ActorTerminated { actor_id }) if actor_id == "sink"
+    ));
     assert!(handle.snapshot().children.is_empty());
 
-    let mut sink = handle
+    let sink = handle
         .add_actor(
             "sink",
             Observe {
@@ -134,7 +136,6 @@ async fn graphless_dynamic_runtime_adds_removes_and_readds_actors() {
         )
         .await
         .expect("sink id can be reused");
-    sink.wait_for_binding().await;
     sink.send("again".to_owned())
         .await
         .expect("message sent to re-added sink");
@@ -178,7 +179,7 @@ async fn dynamic_graph_runtime_can_remove_last_graph_actor() {
         .expect("last graph actor can be removed in dynamic mode");
     assert!(handle.snapshot().children.is_empty());
 
-    let mut dynamic = handle
+    let dynamic = handle
         .add_actor(
             "dynamic",
             Observe {
@@ -188,7 +189,6 @@ async fn dynamic_graph_runtime_can_remove_last_graph_actor() {
         )
         .await
         .expect("runtime remains serviceable after reaching zero actors");
-    dynamic.wait_for_binding().await;
     dynamic
         .send("after-zero".to_owned())
         .await
@@ -217,7 +217,7 @@ async fn dynamic_graph_runtime_can_remove_last_graph_actor() {
 async fn static_actor_can_send_to_runtime_added_actor() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let mut frontend = builder.actor("frontend", ForwardToDynamic);
+    let frontend = builder.actor("frontend", ForwardToDynamic);
     let graph = builder.build().expect("valid graph");
 
     let runtime = build_runtime(graph);
@@ -225,7 +225,7 @@ async fn static_actor_can_send_to_runtime_added_actor() {
 
     assert!(handle.actor_ref::<String>("frontend").is_ok());
 
-    let mut dynamic_ref = handle
+    let dynamic_ref = handle
         .add_actor(
             "dynamic",
             Observe {
@@ -235,9 +235,8 @@ async fn static_actor_can_send_to_runtime_added_actor() {
         )
         .await
         .expect("dynamic actor added");
+    assert_eq!(dynamic_ref.id(), "dynamic");
 
-    dynamic_ref.wait_for_binding().await;
-    frontend.wait_for_binding().await;
     frontend
         .send("hello-dynamic".to_owned())
         .await
@@ -292,12 +291,11 @@ async fn runtime_added_actor_can_use_registry_to_reach_static_actor() {
     let runtime = build_runtime(graph);
     let handle = runtime.spawn();
 
-    let mut dynamic_ref = handle
+    let dynamic_ref = handle
         .add_actor("dynamic", ForwardToSink, DynamicActorOptions::default())
         .await
         .expect("dynamic actor added");
 
-    dynamic_ref.wait_for_binding().await;
     dynamic_ref
         .send("forwarded".to_owned())
         .await
@@ -324,7 +322,7 @@ async fn remove_actor_deregisters_runtime_added_actor() {
     let runtime = build_runtime(graph);
     let handle = runtime.spawn();
 
-    let mut dynamic_ref = handle
+    let dynamic_ref = handle
         .add_actor(
             "dynamic",
             Drain::<()>::new(),
@@ -333,7 +331,6 @@ async fn remove_actor_deregisters_runtime_added_actor() {
         .await
         .expect("dynamic actor added");
 
-    dynamic_ref.wait_for_binding().await;
     handle
         .remove_actor("dynamic")
         .await
@@ -345,7 +342,7 @@ async fn remove_actor_deregisters_runtime_added_actor() {
     ));
     assert!(matches!(
         dynamic_ref.send(()).await,
-        Err(SendError::ActorNotRunning { actor_id }) if actor_id == "dynamic"
+        Err(SendError::ActorTerminated { actor_id }) if actor_id == "dynamic"
     ));
 
     handle
@@ -375,7 +372,7 @@ async fn timed_out_remove_actor_deregisters_runtime_added_actor() {
     let runtime = build_runtime(graph);
     let handle = runtime.spawn();
 
-    let mut dynamic_ref = handle
+    let dynamic_ref = handle
         .add_actor(
             "dynamic",
             PendingActor,
@@ -386,8 +383,6 @@ async fn timed_out_remove_actor_deregisters_runtime_added_actor() {
         )
         .await
         .expect("dynamic actor added");
-
-    dynamic_ref.wait_for_binding().await;
 
     let err = handle
         .remove_actor("dynamic")
@@ -402,6 +397,10 @@ async fn timed_out_remove_actor_deregisters_runtime_added_actor() {
     assert!(matches!(
         handle.actor_ref::<()>("dynamic"),
         Err(LookupError::UnknownActor { .. })
+    ));
+    assert!(matches!(
+        dynamic_ref.send(()).await,
+        Err(SendError::ActorTerminated { actor_id }) if actor_id == "dynamic"
     ));
     assert!(
         handle

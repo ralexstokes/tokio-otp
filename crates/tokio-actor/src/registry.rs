@@ -7,16 +7,30 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    binding::BindingCore, context::ActorRef, error::LookupError, observability::GraphObservability,
+    binding::{BindingCore, BindingLifecycle},
+    context::ActorRef,
+    error::LookupError,
+    observability::GraphObservability,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct RegistryEntry {
     actor_id: Arc<str>,
     message_type: TypeId,
     message_type_name: &'static str,
     binding: Arc<dyn Any + Send + Sync>,
+    binding_lifecycle: Arc<dyn BindingLifecycle>,
     observability: Arc<OnceLock<GraphObservability>>,
+}
+
+impl std::fmt::Debug for RegistryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryEntry")
+            .field("actor_id", &self.actor_id)
+            .field("message_type", &self.message_type)
+            .field("message_type_name", &self.message_type_name)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Errors returned while registering or deregistering runtime actors.
@@ -88,6 +102,21 @@ impl ActorRegistry {
             .ok_or_else(|| RegistryError::UnknownActorId(actor_id.to_owned()))
     }
 
+    /// Transitions an actor's binding to terminated and removes it from the
+    /// registry.
+    pub fn terminate_and_deregister(&self, actor_id: &str) -> Result<(), RegistryError> {
+        if actor_id.is_empty() {
+            return Err(RegistryError::EmptyActorId);
+        }
+
+        self.entries
+            .write()
+            .expect("actor registry rwlock poisoned")
+            .remove(actor_id)
+            .map(|entry| entry.binding_lifecycle.terminate())
+            .ok_or_else(|| RegistryError::UnknownActorId(actor_id.to_owned()))
+    }
+
     pub(crate) fn register_erased(
         &self,
         actor_id: Arc<str>,
@@ -95,6 +124,7 @@ impl ActorRegistry {
         message_type_name: &'static str,
         observability: Arc<OnceLock<GraphObservability>>,
         binding: Arc<dyn Any + Send + Sync>,
+        binding_lifecycle: Arc<dyn BindingLifecycle>,
     ) -> Result<(), RegistryError> {
         if actor_id.is_empty() {
             return Err(RegistryError::EmptyActorId);
@@ -115,6 +145,7 @@ impl ActorRegistry {
                 message_type,
                 message_type_name,
                 binding,
+                binding_lifecycle,
                 observability,
             },
         );

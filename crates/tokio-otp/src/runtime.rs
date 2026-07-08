@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, watch};
 use tokio_actor::{
-    Actor, ActorRef, ActorRegistry, LookupError, RunnableActor, RunnableActorFactory,
+    Actor, ActorRef, ActorRegistry, LookupError, RebindPolicy, RegistryError, RunnableActor,
+    RunnableActorFactory,
 };
 use tokio_supervisor::{
-    ChildSpec, ControlError, Restart, RestartIntensity, ShutdownPolicy, Supervisor,
-    SupervisorError, SupervisorEvent, SupervisorExit, SupervisorHandle, SupervisorSnapshot,
+    ChildSnapshot, ChildSpec, ChildStateView, ControlError, Restart, RestartIntensity,
+    ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorExit, SupervisorHandle,
+    SupervisorSnapshot, SupervisorStateView,
 };
 
 use crate::error::DynamicActorError;
@@ -226,11 +228,11 @@ impl RuntimeHandle {
             .ok_or(DynamicActorError::Unsupported)?;
         match self.supervisor.remove_child(actor_id.to_owned()).await {
             Ok(()) => {
-                dynamic.registry.deregister(actor_id)?;
+                terminate_and_deregister_if_present(&dynamic.registry, actor_id)?;
                 Ok(())
             }
             Err(ControlError::ShutdownTimedOut(id)) if id == actor_id => {
-                let _ = dynamic.registry.deregister(actor_id);
+                let _ = dynamic.registry.terminate_and_deregister(actor_id);
                 Err(ControlError::ShutdownTimedOut(id).into())
             }
             Err(err) => Err(err.into()),
@@ -275,6 +277,27 @@ impl RuntimeHandle {
         self.supervisor.wait().await
     }
 
+    /// Resolves when every currently registered child reports running.
+    pub async fn wait_until_running(&self) -> Result<(), SupervisorError> {
+        let mut snapshots = self.supervisor.subscribe_snapshots();
+
+        loop {
+            let snapshot = snapshots.borrow().clone();
+            if all_children_running(&snapshot) {
+                return Ok(());
+            }
+            if snapshot.state == SupervisorStateView::Stopped {
+                return Err(SupervisorError::Internal(
+                    "supervisor stopped before all children were running".to_owned(),
+                ));
+            }
+
+            snapshots.changed().await.map_err(|_| {
+                SupervisorError::Internal("supervisor snapshot channel closed".to_owned())
+            })?;
+        }
+    }
+
     /// Returns a new receiver for supervisor lifecycle events.
     pub fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.supervisor.subscribe()
@@ -308,6 +331,21 @@ impl std::fmt::Debug for RuntimeHandle {
     }
 }
 
+/// Terminates the actor's binding when the supervisor drops the child spec —
+/// the point after which no further restart can happen (restart intensity
+/// exhausted, child removed, or supervisor exit). Without this, a Permanent
+/// or Transient actor whose last run failed leaves its binding `Unbound` and
+/// senders wait forever for a rebind.
+struct TerminateBindingOnDrop {
+    actor: RunnableActor,
+}
+
+impl Drop for TerminateBindingOnDrop {
+    fn drop(&mut self) {
+        self.actor.terminate_binding();
+    }
+}
+
 pub(crate) fn actor_child_spec(
     actor: RunnableActor,
     restart: Restart,
@@ -315,8 +353,10 @@ pub(crate) fn actor_child_spec(
     restart_intensity: Option<RestartIntensity>,
 ) -> ChildSpec {
     let actor_id = actor.id().to_owned();
+    actor.set_rebind_policy(rebind_policy_for_restart(restart));
+    let guard = Arc::new(TerminateBindingOnDrop { actor });
     let mut child = ChildSpec::new(actor_id, move |ctx| {
-        let actor = actor.clone();
+        let actor = guard.actor.clone();
         async move {
             actor
                 .run_until(ctx.token.cancelled())
@@ -332,4 +372,32 @@ pub(crate) fn actor_child_spec(
     }
 
     child
+}
+
+fn rebind_policy_for_restart(restart: Restart) -> RebindPolicy {
+    match restart {
+        Restart::Permanent => RebindPolicy::Always,
+        Restart::Transient => RebindPolicy::OnFailure,
+        Restart::Temporary => RebindPolicy::Never,
+    }
+}
+
+fn terminate_and_deregister_if_present(
+    registry: &ActorRegistry,
+    actor_id: &str,
+) -> Result<(), RegistryError> {
+    match registry.terminate_and_deregister(actor_id) {
+        Ok(()) => Ok(()),
+        Err(RegistryError::UnknownActorId(unknown)) if unknown == actor_id => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn all_children_running(snapshot: &SupervisorSnapshot) -> bool {
+    snapshot.children.iter().all(child_running)
+}
+
+fn child_running(child: &ChildSnapshot) -> bool {
+    child.state == ChildStateView::Running
+        && child.supervisor.as_deref().is_none_or(all_children_running)
 }

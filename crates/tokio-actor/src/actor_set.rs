@@ -16,7 +16,7 @@ use tracing::Instrument;
 
 use crate::{
     actor::{Actor, BoxError},
-    binding::BindingCore,
+    binding::{BindingCore, BindingLifecycle, RebindPolicy},
     builder::{
         DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY,
         DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR,
@@ -82,9 +82,11 @@ impl ActorSet {
                     message_type: actor.message_type,
                     message_type_name: actor.message_type_name,
                     binding: actor.binding.clone(),
+                    binding_lifecycle: actor.binding_lifecycle.clone(),
                     observability_slot: actor.observability.clone(),
                     runner: actor.runner.clone(),
                     registry: OnceLock::new(),
+                    rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
                     mailbox_capacity: graph.mailbox_capacity,
                     max_blocking_tasks_per_actor: graph.max_blocking_tasks_per_actor,
                     blocking_shutdown_timeout: graph.blocking_shutdown_timeout,
@@ -155,9 +157,11 @@ struct RunnableActorInner {
     message_type: TypeId,
     message_type_name: &'static str,
     binding: Arc<dyn Any + Send + Sync>,
+    binding_lifecycle: Arc<dyn BindingLifecycle>,
     observability_slot: Arc<OnceLock<crate::observability::GraphObservability>>,
     runner: Arc<dyn ErasedRunner>,
     registry: OnceLock<ActorRegistry>,
+    rebind_policy: std::sync::atomic::AtomicU8,
     mailbox_capacity: usize,
     max_blocking_tasks_per_actor: Option<usize>,
     blocking_shutdown_timeout: std::time::Duration,
@@ -201,12 +205,30 @@ impl RunnableActor {
             self.inner.message_type_name,
             self.inner.observability_slot.clone(),
             self.inner.binding.clone(),
+            self.inner.binding_lifecycle.clone(),
         )
     }
 
     /// Sets the runtime actor registry visible to this actor.
     pub fn set_registry(&self, registry: ActorRegistry) {
         let _ = self.inner.registry.set(registry);
+    }
+
+    /// Sets how this actor's binding behaves after a run exits.
+    pub fn set_rebind_policy(&self, policy: RebindPolicy) {
+        self.inner
+            .rebind_policy
+            .store(policy as u8, Ordering::Release);
+    }
+
+    /// Marks the actor's binding terminated and removes it from its registry.
+    ///
+    /// Call this when no further run will be started — for example when a
+    /// supervisor driving [`run_until`](Self::run_until) in a restart loop
+    /// gives up — so senders fail fast with `ActorTerminated` instead of
+    /// waiting for a rebind that will never come.
+    pub fn terminate_binding(&self) {
+        self.apply_run_disposition(RunDisposition::Terminate);
     }
 
     /// Runs this actor with a fresh mailbox until shutdown resolves.
@@ -216,6 +238,7 @@ impl RunnableActor {
     {
         let _active_run = ActiveActorRun::start(&self.inner)?;
         let actor_id = self.inner.actor_id.clone();
+        let rebind_policy = self.rebind_policy();
         let actor_shutdown = CancellationToken::new();
         let mut shutdown = std::pin::pin!(shutdown);
         let actor_span = self.inner.observability.actor_span(&actor_id);
@@ -230,6 +253,7 @@ impl RunnableActor {
                     blocking_shutdown_timeout: self.inner.blocking_shutdown_timeout,
                     registry,
                     observability: self.inner.observability.clone(),
+                    rebind_policy,
                 })
                 .instrument(actor_span),
         ));
@@ -253,11 +277,16 @@ impl RunnableActor {
 
         match result {
             Ok(Ok(())) => {
-                let status = if actor_shutdown.is_cancelled() {
+                let status = if shutdown_requested {
                     ActorExitStatus::Shutdown
                 } else {
                     ActorExitStatus::Stopped
                 };
+                self.apply_run_disposition(run_disposition(
+                    rebind_policy,
+                    shutdown_requested,
+                    status,
+                ));
                 self.inner
                     .observability
                     .emit_actor_exited(&actor_id, status, None);
@@ -268,6 +297,11 @@ impl RunnableActor {
                     actor_id: actor_id.to_string(),
                     source,
                 };
+                self.apply_run_disposition(run_disposition(
+                    rebind_policy,
+                    shutdown_requested,
+                    ActorExitStatus::Failed,
+                ));
                 self.inner.observability.emit_actor_exited(
                     &actor_id,
                     ActorExitStatus::Failed,
@@ -276,6 +310,11 @@ impl RunnableActor {
                 Err(error)
             }
             Err(err) if err.is_panic() => {
+                self.apply_run_disposition(run_disposition(
+                    rebind_policy,
+                    shutdown_requested,
+                    ActorExitStatus::Panicked,
+                ));
                 self.inner.observability.emit_actor_exited(
                     &actor_id,
                     ActorExitStatus::Panicked,
@@ -291,6 +330,11 @@ impl RunnableActor {
                     actor_id: actor_id.to_string(),
                     source,
                 };
+                self.apply_run_disposition(run_disposition(
+                    rebind_policy,
+                    shutdown_requested,
+                    ActorExitStatus::Cancelled,
+                ));
                 self.inner.observability.emit_actor_exited(
                     &actor_id,
                     ActorExitStatus::Cancelled,
@@ -299,6 +343,54 @@ impl RunnableActor {
                 Err(error)
             }
         }
+    }
+
+    fn rebind_policy(&self) -> RebindPolicy {
+        match self.inner.rebind_policy.load(Ordering::Acquire) {
+            value if value == RebindPolicy::Always as u8 => RebindPolicy::Always,
+            value if value == RebindPolicy::OnFailure as u8 => RebindPolicy::OnFailure,
+            _ => RebindPolicy::Never,
+        }
+    }
+
+    fn apply_run_disposition(&self, disposition: RunDisposition) {
+        match disposition {
+            RunDisposition::ExpectRebind => self.inner.binding_lifecycle.unbind(),
+            RunDisposition::Terminate => {
+                self.inner.binding_lifecycle.terminate();
+                if let Some(registry) = self.inner.registry.get() {
+                    let _ = registry.deregister(&self.inner.actor_id);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunDisposition {
+    ExpectRebind,
+    Terminate,
+}
+
+fn run_disposition(
+    policy: RebindPolicy,
+    shutdown_requested: bool,
+    status: ActorExitStatus,
+) -> RunDisposition {
+    if shutdown_requested || status == ActorExitStatus::Shutdown {
+        return RunDisposition::Terminate;
+    }
+
+    match (policy, status) {
+        (RebindPolicy::Always, ActorExitStatus::Stopped) => RunDisposition::ExpectRebind,
+        (RebindPolicy::Always | RebindPolicy::OnFailure, ActorExitStatus::Failed)
+        | (RebindPolicy::Always | RebindPolicy::OnFailure, ActorExitStatus::Panicked)
+        | (RebindPolicy::Always | RebindPolicy::OnFailure, ActorExitStatus::Cancelled) => {
+            RunDisposition::ExpectRebind
+        }
+        (RebindPolicy::Never, _)
+        | (RebindPolicy::OnFailure, ActorExitStatus::Stopped)
+        | (_, ActorExitStatus::Shutdown) => RunDisposition::Terminate,
     }
 }
 
@@ -327,15 +419,18 @@ impl RunnableActorFactory {
         let actor_id: Arc<str> = actor_id.into().into();
         let binding = Arc::new(BindingCore::<A::Msg>::new(actor_id.clone()));
         binding.set_observability(self.observability.clone());
+        let observability_slot = binding.observability_slot();
         RunnableActor {
             inner: Arc::new(RunnableActorInner {
                 actor_id,
                 message_type: TypeId::of::<A::Msg>(),
                 message_type_name: type_name::<A::Msg>(),
                 binding: binding.clone(),
-                observability_slot: binding.observability_slot(),
+                binding_lifecycle: binding.clone(),
+                observability_slot,
                 runner: Arc::new(TypedRunner { actor, binding }),
                 registry: OnceLock::new(),
+                rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
                 mailbox_capacity: self.mailbox_capacity,
                 max_blocking_tasks_per_actor: self.max_blocking_tasks_per_actor,
                 blocking_shutdown_timeout: self.blocking_shutdown_timeout,

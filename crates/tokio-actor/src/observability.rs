@@ -608,7 +608,6 @@ impl ActorExitStatus {
 pub(crate) enum MessageOperation {
     Send,
     TrySend,
-    BlockingSend,
 }
 
 impl MessageOperation {
@@ -616,7 +615,6 @@ impl MessageOperation {
         match self {
             Self::Send => "send",
             Self::TrySend => "try_send",
-            Self::BlockingSend => "blocking_send",
         }
     }
 }
@@ -626,6 +624,7 @@ pub(crate) enum SendRejection {
     MailboxFull,
     MailboxClosed,
     NotRunning,
+    ActorTerminated,
 }
 
 impl SendRejection {
@@ -634,6 +633,7 @@ impl SendRejection {
             Self::MailboxFull => "mailbox_full",
             Self::MailboxClosed => "mailbox_closed",
             Self::NotRunning => "not_running",
+            Self::ActorTerminated => "actor_terminated",
         }
     }
 }

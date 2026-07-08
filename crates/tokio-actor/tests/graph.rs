@@ -12,7 +12,7 @@ use std::{
 use tokio::{
     sync::{Notify, mpsc, oneshot},
     task::JoinHandle,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_actor::{
     Actor, ActorContext, ActorRef, ActorResult, BlockingOptions, BlockingTaskFailure, BuildError,
@@ -115,12 +115,11 @@ async fn typed_pipeline_end_to_end() {
 
     let mut builder = GraphBuilder::new();
     let worker = builder.declare::<Job>("worker");
-    let mut frontend = builder.actor("frontend", Frontend { worker });
+    let frontend = builder.actor("frontend", Frontend { worker });
     builder.actor("worker", Worker { seen: seen_tx });
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    frontend.wait_for_binding().await;
     frontend.send(Request("hello")).await.expect("send");
 
     assert_eq!(
@@ -152,24 +151,76 @@ async fn refs_survive_graph_rerun() {
     let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let mut echo = builder.actor("echo", Echo { seen: seen_tx });
+    let echo = builder.actor("echo", Echo { seen: seen_tx });
     let graph = builder.build().expect("valid graph");
 
-    let (stop, task) = start_graph(&graph);
-    echo.wait_for_binding().await;
+    let handle = graph.spawn().expect("graph spawned");
     echo.send(1).await.expect("send during first run");
     assert_eq!(recv(&mut seen_rx, "first message").await, 1);
-    stop_graph(stop, task).await;
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("graph stopped cleanly");
 
     assert!(matches!(
         echo.try_send(2),
-        Err(SendError::ActorNotRunning { .. })
+        Err(SendError::ActorTerminated { .. })
+    ));
+
+    let handle = graph.spawn().expect("graph spawned");
+    echo.send(3).await.expect("send across rerun");
+    assert_eq!(recv(&mut seen_rx, "second message").await, 3);
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("graph stopped cleanly");
+}
+
+#[tokio::test]
+async fn send_to_never_started_graph_waits_until_graph_runs() {
+    let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
+
+    let mut builder = GraphBuilder::new();
+    let echo = builder.actor("echo", Echo { seen: seen_tx });
+    let graph = builder.build().expect("valid graph");
+
+    let send_task = tokio::spawn({
+        let echo = echo.clone();
+        async move { echo.send(7).await }
+    });
+    sleep(Duration::from_millis(25)).await;
+    assert!(
+        !send_task.is_finished(),
+        "send should wait until the graph binds the actor mailbox"
+    );
+
+    let (stop, task) = start_graph(&graph);
+    assert_eq!(recv(&mut seen_rx, "message after graph start").await, 7);
+    send_task
+        .await
+        .expect("send task joined")
+        .expect("send completed after graph start");
+    stop_graph(stop, task).await;
+}
+
+#[tokio::test]
+async fn try_send_reports_unbound_and_terminated_states() {
+    let mut builder = GraphBuilder::new();
+    let worker = builder.actor("worker", Drain::<()>::new());
+    let graph = builder.build().expect("valid graph");
+
+    assert!(matches!(
+        worker.try_send(()),
+        Err(SendError::ActorNotRunning { actor_id }) if actor_id == "worker"
     ));
 
     let (stop, task) = start_graph(&graph);
-    echo.send_when_ready(3).await.expect("send across rerun");
-    assert_eq!(recv(&mut seen_rx, "second message").await, 3);
     stop_graph(stop, task).await;
+
+    assert!(matches!(
+        worker.try_send(()),
+        Err(SendError::ActorTerminated { actor_id }) if actor_id == "worker"
+    ));
 }
 
 enum CounterMsg {
@@ -198,11 +249,10 @@ impl Actor for Counter {
 #[tokio::test]
 async fn call_reply_roundtrip() {
     let mut builder = GraphBuilder::new();
-    let mut counter = builder.actor("counter", Counter);
+    let counter = builder.actor("counter", Counter);
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    counter.wait_for_binding().await;
     counter.send(CounterMsg::Add(1)).await.expect("send");
     counter.send(CounterMsg::Add(2)).await.expect("send");
 
@@ -240,11 +290,10 @@ impl MessageHandler for HandlerCounter {
 #[tokio::test]
 async fn handler_receives_messages_in_order_and_preserves_state() {
     let mut builder = GraphBuilder::new();
-    let mut counter = builder.actor("counter", HandlerCounter { total: 0 });
+    let counter = builder.actor("counter", HandlerCounter { total: 0 });
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    counter.wait_for_binding().await;
     counter
         .send(HandlerCounterMsg::Add(2))
         .await
@@ -265,11 +314,10 @@ async fn handler_receives_messages_in_order_and_preserves_state() {
 #[tokio::test]
 async fn handler_state_resets_on_graph_rerun_and_ref_rebinds() {
     let mut builder = GraphBuilder::new();
-    let mut counter = builder.actor("counter", HandlerCounter { total: 0 });
+    let counter = builder.actor("counter", HandlerCounter { total: 0 });
     let graph = builder.build().expect("valid graph");
 
-    let (stop, task) = start_graph(&graph);
-    counter.wait_for_binding().await;
+    let handle = graph.spawn().expect("graph spawned");
     counter
         .send(HandlerCounterMsg::Add(5))
         .await
@@ -281,11 +329,14 @@ async fn handler_state_resets_on_graph_rerun_and_ref_rebinds() {
             .expect("first total"),
         5
     );
-    stop_graph(stop, task).await;
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("graph stopped cleanly");
 
-    let (stop, task) = start_graph(&graph);
+    let handle = graph.spawn().expect("graph spawned");
     counter
-        .send_when_ready(HandlerCounterMsg::Add(1))
+        .send(HandlerCounterMsg::Add(1))
         .await
         .expect("send across rerun");
     assert_eq!(
@@ -295,7 +346,10 @@ async fn handler_state_resets_on_graph_rerun_and_ref_rebinds() {
             .expect("second total"),
         1
     );
-    stop_graph(stop, task).await;
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("graph stopped cleanly");
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,11 +393,10 @@ impl MessageHandler for LifecycleHandler {
 async fn handler_on_start_runs_before_first_message() {
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let mut actor = builder.actor("worker", LifecycleHandler { events: events_tx });
+    let actor = builder.actor("worker", LifecycleHandler { events: events_tx });
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    actor.wait_for_binding().await;
     assert_eq!(
         recv(&mut events_rx, "handler started").await,
         LifecycleEvent::Started
@@ -428,11 +481,10 @@ impl MessageHandler for FailingHandler {
 #[tokio::test]
 async fn handler_error_fails_the_graph() {
     let mut builder = GraphBuilder::new();
-    let mut actor = builder.actor("worker", FailingHandler);
+    let actor = builder.actor("worker", FailingHandler);
     let graph = builder.build().expect("valid graph");
 
     let (_stop, task) = start_graph(&graph);
-    actor.wait_for_binding().await;
     actor.send(()).await.expect("message sent");
 
     let result = timeout(Duration::from_secs(1), task)
@@ -519,7 +571,7 @@ async fn handler_discard_drops_queued_messages_and_call_reply() {
     let release = Arc::new(Notify::new());
 
     let mut builder = GraphBuilder::new();
-    let mut actor = builder.actor(
+    let actor = builder.actor(
         "worker",
         GateHandler {
             total: 0,
@@ -532,7 +584,6 @@ async fn handler_discard_drops_queued_messages_and_call_reply() {
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    actor.wait_for_binding().await;
     actor.send(GateMsg::Hold).await.expect("hold sent");
     recv(&mut started_rx, "handler entered hold").await;
 
@@ -568,7 +619,7 @@ async fn handler_drain_handles_queued_messages_and_replies_before_stop() {
     let release = Arc::new(Notify::new());
 
     let mut builder = GraphBuilder::new();
-    let mut actor = builder.actor(
+    let actor = builder.actor(
         "worker",
         GateHandler {
             total: 0,
@@ -581,7 +632,6 @@ async fn handler_drain_handles_queued_messages_and_replies_before_stop() {
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    actor.wait_for_binding().await;
     actor.send(GateMsg::Hold).await.expect("hold sent");
     recv(&mut started_rx, "handler entered hold").await;
 
@@ -678,7 +728,7 @@ async fn try_recv_drains_messages_after_shutdown_recv_returns_none() {
     let release = Arc::new(Notify::new());
 
     let mut builder = GraphBuilder::new();
-    let mut actor = builder.actor(
+    let actor = builder.actor(
         "worker",
         TryDrainActor {
             started: started_tx,
@@ -689,7 +739,6 @@ async fn try_recv_drains_messages_after_shutdown_recv_returns_none() {
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    actor.wait_for_binding().await;
     actor.send(TryDrainMsg::Start).await.expect("start sent");
     recv(&mut started_rx, "actor started").await;
     actor
@@ -758,7 +807,7 @@ async fn cyclic_wiring_via_declare() {
 
     let mut builder = GraphBuilder::new();
     let pong = builder.declare::<Ball>("pong");
-    let mut ping = builder.actor(
+    let ping = builder.actor(
         "ping",
         Paddle {
             other: pong,
@@ -775,7 +824,6 @@ async fn cyclic_wiring_via_declare() {
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
-    ping.wait_for_binding().await;
     ping.send(Ball { bounces_left: 5 }).await.expect("serve");
     recv(&mut done_rx, "rally finished").await;
     stop_graph(stop, task).await;
@@ -923,16 +971,18 @@ async fn early_clean_exit_fails_the_graph() {
 #[tokio::test]
 async fn graph_can_only_run_once_at_a_time() {
     let mut builder = GraphBuilder::new();
-    let mut worker = builder.actor("worker", Drain::<()>::new());
+    builder.actor("worker", Drain::<()>::new());
     let graph = builder.build().expect("valid graph");
 
-    let (stop, task) = start_graph(&graph);
-    worker.wait_for_binding().await;
+    let handle = graph.spawn().expect("graph spawned");
     assert!(matches!(
         graph.run_until(async {}).await,
         Err(GraphError::AlreadyRunning)
     ));
-    stop_graph(stop, task).await;
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("graph stopped cleanly");
 }
 
 #[tokio::test]
@@ -1075,11 +1125,14 @@ async fn awaited_blocking_task_failures_can_be_handled_locally() {
 }
 
 #[tokio::test]
-async fn dropped_graph_releases_waiting_refs() {
+async fn send_to_dropped_never_started_graph_returns_actor_terminated() {
     let mut builder = GraphBuilder::new();
-    let mut echo = builder.actor("echo", Drain::<u32>::new());
+    let echo = builder.actor("echo", Drain::<u32>::new());
     let graph = builder.build().expect("valid graph");
 
     drop(graph);
-    assert!(!echo.wait_for_binding().await);
+    assert!(matches!(
+        echo.send(1).await,
+        Err(SendError::ActorTerminated { actor_id }) if actor_id == "echo"
+    ));
 }

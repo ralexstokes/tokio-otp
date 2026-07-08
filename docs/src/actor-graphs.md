@@ -120,10 +120,8 @@ The builder validates:
 
 | Method | Behavior |
 |--------|----------|
-| `send` | Waits for mailbox capacity on the current binding. |
-| `try_send` | Returns immediately if the mailbox is full or unbound. |
-| `blocking_send` | Non-async try-send semantics for blocking threads. |
-| `send_when_ready` | Waits across restart windows and retries on the next binding. |
+| `send` | Waits for a bound mailbox, waits for capacity, and retries across expected restart windows. |
+| `try_send` | Returns immediately if the actor is unbound, terminated, full, or closed. |
 | `call` | Sends a message carrying `Reply<T>` and awaits the reply. |
 
 Refs are bound to long-lived mailbox bindings, not one actor incarnation. A
@@ -145,7 +143,7 @@ can use `ctx.try_recv()` to drain immediately queued messages.
 
 Restarts have the same loss boundary. Each actor run binds a fresh mailbox, so
 messages queued behind the message that makes an actor crash are lost with the
-old mailbox. `send_when_ready` retries while an actor is between bindings, but
+old mailbox. `send` retries while an actor is between bindings, but
 it cannot recover messages that were already accepted by the old run.
 
 ## Blocking Work
@@ -158,7 +156,7 @@ serialization.
 ```rust,ignore
 ctx.run_blocking(BlockingOptions::named("engrave"), |job| {
     job.checkpoint()?;
-    job.myself().blocking_send(MyMsg::Engraved)?;
+    job.myself().try_send(MyMsg::Engraved)?;
     Ok(())
 }).await?;
 ```

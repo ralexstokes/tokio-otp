@@ -23,8 +23,8 @@ impl MessageHandler for Frontend {
     type Msg = String;
 
     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
-        let mut worker = self.worker.clone();
-        worker.send_when_ready(message).await?;
+        let worker = self.worker.clone();
+        worker.send(message).await?;
         Ok(())
     }
 }
@@ -56,7 +56,7 @@ impl MessageHandler for Worker {
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
     let worker_ref = builder.declare::<String>("worker");
-    let mut frontend = builder.actor("frontend", Frontend { worker: worker_ref });
+    let frontend = builder.actor("frontend", Frontend { worker: worker_ref });
     builder.actor(
         "worker",
         Worker {
@@ -74,16 +74,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
     let handle = runtime.spawn();
 
-    let console = handle
+    let console = match handle
         .console()
         .bind(([127, 0, 0, 1], 0))
         .build()
         .spawn()
-        .await?;
+        .await
+    {
+        Ok(console) => {
+            println!("console available at http://{}", console.local_addr());
+            Some(console)
+        }
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            println!("console bind skipped: {error}");
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
 
-    println!("console available at http://{}", console.local_addr());
-
-    frontend.wait_for_binding().await;
     for message_index in 1..=MESSAGE_COUNT {
         let payload = if message_index % 5 == 0 {
             format!("fail-worker-{message_index}")
@@ -95,6 +103,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     handle.shutdown_and_wait().await?;
-    console.shutdown();
+    if let Some(console) = console {
+        console.shutdown();
+    }
     Ok(())
 }
