@@ -219,7 +219,7 @@ impl Graph {
     /// Decomposes this graph into independently runnable actors.
     pub fn into_actor_set(self) -> Result<ActorSet, GraphError> {
         self.inner.mark_decomposed()?;
-        ActorSet::from_graph(Arc::clone(&self.inner))
+        Ok(ActorSet::from_graph(Arc::clone(&self.inner)))
     }
 
     /// Runs the graph until the provided shutdown future resolves.

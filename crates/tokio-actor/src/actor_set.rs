@@ -18,7 +18,7 @@ use crate::{
     actor::{Actor, BoxError},
     binding::BindingCore,
     context::ActorRef,
-    error::{GraphError, LookupError},
+    error::LookupError,
     graph::{ErasedRunner, GraphInner, RunnerStart, TypedRunner},
     observability::ActorExitStatus,
     registry::{ActorRegistry, RegistryError},
@@ -67,7 +67,7 @@ pub struct RunnableActorFactory {
 }
 
 impl ActorSet {
-    pub(crate) fn from_graph(graph: Arc<GraphInner>) -> Result<Self, GraphError> {
+    pub(crate) fn from_graph(graph: Arc<GraphInner>) -> Self {
         let mut actors = Vec::with_capacity(graph.actors.len());
         let mut actor_index = HashMap::with_capacity(graph.actors.len());
 
@@ -91,13 +91,13 @@ impl ActorSet {
             actor_index.insert(actor.actor_id.clone(), index);
         }
 
-        Ok(Self {
+        Self {
             inner: Arc::new(ActorSetInner {
                 graph,
                 actors,
                 actor_index,
             }),
-        })
+        }
     }
 
     /// Returns an individually-runnable actor by id, if it exists.

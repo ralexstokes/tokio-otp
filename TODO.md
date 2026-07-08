@@ -66,8 +66,3 @@ common supervised-actor setup.
   utilities at application edges.
 - Optional message-size observability hooks for applications that can measure
   their typed messages meaningfully.
-
-## 5. Housekeeping
-
-- `ActorSet::from_graph` returns `Result` but is infallible; the lib.rs
-  quick start discards `wait_for_binding()`'s `bool`.
