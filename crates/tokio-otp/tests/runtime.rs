@@ -123,7 +123,7 @@ async fn runtime_spawn_combines_actor_refs_and_supervisor_control() {
 }
 
 #[tokio::test]
-async fn runtime_run_accepts_ref_cloned_before_startup() {
+async fn runtime_into_supervisor_run_accepts_ref_cloned_before_startup() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, worker_ref) = build_runtime(ObserveOnce {
         observed: observed_tx,
@@ -137,7 +137,11 @@ async fn runtime_run_accepts_ref_cloned_before_startup() {
     });
 
     assert_eq!(
-        runtime.run().await.expect("runtime exits cleanly"),
+        runtime
+            .into_supervisor()
+            .run()
+            .await
+            .expect("runtime exits cleanly"),
         SupervisorExit::Completed
     );
     sender.await.expect("sender task joined");
@@ -147,6 +151,40 @@ async fn runtime_run_accepts_ref_cloned_before_startup() {
         .expect("worker observed the message")
         .expect("worker is still running");
     assert_eq!(observed, "run-path");
+}
+
+#[tokio::test]
+async fn runtime_spawn_wait_drives_to_completion_with_control_surface() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, worker_ref) = build_runtime(ObserveOnce {
+        observed: observed_tx,
+    });
+
+    let handle = runtime.spawn();
+    let control = handle.clone();
+
+    control
+        .wait_until_running()
+        .await
+        .expect("runtime reported running");
+    let _events = control.subscribe();
+    assert_eq!(control.snapshot().children.len(), 1);
+
+    worker_ref
+        .send("spawn-wait-path".to_owned())
+        .await
+        .expect("message sent through cloned ref");
+
+    assert_eq!(
+        handle.wait().await.expect("runtime exits cleanly"),
+        SupervisorExit::Completed
+    );
+
+    let observed = timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect("worker observed the message")
+        .expect("worker is still running");
+    assert_eq!(observed, "spawn-wait-path");
 }
 
 #[tokio::test]
@@ -338,10 +376,10 @@ fn runtime_builder_requires_a_graph() {
 }
 
 #[tokio::test]
-async fn runtime_into_parts_round_trips_supervisor() {
+async fn runtime_into_supervisor_round_trips_supervisor() {
     let (runtime, _worker_ref) = build_runtime(Drain::<()>::new());
 
-    let supervisor = runtime.into_parts();
+    let supervisor = runtime.into_supervisor();
     let runtime = Runtime::new(supervisor);
     let handle = runtime.spawn();
 

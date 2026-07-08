@@ -52,15 +52,19 @@ Done by defining `tokio_otp::prelude` as the union of the sub-crate preludes
 minus `BuildError` and the duplicate `tokio_supervisor::BoxError`, enforced by
 `crates/tokio-otp/tests/prelude.rs`.
 
-## 4. Foreground `Runtime::run` loses the control surface
+## 4. ~~Foreground `Runtime::run` loses the control surface~~ — done
 
-`Runtime::run()` consumes the runtime with no handle — no shutdown, no
+~~`Runtime::run()` consumes the runtime with no handle — no shutdown, no
 events, and on a dynamic runtime the registry is silently discarded, so
 dynamic-actor support evaporates depending on how you start it. Similarly
 `Runtime::into_parts` returns only the `Supervisor`, dropping the registry,
 and the name implies more than one part. Either offer `runtime.handle()`
 before `run()` (like tokio's own `Runtime`), or document `spawn()` + `wait()`
-as the only full-featured path and rename `into_parts` to `into_supervisor`.
+as the only full-featured path and rename `into_parts` to `into_supervisor`.~~
+
+Done by deleting `Runtime::run` (`spawn()` + `wait()` is the foreground path
+and keeps the control surface) and renaming `into_parts` to `into_supervisor`
+with docs making the registry discard explicit.
 
 ## 5. `actor_shutdown_timeout` only applies in graph-run mode
 

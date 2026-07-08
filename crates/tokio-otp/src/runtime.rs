@@ -50,6 +50,12 @@ impl Default for DynamicActorOptions {
 
 /// Configured-but-not-yet-running runtime that owns a supervisor and its
 /// optional dynamic actor registry.
+///
+/// Start the runtime with [`spawn`](Self::spawn), which returns the
+/// [`RuntimeHandle`] control surface. To drive the runtime in the foreground
+/// while keeping that control surface, call `spawn()` and then
+/// [`RuntimeHandle::wait`]. Use [`into_supervisor`](Self::into_supervisor)
+/// as the explicit escape hatch to the raw [`Supervisor`].
 pub struct Runtime {
     supervisor: Supervisor,
     dynamic: Option<Arc<DynamicRuntimeState>>,
@@ -89,14 +95,22 @@ impl Runtime {
         }
     }
 
-    /// Returns the raw supervisor.
-    pub fn into_parts(self) -> Supervisor {
+    /// Returns the underlying [`Supervisor`], for example for handle-less
+    /// foreground driving via [`Supervisor::run`] or nesting via
+    /// [`Supervisor::into_child_spec`].
+    ///
+    /// On a runtime built with
+    /// [`RuntimeBuilder::dynamic`](crate::RuntimeBuilder::dynamic), this
+    /// discards the dynamic actor registry: [`RuntimeHandle::add_actor`] and
+    /// [`RuntimeHandle::actor_ref`] support is lost. Keep the full runtime and
+    /// use [`spawn`](Self::spawn) if you need dynamic actor support.
+    ///
+    /// This differs from `spawn().wait().await`: [`Supervisor::run`] drives the
+    /// tree on the current task, and dropping the future tears the tree down.
+    /// [`spawn`](Self::spawn) runs it as a background task that
+    /// [`RuntimeHandle::wait`] merely observes.
+    pub fn into_supervisor(self) -> Supervisor {
         self.supervisor
-    }
-
-    /// Drives the runtime on the current task until the supervisor exits.
-    pub async fn run(self) -> Result<SupervisorExit, SupervisorError> {
-        self.supervisor.run().await
     }
 
     /// Spawns the supervisor in the background and returns a combined handle.
