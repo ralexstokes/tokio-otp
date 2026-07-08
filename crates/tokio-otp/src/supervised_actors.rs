@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tokio_actor::{ActorRegistry, ActorSet, Graph, IngressHandle};
+use tokio_actor::{ActorRegistry, ActorSet, Graph};
 use tokio_supervisor::{
     ChildSpec, Restart, RestartIntensity, ShutdownPolicy, Supervisor, SupervisorBuilder,
 };
@@ -81,27 +81,20 @@ impl SupervisedActors {
         self
     }
 
-    /// Builds reusable child specs plus stable ingress handles.
-    pub fn build(self) -> Result<(Vec<ChildSpec>, HashMap<String, IngressHandle>), BuildError> {
+    /// Builds reusable child specs.
+    pub fn build(self) -> Result<Vec<ChildSpec>, BuildError> {
         self.validate_overrides()?;
-        let children = self.actor_children();
-        let ingresses = self.actor_set.ingresses();
-
-        Ok((children, ingresses))
+        Ok(self.actor_children())
     }
 
-    /// Adds the actor children to a supervisor builder and returns the built
-    /// supervisor plus stable ingress handles.
-    pub fn build_supervisor(
-        self,
-        builder: SupervisorBuilder,
-    ) -> Result<(Supervisor, HashMap<String, IngressHandle>), BuildError> {
-        let (children, ingresses) = self.build()?;
+    /// Adds the actor children to a supervisor builder and returns the built supervisor.
+    pub fn build_supervisor(self, builder: SupervisorBuilder) -> Result<Supervisor, BuildError> {
+        let children = self.build()?;
         let builder = children
             .into_iter()
             .fold(builder, |builder, child| builder.child(child));
         let supervisor = builder.build()?;
-        Ok((supervisor, ingresses))
+        Ok(supervisor)
     }
 
     /// Adds the actor children to a supervisor builder and packages the result
@@ -117,18 +110,12 @@ impl SupervisedActors {
 
         let actor_factory = self.actor_set.dynamic_factory();
         let children = self.actor_children();
-        let ingresses = self.actor_set.ingresses();
         let builder = children
             .into_iter()
             .fold(builder, |builder, child| builder.child(child));
         let supervisor = builder.build()?;
 
-        Ok(Runtime::with_dynamic(
-            supervisor,
-            ingresses,
-            registry,
-            actor_factory,
-        ))
+        Ok(Runtime::with_dynamic(supervisor, registry, actor_factory))
     }
 
     fn validate_overrides(&self) -> Result<(), BuildError> {

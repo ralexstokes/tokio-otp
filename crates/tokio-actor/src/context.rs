@@ -1,39 +1,68 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    binding::{MailboxError, MailboxRef, MailboxSendFailure},
+    binding::{BindingCore, MailboxRef},
     blocking::{
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions, BlockingSpawner,
-        SpawnBlockingError,
+        BlockingTaskError, SpawnBlockingError,
     },
-    envelope::Envelope,
-    error::SendError,
+    error::{CallError, SendError},
     observability::{GraphObservability, MessageOperation, SendRejection},
     registry::ActorRegistry,
 };
 
-/// Cloneable, restart-stable sender for an actor mailbox.
+/// Cloneable, restart-stable, typed sender for an actor mailbox.
 ///
-/// An `ActorRef` is bound to a long-lived mailbox binding rather than a single
-/// actor runtime instance. When the target actor is restarted (either as part
-/// of a graph rerun or via per-actor supervision), the handle transparently
-/// follows the new mailbox.
-#[derive(Clone, Debug)]
-pub struct ActorRef {
+/// An `ActorRef<M>` is bound to a long-lived mailbox binding rather than a
+/// single actor runtime instance. When the target actor is restarted (either
+/// as part of a graph rerun or via per-actor supervision), the handle
+/// transparently follows the new mailbox.
+pub struct ActorRef<M> {
     actor_id: Arc<str>,
-    binding: watch::Receiver<Option<MailboxRef>>,
-    observability: GraphObservability,
+    binding: watch::Receiver<Option<MailboxRef<M>>>,
+    observability: Arc<OnceLock<GraphObservability>>,
     source_actor_id: Option<Arc<str>>,
 }
 
-impl ActorRef {
-    pub(crate) fn from_binding(
+impl<M> Clone for ActorRef<M> {
+    fn clone(&self) -> Self {
+        Self {
+            actor_id: Arc::clone(&self.actor_id),
+            binding: self.binding.clone(),
+            observability: Arc::clone(&self.observability),
+            source_actor_id: self.source_actor_id.clone(),
+        }
+    }
+}
+
+impl<M> fmt::Debug for ActorRef<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActorRef")
+            .field("actor_id", &self.actor_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<M> ActorRef<M> {
+    pub(crate) fn from_core(core: &Arc<BindingCore<M>>, source_actor_id: Option<Arc<str>>) -> Self {
+        Self::from_parts(
+            core.actor_id().clone(),
+            core.subscribe(),
+            core.observability_slot(),
+            source_actor_id,
+        )
+    }
+
+    pub(crate) fn from_parts(
         actor_id: Arc<str>,
-        binding: watch::Receiver<Option<MailboxRef>>,
-        observability: GraphObservability,
+        binding: watch::Receiver<Option<MailboxRef<M>>>,
+        observability: Arc<OnceLock<GraphObservability>>,
         source_actor_id: Option<Arc<str>>,
     ) -> Self {
         Self {
@@ -44,7 +73,17 @@ impl ActorRef {
         }
     }
 
-    fn current_mailbox(&self) -> Result<MailboxRef, SendError> {
+    pub(crate) fn detached(actor_id: Arc<str>) -> Self {
+        let core = Arc::new(BindingCore::<M>::new(actor_id));
+        Self::from_core(&core, None)
+    }
+
+    /// Returns the target actor id.
+    pub fn id(&self) -> &str {
+        &self.actor_id
+    }
+
+    fn current_mailbox(&self) -> Result<MailboxRef<M>, SendError> {
         self.binding
             .borrow()
             .clone()
@@ -53,47 +92,48 @@ impl ActorRef {
             })
     }
 
-    async fn wait_for_next_binding(&mut self) -> bool {
-        self.binding.wait_for(|slot| slot.is_some()).await.is_ok()
-    }
-
-    async fn wait_for_binding_change_from(&mut self, mailbox: &MailboxRef) -> bool {
-        loop {
-            let unchanged = self
-                .binding
-                .borrow_and_update()
-                .as_ref()
-                .is_some_and(|current| current.same_channel(mailbox));
-            if !unchanged {
-                return true;
-            }
-            if self.binding.changed().await.is_err() {
-                return false;
-            }
-        }
-    }
-
-    /// Returns the target actor id.
-    pub fn id(&self) -> &str {
-        &self.actor_id
-    }
-
-    /// Sends an envelope to the target actor, waiting for mailbox capacity.
-    pub async fn send(&self, envelope: impl Into<Envelope>) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
-        let started_at = self.observability.start_message_timing();
+    /// Sends a message to the target actor, waiting for mailbox capacity.
+    pub async fn send(&self, message: M) -> Result<(), SendError> {
+        let started_at = self.start_message_timing();
         let result = match self.current_mailbox() {
-            Ok(mailbox) => mailbox
-                .send(envelope)
-                .await
-                .map_err(MailboxError::into_send_error),
+            Ok(mailbox) => mailbox.send(message).await,
             Err(error) => Err(error),
         };
         self.observe_send(
             MessageOperation::Send,
-            envelope_len,
-            GraphObservability::finish_message_timing(started_at),
+            Self::finish_message_timing(started_at),
+            &result,
+        );
+        result
+    }
+
+    /// Attempts to send a message without waiting for mailbox capacity.
+    pub fn try_send(&self, message: M) -> Result<(), SendError> {
+        let started_at = self.start_message_timing();
+        let result = match self.current_mailbox() {
+            Ok(mailbox) => mailbox.try_send(message),
+            Err(error) => Err(error),
+        };
+        self.observe_send(
+            MessageOperation::TrySend,
+            Self::finish_message_timing(started_at),
+            &result,
+        );
+        result
+    }
+
+    /// Sends a message from blocking code without requiring an async context.
+    ///
+    /// This uses try-send semantics and never blocks the current thread.
+    pub fn blocking_send(&self, message: M) -> Result<(), SendError> {
+        let started_at = self.start_message_timing();
+        let result = match self.current_mailbox() {
+            Ok(mailbox) => mailbox.blocking_send(message),
+            Err(error) => Err(error),
+        };
+        self.observe_send(
+            MessageOperation::BlockingSend,
+            Self::finish_message_timing(started_at),
             &result,
         );
         result
@@ -101,62 +141,34 @@ impl ActorRef {
 
     /// Retries a send across transient restart windows until the actor is
     /// rebound or the binding source is dropped.
-    pub async fn send_when_ready(
-        &mut self,
-        envelope: impl Into<Envelope>,
-    ) -> Result<(), SendError> {
-        let mut envelope = envelope.into();
+    pub async fn send_when_ready(&mut self, message: M) -> Result<(), SendError> {
+        let mut message = message;
 
         loop {
-            let envelope_len = envelope.as_slice().len();
-            let started_at = self.observability.start_message_timing();
-
+            let started_at = self.start_message_timing();
             match self.current_mailbox() {
-                Ok(mailbox) => match mailbox.send_retaining(envelope).await {
+                Ok(mailbox) => match mailbox.send_retaining(message).await {
                     Ok(()) => {
                         let result = Ok(());
                         self.observe_send(
                             MessageOperation::Send,
-                            envelope_len,
-                            GraphObservability::finish_message_timing(started_at),
+                            Self::finish_message_timing(started_at),
                             &result,
                         );
                         return result;
                     }
-                    Err(MailboxSendFailure::EnvelopeTooLarge {
-                        envelope_len,
-                        max_envelope_bytes,
-                        ..
-                    }) => {
-                        let error = SendError::EnvelopeTooLarge {
-                            actor_id: self.actor_id.to_string(),
-                            envelope_len,
-                            max_envelope_bytes,
-                        };
-                        let result = Err(error.clone());
-                        self.observe_send(
-                            MessageOperation::Send,
-                            envelope_len,
-                            GraphObservability::finish_message_timing(started_at),
-                            &result,
-                        );
-                        return Err(error);
-                    }
-                    Err(MailboxSendFailure::MailboxClosed {
-                        envelope: returned, ..
-                    }) => {
+                    Err(returned) => {
                         let error = SendError::MailboxClosed {
                             actor_id: self.actor_id.to_string(),
                         };
                         let result = Err(error.clone());
                         self.observe_send(
                             MessageOperation::Send,
-                            envelope_len,
-                            GraphObservability::finish_message_timing(started_at),
+                            Self::finish_message_timing(started_at),
                             &result,
                         );
-                        envelope = returned;
-                        if !self.wait_for_binding_change_from(&mailbox).await {
+                        message = returned;
+                        if !self.wait_for_rebind(&mailbox).await {
                             return Err(error);
                         }
                     }
@@ -165,8 +177,7 @@ impl ActorRef {
                     let result = Err(error.clone());
                     self.observe_send(
                         MessageOperation::Send,
-                        envelope_len,
-                        GraphObservability::finish_message_timing(started_at),
+                        Self::finish_message_timing(started_at),
                         &result,
                     );
                     if !self.wait_for_next_binding().await {
@@ -177,96 +188,121 @@ impl ActorRef {
         }
     }
 
-    /// Attempts to send an envelope without waiting for mailbox capacity.
-    pub fn try_send(&self, envelope: impl Into<Envelope>) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
-        let started_at = self.observability.start_message_timing();
-        let result = match self.current_mailbox() {
-            Ok(mailbox) => mailbox
-                .try_send(envelope)
-                .map_err(MailboxError::into_send_error),
-            Err(error) => Err(error),
-        };
-        self.observe_send(
-            MessageOperation::TrySend,
-            envelope_len,
-            GraphObservability::finish_message_timing(started_at),
-            &result,
-        );
-        result
-    }
-
-    /// Sends an envelope from blocking code without requiring an async context.
+    /// Sends a request and waits for the actor to answer through the
+    /// [`Reply`] carried inside the message.
     ///
-    /// This returns [`SendError::MailboxFull`] instead of blocking the thread
-    /// when the mailbox is at capacity. Blocking callers that want to retry
-    /// should do so explicitly and check for cancellation between attempts.
-    pub fn blocking_send(&self, envelope: impl Into<Envelope>) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
-        let started_at = self.observability.start_message_timing();
-        let result = match self.current_mailbox() {
-            Ok(mailbox) => mailbox
-                .blocking_send(envelope)
-                .map_err(MailboxError::into_send_error),
-            Err(error) => Err(error),
-        };
-        self.observe_send(
-            MessageOperation::BlockingSend,
-            envelope_len,
-            GraphObservability::finish_message_timing(started_at),
-            &result,
-        );
-        result
+    /// ```ignore
+    /// enum Msg { Get(Reply<u64>) }
+    /// let value = actor_ref.call(Msg::Get).await?;
+    /// ```
+    pub async fn call<T>(&self, message: impl FnOnce(Reply<T>) -> M) -> Result<T, CallError> {
+        let (sender, receiver) = oneshot::channel();
+        self.send(message(Reply { sender })).await?;
+        receiver.await.map_err(|_| CallError::ReplyDropped {
+            actor_id: self.actor_id.to_string(),
+        })
     }
 
     /// Waits until the actor is bound to a running mailbox.
     ///
-    /// Returns immediately if the actor is already running. Returns if the
-    /// binding source is dropped.
-    pub async fn wait_for_binding(&mut self) {
-        let _ = self.wait_for_next_binding().await;
+    /// Returns immediately with `true` if the actor is already running.
+    /// Returns `false` if the binding source has been dropped (the graph no
+    /// longer exists).
+    pub async fn wait_for_binding(&mut self) -> bool {
+        self.wait_for_next_binding().await
+    }
+
+    async fn wait_for_next_binding(&mut self) -> bool {
+        self.binding.wait_for(Option::is_some).await.is_ok()
+    }
+
+    /// Waits until the stale mailbox is unbound and a fresh one is bound.
+    ///
+    /// Waiting for the stale mailbox to clear first avoids busy-looping in
+    /// the window where an actor's mailbox is already closed but its binding
+    /// has not been cleared yet.
+    async fn wait_for_rebind(&mut self, stale: &MailboxRef<M>) -> bool {
+        if self
+            .binding
+            .wait_for(|slot| !matches!(slot, Some(current) if current.same_channel(stale)))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        self.wait_for_next_binding().await
+    }
+
+    fn start_message_timing(&self) -> Option<std::time::Instant> {
+        self.observability
+            .get()
+            .and_then(GraphObservability::start_message_timing)
+    }
+
+    fn finish_message_timing(started_at: Option<std::time::Instant>) -> std::time::Duration {
+        GraphObservability::finish_message_timing(started_at)
     }
 
     fn observe_send(
         &self,
         operation: MessageOperation,
-        envelope_len: usize,
         duration: std::time::Duration,
         result: &Result<(), SendError>,
     ) {
-        self.observability.emit_actor_message(
-            self.source_actor_id.as_deref(),
-            &self.actor_id,
-            operation,
-            envelope_len,
-            duration,
-            result.as_ref().err().map(send_rejection),
-        );
+        if let Some(observability) = self.observability.get() {
+            observability.emit_actor_message(
+                self.source_actor_id.as_deref(),
+                &self.actor_id,
+                operation,
+                duration,
+                result.as_ref().err().map(send_rejection),
+            );
+        }
+    }
+}
+
+/// One-shot reply channel carried inside a request message.
+///
+/// Created by [`ActorRef::call`]; the receiving actor answers with
+/// [`Reply::send`]. Dropping a `Reply` without sending makes the caller's
+/// `call` fail with [`CallError::ReplyDropped`].
+pub struct Reply<T> {
+    sender: oneshot::Sender<T>,
+}
+
+impl<T> Reply<T> {
+    /// Sends the reply to the caller.
+    ///
+    /// If the caller has gone away the value is dropped silently.
+    pub fn send(self, value: T) {
+        let _ = self.sender.send(value);
+    }
+}
+
+impl<T> fmt::Debug for Reply<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reply").finish_non_exhaustive()
     }
 }
 
 /// Runtime context passed to a graph actor each time the graph is run.
 ///
-/// Provides the actor's incoming [`mailbox`](Self::recv), stable
-/// [`peer`](Self::peer) references for linked actors, an optional
+/// Provides the actor's incoming [`mailbox`](Self::recv), an optional
 /// [`registry`](Self::registry) for runtime-discovered actors, a
 /// [`shutdown_token`](Self::shutdown_token) for cooperative shutdown, and
 /// [`spawn_blocking`](Self::spawn_blocking) /
 /// [`run_blocking`](Self::run_blocking) for tracked blocking work.
-pub struct ActorContext {
+pub struct ActorContext<M> {
     pub(crate) id: Arc<str>,
-    pub(crate) mailbox: mpsc::Receiver<Envelope>,
-    pub(crate) peers: HashMap<Arc<str>, ActorRef>,
+    pub(crate) mailbox: mpsc::Receiver<M>,
     pub(crate) registry: Option<ActorRegistry>,
-    pub(crate) myself: ActorRef,
+    pub(crate) myself: ActorRef<M>,
     pub(crate) shutdown: CancellationToken,
-    pub(crate) blocking: BlockingSpawner,
+    pub(crate) blocking: BlockingSpawner<M>,
     pub(crate) observability: GraphObservability,
 }
 
-impl ActorContext {
+impl<M: Send + 'static> ActorContext<M> {
     /// Returns the actor's unique identifier within the graph.
     pub fn id(&self) -> &str {
         &self.id
@@ -282,126 +318,30 @@ impl ActorContext {
         self.shutdown.is_cancelled()
     }
 
-    /// Waits for the next mailbox message, or `None` once shutdown has been
-    /// requested or the mailbox has been closed.
-    pub async fn recv(&mut self) -> Option<Envelope> {
-        let message = tokio::select! {
-            biased;
-            _ = self.shutdown.cancelled() => None,
-            message = self.mailbox.recv() => message,
-        };
-
-        if let Some(ref envelope) = message {
-            self.observability
-                .emit_message_received(&self.id, envelope.as_slice().len());
-        }
-
-        message
-    }
-
-    /// Returns a linked peer by id.
-    pub fn peer(&self, actor_id: &str) -> Option<ActorRef> {
-        self.peers.get(actor_id).cloned()
-    }
-
     /// Returns the optional runtime actor registry.
     pub fn registry(&self) -> Option<&ActorRegistry> {
         self.registry.as_ref()
     }
 
     /// Returns a sender targeting this actor's own mailbox.
-    pub fn myself(&self) -> ActorRef {
+    pub fn myself(&self) -> ActorRef<M> {
         self.myself.clone()
     }
 
-    /// Sends an envelope to a linked peer.
-    pub async fn send(
-        &self,
-        actor_id: &str,
-        envelope: impl Into<Envelope>,
-    ) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
+    /// Waits for the next mailbox message, or `None` once shutdown has been
+    /// requested or the mailbox has been closed.
+    pub async fn recv(&mut self) -> Option<M> {
+        let message = tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => None,
+            message = self.mailbox.recv() => message,
+        };
 
-        match self.peers.get(actor_id) {
-            Some(peer) => peer.send(envelope).await,
-            None => Err(self.unknown_target(actor_id, MessageOperation::Send, envelope_len)),
-        }
-    }
-
-    /// Sends an envelope to a linked peer, retrying across restart windows.
-    ///
-    /// If this actor begins shutting down before the peer becomes ready, the
-    /// send is abandoned and this returns `Ok(())` so the actor can exit
-    /// promptly.
-    pub async fn send_when_ready(
-        &self,
-        actor_id: &str,
-        envelope: impl Into<Envelope>,
-    ) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
-
-        match self.peers.get(actor_id) {
-            Some(peer) => {
-                let mut peer = peer.clone();
-                tokio::select! {
-                    _ = self.shutdown.cancelled() => Ok(()),
-                    result = peer.send_when_ready(envelope) => result,
-                }
-            }
-            None => Err(self.unknown_target(actor_id, MessageOperation::Send, envelope_len)),
-        }
-    }
-
-    /// Attempts to send an envelope to a linked peer without waiting.
-    pub fn try_send(&self, actor_id: &str, envelope: impl Into<Envelope>) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
-
-        match self.peers.get(actor_id) {
-            Some(peer) => peer.try_send(envelope),
-            None => Err(self.unknown_target(actor_id, MessageOperation::TrySend, envelope_len)),
-        }
-    }
-
-    /// Sends an envelope to a statically linked peer or registry-discovered
-    /// actor.
-    pub async fn send_dynamic(
-        &self,
-        actor_id: &str,
-        envelope: impl Into<Envelope>,
-    ) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
-
-        if let Some(peer) = self.resolve_dynamic_peer(actor_id) {
-            return peer.send(envelope).await;
+        if message.is_some() {
+            self.observability.emit_message_received(&self.id);
         }
 
-        Err(self.unknown_target(actor_id, MessageOperation::Send, envelope_len))
-    }
-
-    /// Sends an envelope to a statically linked peer or registry-discovered
-    /// actor, retrying across restart windows.
-    pub async fn send_dynamic_when_ready(
-        &self,
-        actor_id: &str,
-        envelope: impl Into<Envelope>,
-    ) -> Result<(), SendError> {
-        let envelope = envelope.into();
-        let envelope_len = envelope.as_slice().len();
-
-        match self.resolve_dynamic_peer(actor_id) {
-            Some(peer) => {
-                let mut peer = peer;
-                tokio::select! {
-                    _ = self.shutdown.cancelled() => Ok(()),
-                    result = peer.send_when_ready(envelope) => result,
-                }
-            }
-            None => Err(self.unknown_target(actor_id, MessageOperation::Send, envelope_len)),
-        }
+        message
     }
 
     /// Spawns tracked blocking work owned by this actor.
@@ -418,7 +358,7 @@ impl ActorContext {
         f: F,
     ) -> Result<BlockingHandle, SpawnBlockingError>
     where
-        F: FnOnce(BlockingContext) -> Result<(), BlockingOperationError> + Send + 'static,
+        F: FnOnce(BlockingContext<M>) -> Result<(), BlockingOperationError> + Send + 'static,
     {
         self.blocking.spawn_blocking(options, f)
     }
@@ -433,51 +373,18 @@ impl ActorContext {
         &self,
         options: BlockingOptions,
         f: F,
-    ) -> Result<(), crate::blocking::BlockingTaskError>
+    ) -> Result<(), BlockingTaskError>
     where
-        F: FnOnce(BlockingContext) -> Result<(), BlockingOperationError> + Send + 'static,
+        F: FnOnce(BlockingContext<M>) -> Result<(), BlockingOperationError> + Send + 'static,
     {
         let handle = self.spawn_blocking(options, f)?;
         handle.wait().await
-    }
-
-    fn resolve_dynamic_peer(&self, actor_id: &str) -> Option<ActorRef> {
-        self.peers.get(actor_id).cloned().or_else(|| {
-            self.registry
-                .as_ref()
-                .and_then(|registry| registry.actor_ref_for_source(actor_id, Some(&self.id)))
-        })
-    }
-
-    fn unknown_target(
-        &self,
-        actor_id: &str,
-        operation: MessageOperation,
-        envelope_len: usize,
-    ) -> SendError {
-        let peer_id: Arc<str> = actor_id.into();
-        let started_at = self.observability.start_message_timing();
-        self.observability.emit_actor_message(
-            Some(self.id()),
-            &peer_id,
-            operation,
-            envelope_len,
-            GraphObservability::finish_message_timing(started_at),
-            Some(SendRejection::UnknownPeer),
-        );
-
-        SendError::UnknownPeer {
-            actor_id: self.id.to_string(),
-            peer_id: peer_id.to_string(),
-        }
     }
 }
 
 fn send_rejection(error: &SendError) -> SendRejection {
     match error {
-        SendError::UnknownPeer { .. } => SendRejection::UnknownPeer,
         SendError::ActorNotRunning { .. } => SendRejection::NotRunning,
-        SendError::EnvelopeTooLarge { .. } => SendRejection::EnvelopeTooLarge,
         SendError::MailboxFull { .. } => SendRejection::MailboxFull,
         SendError::MailboxClosed { .. } => SendRejection::MailboxClosed,
     }

@@ -1,8 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use tokio::sync::{broadcast, watch};
 use tokio_actor::{
-    ActorRef, ActorRegistry, ActorSpec, IngressHandle, RunnableActor, RunnableActorFactory,
+    Actor, ActorRef, ActorRegistry, LookupError, RunnableActor, RunnableActorFactory,
 };
 use tokio_supervisor::{
     ChildSpec, ControlError, Restart, RestartIntensity, ShutdownPolicy, Supervisor,
@@ -18,19 +18,10 @@ struct DynamicRuntimeState {
 }
 
 impl DynamicRuntimeState {
-    fn build_actor(
-        &self,
-        spec: ActorSpec,
-        options: &DynamicActorOptions,
-    ) -> Result<RunnableActor, DynamicActorError> {
-        let actor = if options.peer_ids.is_empty() {
-            self.actor_factory.actor(spec)
-        } else {
-            self.actor_factory
-                .actor_with_peer_ids(spec, &self.registry, &options.peer_ids)?
-        };
+    fn build_actor<A: Actor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
+        let actor = self.actor_factory.actor(actor_id, actor);
         actor.set_registry(self.registry.clone());
-        Ok(actor)
+        actor
     }
 }
 
@@ -43,9 +34,6 @@ pub struct DynamicActorOptions {
     pub shutdown: ShutdownPolicy,
     /// Optional restart intensity override for this actor child.
     pub restart_intensity: Option<RestartIntensity>,
-    /// Initial peer ids that should be available through `ctx.peer()` /
-    /// `ctx.send()` inside the dynamic actor.
-    pub peer_ids: Vec<String>,
 }
 
 impl Default for DynamicActorOptions {
@@ -54,38 +42,33 @@ impl Default for DynamicActorOptions {
             restart: Restart::Transient,
             shutdown: ShutdownPolicy::default(),
             restart_intensity: None,
-            peer_ids: Vec::new(),
         }
     }
 }
 
 /// Configured-but-not-yet-running runtime that owns a supervisor and its
-/// stable ingress handles.
+/// optional dynamic actor registry.
 pub struct Runtime {
     supervisor: Supervisor,
-    ingresses: HashMap<String, IngressHandle>,
     dynamic: Option<Arc<DynamicRuntimeState>>,
 }
 
 impl Runtime {
-    /// Creates a runtime from a supervisor and its ingress handles.
-    pub fn new(supervisor: Supervisor, ingresses: HashMap<String, IngressHandle>) -> Self {
+    /// Creates a runtime from a supervisor.
+    pub fn new(supervisor: Supervisor) -> Self {
         Self {
             supervisor,
-            ingresses,
             dynamic: None,
         }
     }
 
     pub(crate) fn with_dynamic(
         supervisor: Supervisor,
-        ingresses: HashMap<String, IngressHandle>,
         registry: ActorRegistry,
         actor_factory: RunnableActorFactory,
     ) -> Self {
         Self {
             supervisor,
-            ingresses,
             dynamic: Some(Arc::new(DynamicRuntimeState {
                 registry,
                 actor_factory,
@@ -93,19 +76,9 @@ impl Runtime {
         }
     }
 
-    /// Returns a clone of one ingress handle, if it exists.
-    pub fn ingress(&self, name: &str) -> Option<IngressHandle> {
-        self.ingresses.get(name).cloned()
-    }
-
-    /// Returns clones of every ingress handle.
-    pub fn ingresses(&self) -> HashMap<String, IngressHandle> {
-        self.ingresses.clone()
-    }
-
-    /// Returns the raw supervisor and ingress handles.
-    pub fn into_parts(self) -> (Supervisor, HashMap<String, IngressHandle>) {
-        (self.supervisor, self.ingresses)
+    /// Returns the raw supervisor.
+    pub fn into_parts(self) -> Supervisor {
+        self.supervisor
     }
 
     /// Drives the runtime on the current task until the supervisor exits.
@@ -115,15 +88,13 @@ impl Runtime {
 
     /// Spawns the supervisor in the background and returns a combined handle.
     pub fn spawn(self) -> RuntimeHandle {
-        RuntimeHandle::new(self.supervisor.spawn(), self.ingresses, self.dynamic)
+        RuntimeHandle::new(self.supervisor.spawn(), self.dynamic)
     }
 }
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Runtime")
-            .field("ingresses", &self.ingresses.keys().collect::<Vec<_>>())
-            .finish_non_exhaustive()
+        f.debug_struct("Runtime").finish_non_exhaustive()
     }
 }
 
@@ -131,31 +102,15 @@ impl std::fmt::Debug for Runtime {
 #[derive(Clone)]
 pub struct RuntimeHandle {
     supervisor: SupervisorHandle,
-    ingresses: Arc<HashMap<String, IngressHandle>>,
     dynamic: Option<Arc<DynamicRuntimeState>>,
 }
 
 impl RuntimeHandle {
-    fn new(
-        supervisor: SupervisorHandle,
-        ingresses: HashMap<String, IngressHandle>,
-        dynamic: Option<Arc<DynamicRuntimeState>>,
-    ) -> Self {
+    fn new(supervisor: SupervisorHandle, dynamic: Option<Arc<DynamicRuntimeState>>) -> Self {
         Self {
             supervisor,
-            ingresses: Arc::new(ingresses),
             dynamic,
         }
-    }
-
-    /// Returns a clone of one ingress handle, if it exists.
-    pub fn ingress(&self, name: &str) -> Option<IngressHandle> {
-        self.ingresses.get(name).cloned()
-    }
-
-    /// Returns clones of every ingress handle.
-    pub fn ingresses(&self) -> HashMap<String, IngressHandle> {
-        self.ingresses.as_ref().clone()
     }
 
     /// Returns a clone of the underlying supervisor handle.
@@ -164,10 +119,13 @@ impl RuntimeHandle {
     }
 
     /// Returns a stable actor reference for a registered actor id.
-    pub fn actor_ref(&self, actor_id: &str) -> Option<ActorRef> {
-        self.dynamic
-            .as_ref()
-            .and_then(|dynamic| dynamic.registry.actor_ref(actor_id))
+    pub fn actor_ref<M: Send + 'static>(&self, actor_id: &str) -> Result<ActorRef<M>, LookupError> {
+        let Some(dynamic) = &self.dynamic else {
+            return Err(LookupError::UnknownActor {
+                actor_id: actor_id.to_owned(),
+            });
+        };
+        dynamic.registry.actor_ref(actor_id)
     }
 
     /// Requests a graceful shutdown of the supervisor.
@@ -186,17 +144,18 @@ impl RuntimeHandle {
     }
 
     /// Adds a runtime actor to a supervised actor runtime.
-    pub async fn add_actor(
+    pub async fn add_actor<A: Actor>(
         &self,
-        spec: ActorSpec,
+        actor_id: impl Into<String>,
+        actor: A,
         options: DynamicActorOptions,
-    ) -> Result<ActorRef, DynamicActorError> {
+    ) -> Result<ActorRef<A::Msg>, DynamicActorError> {
         let dynamic = self
             .dynamic
             .as_ref()
             .ok_or(DynamicActorError::Unsupported)?;
-        let actor = dynamic.build_actor(spec, &options)?;
-        let actor_ref = actor.actor_ref();
+        let actor = dynamic.build_actor(actor_id, actor);
+        let actor_ref = actor.actor_ref::<A::Msg>()?;
 
         actor.register_with(&dynamic.registry)?;
 
@@ -334,9 +293,7 @@ impl RuntimeHandle {
 
 impl std::fmt::Debug for RuntimeHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuntimeHandle")
-            .field("ingresses", &self.ingresses.keys().collect::<Vec<_>>())
-            .finish_non_exhaustive()
+        f.debug_struct("RuntimeHandle").finish_non_exhaustive()
     }
 }
 

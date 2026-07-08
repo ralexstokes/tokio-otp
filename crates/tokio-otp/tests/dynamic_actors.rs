@@ -1,7 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{future::pending, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{ActorContext, ActorSpec, Envelope, SendError};
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, LookupError, SendError};
 use tokio_otp::{DynamicActorError, DynamicActorOptions, Runtime, SupervisedActors};
 use tokio_supervisor::{
     ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder, SupervisorExit,
@@ -14,49 +14,90 @@ fn build_runtime(graph: tokio_actor::Graph) -> Runtime {
         .expect("runtime builds")
 }
 
+struct Drain<M>(PhantomData<fn(M)>);
+
+impl<M> Drain<M> {
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> Clone for Drain<M> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: Send + 'static> Actor for Drain<M> {
+    type Msg = M;
+
+    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ForwardToDynamic;
+
+impl Actor for ForwardToDynamic {
+    type Msg = String;
+
+    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            let mut dynamic = ctx
+                .registry()
+                .expect("registry installed")
+                .actor_ref::<String>("dynamic")?;
+            dynamic.send_when_ready(message).await?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct Observe {
+    observed: mpsc::UnboundedSender<String>,
+}
+
+impl Actor for Observe {
+    type Msg = String;
+
+    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("receiver alive");
+        }
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn static_actor_can_send_to_runtime_added_actor() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let graph = tokio_actor::GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "frontend",
-            |mut ctx: ActorContext| async move {
-                while let Some(envelope) = ctx.recv().await {
-                    ctx.send_dynamic_when_ready("dynamic", envelope).await?;
-                }
-                Ok(())
-            },
-        ))
-        .ingress("requests", "frontend")
-        .build()
-        .expect("valid graph");
+    let mut builder = GraphBuilder::new();
+    let mut frontend = builder.actor("frontend", ForwardToDynamic);
+    let graph = builder.build().expect("valid graph");
 
     let runtime = build_runtime(graph);
     let handle = runtime.spawn();
-    let mut ingress = handle.ingress("requests").expect("ingress exists");
 
-    assert!(handle.actor_ref("frontend").is_some());
+    assert!(handle.actor_ref::<String>("frontend").is_ok());
 
     let mut dynamic_ref = handle
         .add_actor(
-            ActorSpec::from_actor("dynamic", move |mut ctx: ActorContext| {
-                let observed_tx = observed_tx.clone();
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        observed_tx.send(envelope).expect("receiver alive");
-                    }
-                    Ok(())
-                }
-            }),
+            "dynamic",
+            Observe {
+                observed: observed_tx,
+            },
             DynamicActorOptions::default(),
         )
         .await
         .expect("dynamic actor added");
 
     dynamic_ref.wait_for_binding().await;
-    ingress.wait_for_binding().await;
-    ingress
-        .send(Envelope::from_static(b"hello-dynamic"))
+    frontend.wait_for_binding().await;
+    frontend
+        .send("hello-dynamic".to_owned())
         .await
         .expect("message sent");
 
@@ -64,9 +105,9 @@ async fn static_actor_can_send_to_runtime_added_actor() {
         .await
         .expect("dynamic actor observed the message")
         .expect("dynamic actor is still running");
-    assert_eq!(observed.as_slice(), b"hello-dynamic");
+    assert_eq!(observed, "hello-dynamic");
 
-    assert!(handle.actor_ref("dynamic").is_some());
+    assert!(handle.actor_ref::<String>("dynamic").is_ok());
     assert_eq!(
         handle
             .shutdown_and_wait()
@@ -76,47 +117,47 @@ async fn static_actor_can_send_to_runtime_added_actor() {
     );
 }
 
+#[derive(Clone)]
+struct ForwardToSink;
+
+impl Actor for ForwardToSink {
+    type Msg = String;
+
+    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            let sink = ctx
+                .registry()
+                .expect("registry installed")
+                .actor_ref::<String>("sink")?;
+            sink.send(message).await?;
+        }
+        Ok(())
+    }
+}
+
 #[tokio::test]
-async fn runtime_added_actor_can_use_configured_peer_ids() {
+async fn runtime_added_actor_can_use_registry_to_reach_static_actor() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let graph = tokio_actor::GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "sink",
-            move |mut ctx: ActorContext| {
-                let observed_tx = observed_tx.clone();
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        observed_tx.send(envelope).expect("receiver alive");
-                    }
-                    Ok(())
-                }
-            },
-        ))
-        .build()
-        .expect("valid graph");
+    let mut builder = GraphBuilder::new();
+    builder.actor(
+        "sink",
+        Observe {
+            observed: observed_tx,
+        },
+    );
+    let graph = builder.build().expect("valid graph");
 
     let runtime = build_runtime(graph);
     let handle = runtime.spawn();
 
     let mut dynamic_ref = handle
-        .add_actor(
-            ActorSpec::from_actor("dynamic", |mut ctx: ActorContext| async move {
-                while let Some(envelope) = ctx.recv().await {
-                    ctx.send("sink", envelope).await?;
-                }
-                Ok(())
-            }),
-            DynamicActorOptions {
-                peer_ids: vec!["sink".to_owned()],
-                ..DynamicActorOptions::default()
-            },
-        )
+        .add_actor("dynamic", ForwardToSink, DynamicActorOptions::default())
         .await
         .expect("dynamic actor added");
 
     dynamic_ref.wait_for_binding().await;
     dynamic_ref
-        .send(Envelope::from_static(b"forwarded"))
+        .send("forwarded".to_owned())
         .await
         .expect("message sent to dynamic actor");
 
@@ -124,7 +165,7 @@ async fn runtime_added_actor_can_use_configured_peer_ids() {
         .await
         .expect("sink observed the forwarded message")
         .expect("sink is still running");
-    assert_eq!(observed.as_slice(), b"forwarded");
+    assert_eq!(observed, "forwarded");
 
     handle
         .shutdown_and_wait()
@@ -134,26 +175,17 @@ async fn runtime_added_actor_can_use_configured_peer_ids() {
 
 #[tokio::test]
 async fn remove_actor_deregisters_runtime_added_actor() {
-    let graph = tokio_actor::GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "seed",
-            |ctx: ActorContext| async move {
-                ctx.shutdown_token().cancelled().await;
-                Ok(())
-            },
-        ))
-        .build()
-        .expect("valid graph");
+    let mut builder = GraphBuilder::new();
+    builder.actor("seed", Drain::<()>::new());
+    let graph = builder.build().expect("valid graph");
 
     let runtime = build_runtime(graph);
     let handle = runtime.spawn();
 
     let mut dynamic_ref = handle
         .add_actor(
-            ActorSpec::from_actor("dynamic", |ctx: ActorContext| async move {
-                ctx.shutdown_token().cancelled().await;
-                Ok(())
-            }),
+            "dynamic",
+            Drain::<()>::new(),
             DynamicActorOptions::default(),
         )
         .await
@@ -165,9 +197,12 @@ async fn remove_actor_deregisters_runtime_added_actor() {
         .await
         .expect("dynamic actor removed");
 
-    assert!(handle.actor_ref("dynamic").is_none());
     assert!(matches!(
-        dynamic_ref.send(Envelope::from_static(b"gone")).await,
+        handle.actor_ref::<()>("dynamic"),
+        Err(LookupError::UnknownActor { .. })
+    ));
+    assert!(matches!(
+        dynamic_ref.send(()).await,
         Err(SendError::ActorNotRunning { actor_id }) if actor_id == "dynamic"
     ));
 
@@ -177,28 +212,31 @@ async fn remove_actor_deregisters_runtime_added_actor() {
         .expect("runtime shut down cleanly");
 }
 
+#[derive(Clone)]
+struct PendingActor;
+
+impl Actor for PendingActor {
+    type Msg = ();
+
+    async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+        pending::<()>().await;
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn timed_out_remove_actor_deregisters_runtime_added_actor() {
-    let graph = tokio_actor::GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "seed",
-            |ctx: ActorContext| async move {
-                ctx.shutdown_token().cancelled().await;
-                Ok(())
-            },
-        ))
-        .build()
-        .expect("valid graph");
+    let mut builder = GraphBuilder::new();
+    builder.actor("seed", Drain::<()>::new());
+    let graph = builder.build().expect("valid graph");
 
     let runtime = build_runtime(graph);
     let handle = runtime.spawn();
 
     let mut dynamic_ref = handle
         .add_actor(
-            ActorSpec::from_actor("dynamic", |_ctx: ActorContext| async move {
-                std::future::pending::<()>().await;
-                Ok(())
-            }),
+            "dynamic",
+            PendingActor,
             DynamicActorOptions {
                 shutdown: ShutdownPolicy::cooperative(Duration::from_millis(20)),
                 ..DynamicActorOptions::default()
@@ -219,15 +257,16 @@ async fn timed_out_remove_actor_deregisters_runtime_added_actor() {
             if actor_id == "dynamic"
     ));
 
-    assert!(handle.actor_ref("dynamic").is_none());
+    assert!(matches!(
+        handle.actor_ref::<()>("dynamic"),
+        Err(LookupError::UnknownActor { .. })
+    ));
     assert!(
         handle
             .add_actor(
-                ActorSpec::from_actor("dynamic", |ctx: ActorContext| async move {
-                    ctx.shutdown_token().cancelled().await;
-                    Ok(())
-                }),
-                DynamicActorOptions::default(),
+                "dynamic",
+                Drain::<()>::new(),
+                DynamicActorOptions::default()
             )
             .await
             .is_ok(),
@@ -250,15 +289,13 @@ async fn manual_runtime_reports_dynamic_support_as_unavailable() {
         .build()
         .expect("valid supervisor");
 
-    let runtime = Runtime::new(supervisor, HashMap::new());
+    let runtime = Runtime::new(supervisor);
     let handle = runtime.spawn();
 
     let err = handle
         .add_actor(
-            ActorSpec::from_actor("dynamic", |ctx: ActorContext| async move {
-                ctx.shutdown_token().cancelled().await;
-                Ok(())
-            }),
+            "dynamic",
+            Drain::<()>::new(),
             DynamicActorOptions::default(),
         )
         .await

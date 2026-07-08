@@ -1,5 +1,5 @@
 use thiserror::Error;
-use tokio_actor::{GraphError, RegistryError};
+use tokio_actor::{GraphError, LookupError, RegistryError};
 use tokio_supervisor::ControlError;
 
 /// Errors returned while adapting actor graphs into supervisor children.
@@ -28,6 +28,9 @@ pub enum DynamicActorError {
     /// A runtime actor registry operation failed.
     #[error(transparent)]
     Registry(#[from] RegistryError),
+    /// A typed actor lookup failed.
+    #[error(transparent)]
+    Lookup(#[from] LookupError),
     /// The underlying supervisor rejected the control request.
     #[error(transparent)]
     Control(#[from] ControlError),

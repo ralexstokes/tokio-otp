@@ -1,38 +1,38 @@
-use std::{error::Error, thread, time::Duration};
+use std::error::Error;
 
-use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{
-    Actor, ActorContext, ActorResult, ActorSpec, BlockingOptions, Envelope, GraphBuilder,
-};
+use tokio::sync::mpsc;
+use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
 use tokio_util::sync::CancellationToken;
 
+enum WorkMsg {
+    Process(String),
+    Finished(String),
+}
+
 #[derive(Clone)]
-struct Dispatcher;
+struct Worker {
+    observed: mpsc::UnboundedSender<String>,
+}
 
-impl Actor for Dispatcher {
-    async fn run(&self, mut ctx: ActorContext) -> ActorResult {
-        let sink = ctx.peer("sink").expect("linked sink exists");
+impl Actor for Worker {
+    type Msg = WorkMsg;
 
-        while let Some(envelope) = ctx.recv().await {
-            let sink = sink.clone();
-            let _background =
-                ctx.spawn_blocking(BlockingOptions::named("uppercase"), move |job| {
-                    // emulate heavy work...
-                    for _ in 0..5 {
-                        job.checkpoint()?;
-                        thread::sleep(Duration::from_millis(20));
-                    }
-
-                    let uppercased: Vec<u8> = envelope
-                        .as_slice()
-                        .iter()
-                        .map(|byte| byte.to_ascii_uppercase())
-                        .collect();
-                    sink.blocking_send(uppercased)?;
-                    Ok(())
-                })?;
+    async fn run(&self, mut ctx: ActorContext<WorkMsg>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            match message {
+                WorkMsg::Process(input) => {
+                    ctx.run_blocking(BlockingOptions::named("uppercase"), move |job| {
+                        let output = input.to_uppercase();
+                        job.myself().blocking_send(WorkMsg::Finished(output))?;
+                        Ok(())
+                    })
+                    .await?;
+                }
+                WorkMsg::Finished(output) => {
+                    self.observed.send(output).expect("receiver alive");
+                }
+            }
         }
-
         Ok(())
     }
 }
@@ -40,26 +40,15 @@ impl Actor for Dispatcher {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let mut builder = GraphBuilder::new();
+    let mut worker = builder.actor(
+        "worker",
+        Worker {
+            observed: observed_tx,
+        },
+    );
+    let graph = builder.build()?;
 
-    let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor("dispatcher", Dispatcher))
-        .actor(ActorSpec::from_actor("sink", {
-            let observed_tx = observed_tx.clone();
-            move |mut ctx: ActorContext| {
-                let observed_tx = observed_tx.clone();
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        observed_tx.send(envelope).expect("receiver alive");
-                    }
-                    Ok(())
-                }
-            }
-        }))
-        .link("dispatcher", "sink")
-        .ingress("requests", "dispatcher")
-        .build()?;
-
-    let mut ingress = graph.ingress("requests").expect("ingress exists");
     let stop = CancellationToken::new();
     let task = tokio::spawn({
         let graph = graph.clone();
@@ -67,17 +56,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         async move { graph.run_until(stop.cancelled()).await }
     });
 
-    ingress.wait_for_binding().await;
-    ingress
-        .send(Envelope::from_static(b"hello blocking actor"))
+    worker.wait_for_binding().await;
+    worker
+        .send(WorkMsg::Process("hello blocking actor".to_owned()))
         .await?;
-    let envelope = timeout(Duration::from_secs(2), observed_rx.recv())
-        .await?
-        .expect("blocking result received");
-    println!(
-        "blocking result: {}",
-        std::str::from_utf8(envelope.as_slice())?
-    );
+    println!("result: {}", observed_rx.recv().await.expect("result"));
 
     stop.cancel();
     task.await??;

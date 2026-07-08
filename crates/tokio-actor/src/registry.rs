@@ -1,17 +1,22 @@
 use std::{
+    any::{Any, TypeId, type_name},
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use thiserror::Error;
 
-use crate::{binding::MailboxBinding, context::ActorRef, observability::GraphObservability};
+use crate::{
+    binding::BindingCore, context::ActorRef, error::LookupError, observability::GraphObservability,
+};
 
 #[derive(Clone, Debug)]
 struct RegistryEntry {
     actor_id: Arc<str>,
-    binding: Arc<MailboxBinding>,
-    observability: GraphObservability,
+    message_type: TypeId,
+    message_type_name: &'static str,
+    binding: Arc<dyn Any + Send + Sync>,
+    observability: Arc<OnceLock<GraphObservability>>,
 }
 
 /// Errors returned while registering or deregistering runtime actors.
@@ -31,8 +36,7 @@ pub enum RegistryError {
 /// Runtime directory of restart-stable actor references.
 ///
 /// The registry is intended for runtime discovery, not static topology.
-/// Graph-defined links remain available through `ActorContext::peer()` and
-/// `ActorContext::send()`.
+/// Static actors should prefer refs captured in their own state at build time.
 #[derive(Clone, Debug, Default)]
 pub struct ActorRegistry {
     entries: Arc<RwLock<HashMap<Arc<str>, RegistryEntry>>>,
@@ -65,8 +69,8 @@ impl ActorRegistry {
         actor_ids
     }
 
-    /// Returns a stable actor reference for external callers.
-    pub fn actor_ref(&self, actor_id: &str) -> Option<ActorRef> {
+    /// Returns a stable typed actor reference for external callers.
+    pub fn actor_ref<M: Send + 'static>(&self, actor_id: &str) -> Result<ActorRef<M>, LookupError> {
         self.actor_ref_for_source(actor_id, None)
     }
 
@@ -84,11 +88,13 @@ impl ActorRegistry {
             .ok_or_else(|| RegistryError::UnknownActorId(actor_id.to_owned()))
     }
 
-    pub(crate) fn register_entry(
+    pub(crate) fn register_erased(
         &self,
         actor_id: Arc<str>,
-        binding: Arc<MailboxBinding>,
-        observability: GraphObservability,
+        message_type: TypeId,
+        message_type_name: &'static str,
+        observability: Arc<OnceLock<GraphObservability>>,
+        binding: Arc<dyn Any + Send + Sync>,
     ) -> Result<(), RegistryError> {
         if actor_id.is_empty() {
             return Err(RegistryError::EmptyActorId);
@@ -106,6 +112,8 @@ impl ActorRegistry {
             Arc::clone(&actor_id),
             RegistryEntry {
                 actor_id,
+                message_type,
+                message_type_name,
                 binding,
                 observability,
             },
@@ -113,21 +121,36 @@ impl ActorRegistry {
         Ok(())
     }
 
-    pub(crate) fn actor_ref_for_source(
+    pub(crate) fn actor_ref_for_source<M: Send + 'static>(
         &self,
         actor_id: &str,
         source_actor_id: Option<&Arc<str>>,
-    ) -> Option<ActorRef> {
+    ) -> Result<ActorRef<M>, LookupError> {
         let entry = self
             .entries
             .read()
             .expect("actor registry rwlock poisoned")
             .get(actor_id)
-            .cloned()?;
+            .cloned()
+            .ok_or_else(|| LookupError::UnknownActor {
+                actor_id: actor_id.to_owned(),
+            })?;
 
-        Some(ActorRef::from_binding(
+        if entry.message_type != TypeId::of::<M>() {
+            return Err(LookupError::MessageTypeMismatch {
+                actor_id: actor_id.to_owned(),
+                registered: entry.message_type_name,
+                requested: type_name::<M>(),
+            });
+        }
+
+        let Ok(binding) = entry.binding.downcast::<BindingCore<M>>() else {
+            unreachable!("message type id already verified")
+        };
+
+        Ok(ActorRef::from_parts(
             entry.actor_id,
-            entry.binding.subscribe(),
+            binding.subscribe(),
             entry.observability,
             source_actor_id.cloned(),
         ))

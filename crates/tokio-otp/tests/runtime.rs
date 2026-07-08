@@ -1,52 +1,106 @@
-use std::time::Duration;
+use std::{marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{Actor, ActorContext, ActorSpec, Envelope, GraphBuilder};
+use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, GraphBuilder, LookupError};
 use tokio_otp::{Runtime, SupervisedActors};
 use tokio_supervisor::{Strategy, SupervisorBuilder, SupervisorExit, SupervisorStateView};
 
-fn build_runtime<A>(actor: A) -> Runtime
+struct Drain<M>(PhantomData<fn(M)>);
+
+impl<M> Drain<M> {
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> Clone for Drain<M> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: Send + 'static> Actor for Drain<M> {
+    type Msg = M;
+
+    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct Observe {
+    observed: mpsc::UnboundedSender<String>,
+}
+
+impl Actor for Observe {
+    type Msg = String;
+
+    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("receiver alive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ObserveOnce {
+    observed: mpsc::UnboundedSender<String>,
+}
+
+impl Actor for ObserveOnce {
+    type Msg = String;
+
+    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+        let message = ctx.recv().await.expect("message received before shutdown");
+        self.observed.send(message).expect("receiver alive");
+        Ok(())
+    }
+}
+
+fn build_runtime<A>(actor: A) -> (Runtime, ActorRef<A::Msg>)
 where
     A: Actor,
 {
-    let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor("worker", actor))
-        .ingress("requests", "worker")
-        .build()
-        .expect("valid graph");
+    let mut builder = GraphBuilder::new();
+    let actor_ref = builder.actor("worker", actor);
+    let graph = builder.build().expect("valid graph");
 
-    SupervisedActors::new(graph)
+    let runtime = SupervisedActors::new(graph)
         .expect("graph decomposes")
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
-        .expect("runtime builds")
+        .expect("runtime builds");
+
+    (runtime, actor_ref)
 }
 
 #[tokio::test]
-async fn runtime_spawn_combines_ingress_and_supervisor_control() {
+async fn runtime_spawn_combines_actor_refs_and_supervisor_control() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let runtime = build_runtime(move |mut ctx: ActorContext| {
-        let observed_tx = observed_tx.clone();
-        Box::pin(async move {
-            while let Some(envelope) = ctx.recv().await {
-                observed_tx.send(envelope).expect("receiver alive");
-            }
-            Ok(())
-        })
+    let (runtime, mut worker_ref) = build_runtime(Observe {
+        observed: observed_tx,
     });
 
     let handle = runtime.spawn();
     let supervisor_handle = handle.supervisor_handle();
-    let mut ingress = handle.ingress("requests").expect("ingress exists");
 
     assert_eq!(
         supervisor_handle.snapshot().state,
         SupervisorStateView::Running
     );
     assert_eq!(handle.snapshot().children.len(), 1);
+    assert_eq!(
+        handle
+            .actor_ref::<String>("worker")
+            .expect("registry ref exists")
+            .id(),
+        "worker"
+    );
 
-    ingress.wait_for_binding().await;
-    ingress
-        .send(Envelope::from_static(b"hello"))
+    worker_ref.wait_for_binding().await;
+    worker_ref
+        .send("hello".to_owned())
         .await
         .expect("message sent");
 
@@ -54,7 +108,7 @@ async fn runtime_spawn_combines_ingress_and_supervisor_control() {
         .await
         .expect("worker observed the message")
         .expect("worker is still running");
-    assert_eq!(observed.as_slice(), b"hello");
+    assert_eq!(observed, "hello");
 
     assert_eq!(
         handle
@@ -66,24 +120,18 @@ async fn runtime_spawn_combines_ingress_and_supervisor_control() {
 }
 
 #[tokio::test]
-async fn runtime_run_accepts_ingress_cloned_before_startup() {
+async fn runtime_run_accepts_ref_cloned_before_startup() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let runtime = build_runtime(move |mut ctx: ActorContext| {
-        let observed_tx = observed_tx.clone();
-        Box::pin(async move {
-            let envelope = ctx.recv().await.expect("message received before shutdown");
-            observed_tx.send(envelope).expect("receiver alive");
-            Ok(())
-        })
+    let (runtime, mut worker_ref) = build_runtime(ObserveOnce {
+        observed: observed_tx,
     });
 
-    let mut ingress = runtime.ingress("requests").expect("ingress exists");
     let sender = tokio::spawn(async move {
-        ingress.wait_for_binding().await;
-        ingress
-            .send(Envelope::from_static(b"run-path"))
+        worker_ref.wait_for_binding().await;
+        worker_ref
+            .send("run-path".to_owned())
             .await
-            .expect("message sent through cloned ingress");
+            .expect("message sent through cloned ref");
     });
 
     assert_eq!(
@@ -96,20 +144,18 @@ async fn runtime_run_accepts_ingress_cloned_before_startup() {
         .await
         .expect("worker observed the message")
         .expect("worker is still running");
-    assert_eq!(observed.as_slice(), b"run-path");
+    assert_eq!(observed, "run-path");
 }
 
 #[tokio::test]
-async fn runtime_handle_returns_none_for_unknown_ingress() {
-    let runtime = build_runtime(|ctx: ActorContext| {
-        Box::pin(async move {
-            ctx.shutdown_token().cancelled().await;
-            Ok(())
-        })
-    });
+async fn runtime_handle_reports_unknown_actor_lookup() {
+    let (runtime, _worker_ref) = build_runtime(Drain::<()>::new());
 
     let handle = runtime.spawn();
-    assert!(handle.ingress("missing").is_none());
+    assert!(matches!(
+        handle.actor_ref::<()>("missing"),
+        Err(LookupError::UnknownActor { .. })
+    ));
 
     handle
         .shutdown_and_wait()
@@ -118,28 +164,22 @@ async fn runtime_handle_returns_none_for_unknown_ingress() {
 }
 
 #[tokio::test]
-async fn runtime_into_parts_round_trips_raw_pieces() {
-    let runtime = build_runtime(|ctx: ActorContext| {
-        Box::pin(async move {
-            ctx.shutdown_token().cancelled().await;
-            Ok(())
-        })
-    });
+async fn runtime_into_parts_round_trips_supervisor() {
+    let (runtime, _worker_ref) = build_runtime(Drain::<()>::new());
 
-    let (supervisor, ingresses) = runtime.into_parts();
-    assert!(ingresses.contains_key("requests"));
-
-    let runtime = Runtime::new(supervisor, ingresses);
-    assert!(runtime.ingress("requests").is_some());
-
+    let supervisor = runtime.into_parts();
+    let runtime = Runtime::new(supervisor);
     let handle = runtime.spawn();
-    let mut ingress = handle.ingress("requests").expect("ingress exists");
-    ingress.wait_for_binding().await;
+
+    assert!(matches!(
+        handle.actor_ref::<()>("worker"),
+        Err(LookupError::UnknownActor { .. })
+    ));
 
     assert_eq!(
-        handle
-            .shutdown_and_wait()
+        timeout(Duration::from_secs(1), handle.shutdown_and_wait())
             .await
+            .expect("shutdown completed")
             .expect("supervisor shut down cleanly"),
         SupervisorExit::Shutdown
     );

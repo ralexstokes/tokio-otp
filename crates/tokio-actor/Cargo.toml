@@ -3,7 +3,7 @@ name = "tokio-actor"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Static actor graphs for Tokio with stable ingress handles"
+description = "Static typed actor graphs for Tokio with restart-stable actor refs"
 readme = "../../README.md"
 keywords = ["tokio", "actor", "async", "concurrency"]
 categories = ["asynchronous", "concurrency"]
@@ -12,7 +12,6 @@ categories = ["asynchronous", "concurrency"]
 metrics = ["dep:metrics"]
 
 [dependencies]
-bytes.workspace = true
 metrics = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true

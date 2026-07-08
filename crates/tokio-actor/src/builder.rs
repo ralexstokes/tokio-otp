@@ -1,35 +1,45 @@
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, atomic::AtomicU8},
+    any::{Any, TypeId, type_name},
+    collections::HashMap,
+    sync::{Arc, OnceLock, atomic::AtomicU8},
     time::Duration,
 };
 
 use crate::{
-    actor::ActorSpec,
-    binding::MailboxBinding,
+    actor::Actor,
+    binding::BindingCore,
+    context::ActorRef,
     error::BuildError,
-    graph::{Graph, GraphInner, IngressDefinition},
+    graph::{ErasedRunner, Graph, GraphActor, GraphInner, TypedRunner},
     observability::{GraphObservability, anonymous_graph_name},
 };
 
 /// Builder for constructing a validated actor graph.
 ///
-/// Graphs are static in this first iteration: actors, links, and ingress
-/// points are all defined up front before calling [`build`](Self::build).
+/// Registration methods mint restart-stable, typed [`ActorRef`]s immediately,
+/// so refs can be captured by other actors' state, including cyclically via
+/// [`declare`](Self::declare).
 pub struct GraphBuilder {
     name: Option<String>,
-    actors: Vec<ActorSpec>,
-    links: Vec<(String, String)>,
-    ingresses: Vec<(String, String)>,
+    slots: Vec<Slot>,
+    index: HashMap<Arc<str>, usize>,
+    errors: Vec<BuildError>,
     mailbox_capacity: usize,
-    max_envelope_bytes: Option<usize>,
     max_blocking_tasks_per_actor: Option<usize>,
     actor_shutdown_timeout: Duration,
     blocking_shutdown_timeout: Duration,
 }
 
+struct Slot {
+    actor_id: Arc<str>,
+    message_type: TypeId,
+    message_type_name: &'static str,
+    binding: Arc<dyn Any + Send + Sync>,
+    observability: Arc<OnceLock<GraphObservability>>,
+    runner: Option<Arc<dyn ErasedRunner>>,
+}
+
 const DEFAULT_MAILBOX_CAPACITY: usize = 64;
-const DEFAULT_MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR: usize = 16;
 const DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -45,11 +55,10 @@ impl GraphBuilder {
     pub fn new() -> Self {
         Self {
             name: None,
-            actors: Vec::new(),
-            links: Vec::new(),
-            ingresses: Vec::new(),
+            slots: Vec::new(),
+            index: HashMap::new(),
+            errors: Vec::new(),
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
-            max_envelope_bytes: Some(DEFAULT_MAX_ENVELOPE_BYTES),
             max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
             actor_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
             blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
@@ -60,58 +69,14 @@ impl GraphBuilder {
     ///
     /// If omitted, a stable anonymous name is generated during
     /// [`build`](Self::build).
-    #[must_use]
-    pub fn name(mut self, name: impl Into<String>) -> Self {
+    pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
         self.name = Some(name.into());
         self
     }
 
-    /// Appends an actor to the graph.
-    #[must_use]
-    pub fn actor(mut self, actor: ActorSpec) -> Self {
-        self.actors.push(actor);
-        self
-    }
-
-    /// Adds a directed link from `from` to `to`.
-    ///
-    /// Actors only receive [`ActorRef`](crate::ActorRef) handles for peers
-    /// that are linked from the actor.
-    #[must_use]
-    pub fn link(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
-        self.links.push((from.into(), to.into()));
-        self
-    }
-
-    /// Adds a named stable ingress point that routes external messages to the
-    /// target actor.
-    #[must_use]
-    pub fn ingress(mut self, name: impl Into<String>, target_actor: impl Into<String>) -> Self {
-        self.ingresses.push((name.into(), target_actor.into()));
-        self
-    }
-
     /// Sets the bounded mailbox capacity used for every actor in the graph.
-    #[must_use]
-    pub fn mailbox_capacity(mut self, capacity: usize) -> Self {
+    pub fn mailbox_capacity(&mut self, capacity: usize) -> &mut Self {
         self.mailbox_capacity = capacity;
-        self
-    }
-
-    /// Sets the maximum envelope size accepted by actor mailboxes.
-    ///
-    /// The default limit is 1 MiB. Messages that exceed the limit are rejected
-    /// at send time before they enter a mailbox.
-    #[must_use]
-    pub fn max_envelope_bytes(mut self, max_bytes: usize) -> Self {
-        self.max_envelope_bytes = Some(max_bytes);
-        self
-    }
-
-    /// Disables the mailbox envelope size limit.
-    #[must_use]
-    pub fn disable_envelope_size_limit(mut self) -> Self {
-        self.max_envelope_bytes = None;
         self
     }
 
@@ -119,15 +84,13 @@ impl GraphBuilder {
     ///
     /// The default limit is 16 active tasks. New blocking work is rejected
     /// once the actor reaches the configured limit.
-    #[must_use]
-    pub fn max_blocking_tasks_per_actor(mut self, limit: usize) -> Self {
+    pub fn max_blocking_tasks_per_actor(&mut self, limit: usize) -> &mut Self {
         self.max_blocking_tasks_per_actor = Some(limit);
         self
     }
 
     /// Disables the per-actor blocking task concurrency limit.
-    #[must_use]
-    pub fn unbounded_blocking_tasks_per_actor(mut self) -> Self {
+    pub fn unbounded_blocking_tasks_per_actor(&mut self) -> &mut Self {
         self.max_blocking_tasks_per_actor = None;
         self
     }
@@ -137,8 +100,7 @@ impl GraphBuilder {
     ///
     /// The default timeout is 5 seconds. Any actor task still running after the
     /// timeout is aborted so graph shutdown can complete.
-    #[must_use]
-    pub fn actor_shutdown_timeout(mut self, timeout: Duration) -> Self {
+    pub fn actor_shutdown_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.actor_shutdown_timeout = timeout;
         self
     }
@@ -147,106 +109,148 @@ impl GraphBuilder {
     /// cancellation is requested.
     ///
     /// The default timeout is 5 seconds. Any blocking task still running after
-    /// the timeout is detached so graph shutdown can complete.
-    #[must_use]
-    pub fn blocking_shutdown_timeout(mut self, timeout: Duration) -> Self {
+    /// the timeout is detached so the graph can terminate.
+    pub fn blocking_shutdown_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.blocking_shutdown_timeout = timeout;
         self
     }
 
+    /// Mints a typed ref for an actor that will be registered later.
+    ///
+    /// This enables cyclic wiring: declare an actor, hand its ref to another
+    /// actor's state, then register the declared actor.
+    pub fn declare<M: Send + 'static>(&mut self, actor_id: &str) -> ActorRef<M> {
+        self.slot_ref::<M>(actor_id)
+    }
+
+    /// Registers an actor and returns its typed, restart-stable ref.
+    pub fn actor<A: Actor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
+        if actor_id.is_empty() {
+            self.errors
+                .push(BuildError::InvalidConfig("actor id must not be empty"));
+            return ActorRef::detached(actor_id.into());
+        }
+
+        if let Some(&index) = self.index.get(actor_id) {
+            let slot = &self.slots[index];
+            if slot.message_type == TypeId::of::<A::Msg>() && slot.runner.is_some() {
+                self.errors.push(BuildError::DuplicateActorId {
+                    actor_id: actor_id.to_string(),
+                });
+                return ActorRef::detached(actor_id.into());
+            }
+        }
+
+        let actor_ref = self.slot_ref::<A::Msg>(actor_id);
+        let Some(&index) = self.index.get(actor_id) else {
+            return actor_ref;
+        };
+        let slot = &mut self.slots[index];
+        if slot.message_type != TypeId::of::<A::Msg>() {
+            return actor_ref;
+        }
+
+        let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
+            unreachable!("message type id already verified")
+        };
+        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
+        actor_ref
+    }
+
     /// Validates the graph and returns an immutable [`Graph`].
-    pub fn build(self) -> Result<Graph, BuildError> {
+    pub fn build(mut self) -> Result<Graph, BuildError> {
         let graph_name = match self.name {
             Some(name) if name.is_empty() => {
                 return Err(BuildError::InvalidConfig("graph name must not be empty"));
             }
-            Some(name) => name.into(),
+            Some(name) => Arc::from(name),
             None => anonymous_graph_name(),
         };
 
-        if self.actors.is_empty() {
-            return Err(BuildError::EmptyActors);
+        if !self.errors.is_empty() {
+            return Err(self.errors.remove(0));
         }
-
+        if self.slots.is_empty() {
+            return Err(BuildError::EmptyGraph);
+        }
         if self.mailbox_capacity == 0 {
             return Err(BuildError::InvalidConfig(
                 "mailbox capacity must be non-zero",
             ));
         }
 
-        let mut actor_ids = HashSet::new();
-        let mut actors = Vec::with_capacity(self.actors.len());
-        let mut links: HashMap<Arc<str>, Vec<Arc<str>>> = HashMap::new();
-        let mut bindings: HashMap<Arc<str>, Arc<MailboxBinding>> =
-            HashMap::with_capacity(self.actors.len());
+        let observability = GraphObservability::new(Arc::clone(&graph_name));
+        let mut actors = Vec::with_capacity(self.slots.len());
 
-        for actor in self.actors {
-            if actor.id().is_empty() {
-                return Err(BuildError::InvalidConfig("actor id must not be empty"));
-            }
-            if !actor_ids.insert(actor.id().to_owned()) {
-                return Err(BuildError::DuplicateActorId(actor.id().to_owned()));
-            }
-            links.insert(Arc::clone(&actor.inner.id), Vec::new());
-            bindings.insert(
-                Arc::clone(&actor.inner.id),
-                Arc::new(MailboxBinding::default()),
-            );
-            actors.push(Arc::clone(&actor.inner));
-        }
-
-        for (from, to) in self.links {
-            if !actor_ids.contains(&from) {
-                return Err(BuildError::UnknownLinkSource { actor: from });
-            }
-            if !actor_ids.contains(&to) {
-                return Err(BuildError::UnknownLinkTarget { from, actor: to });
-            }
-            let outgoing = links
-                .get_mut(from.as_str())
-                .expect("links entry guaranteed by actor_ids check");
-            outgoing.push(to.into());
-        }
-
-        let mut ingress_names = HashSet::new();
-        let mut ingresses: HashMap<Arc<str>, IngressDefinition> = HashMap::new();
-        let mut ingress_names_by_actor: HashMap<Arc<str>, Vec<Arc<str>>> = HashMap::new();
-        for (name, target) in self.ingresses {
-            if name.is_empty() {
-                return Err(BuildError::InvalidConfig("ingress name must not be empty"));
-            }
-            if !ingress_names.insert(name.clone()) {
-                return Err(BuildError::DuplicateIngressName(name));
-            }
-            if !actor_ids.contains(&target) {
-                return Err(BuildError::UnknownIngressTarget {
-                    ingress: name,
-                    actor: target,
+        for slot in self.slots {
+            let Some(runner) = slot.runner else {
+                return Err(BuildError::MissingActor {
+                    actor_id: slot.actor_id.to_string(),
                 });
-            }
-
-            let name: Arc<str> = name.into();
-            let target_actor: Arc<str> = target.into();
-            ingress_names_by_actor
-                .entry(Arc::clone(&target_actor))
-                .or_default()
-                .push(Arc::clone(&name));
-            ingresses.insert(name, IngressDefinition { target_actor });
+            };
+            let _ = slot.observability.set(observability.clone());
+            actors.push(GraphActor {
+                actor_id: slot.actor_id,
+                message_type: slot.message_type,
+                message_type_name: slot.message_type_name,
+                binding: slot.binding,
+                observability: slot.observability,
+                runner,
+            });
         }
 
         Ok(Graph::new(GraphInner {
+            name: graph_name,
             actors,
-            links,
-            bindings,
+            actor_index: self.index,
             mailbox_capacity: self.mailbox_capacity,
-            max_envelope_bytes: self.max_envelope_bytes,
             max_blocking_tasks_per_actor: self.max_blocking_tasks_per_actor,
             actor_shutdown_timeout: self.actor_shutdown_timeout,
             blocking_shutdown_timeout: self.blocking_shutdown_timeout,
-            ingresses,
-            ingress_names_by_actor,
             state: AtomicU8::new(0),
-            observability: GraphObservability::new(graph_name),
+            observability,
         }))
+    }
+
+    /// Returns a typed ref bound to the slot for `actor_id`, creating the slot
+    /// if needed. On a message-type mismatch, records the error and returns a
+    /// detached ref that never binds.
+    fn slot_ref<M: Send + 'static>(&mut self, actor_id: &str) -> ActorRef<M> {
+        if actor_id.is_empty() {
+            self.errors
+                .push(BuildError::InvalidConfig("actor id must not be empty"));
+            return ActorRef::detached(actor_id.into());
+        }
+
+        if let Some(&index) = self.index.get(actor_id) {
+            let slot = &self.slots[index];
+            if slot.message_type == TypeId::of::<M>() {
+                let Ok(core) = slot.binding.clone().downcast::<BindingCore<M>>() else {
+                    unreachable!("message type id already verified")
+                };
+                return ActorRef::from_core(&core, None);
+            }
+            self.errors.push(BuildError::MessageTypeMismatch {
+                actor_id: actor_id.to_string(),
+                registered: slot.message_type_name,
+                requested: type_name::<M>(),
+            });
+            return ActorRef::detached(actor_id.into());
+        }
+
+        let actor_id: Arc<str> = actor_id.into();
+        let core = Arc::new(BindingCore::<M>::new(actor_id.clone()));
+        let observability = core.observability_slot();
+        let actor_ref = ActorRef::from_core(&core, None);
+        self.index.insert(actor_id.clone(), self.slots.len());
+        self.slots.push(Slot {
+            actor_id,
+            message_type: TypeId::of::<M>(),
+            message_type_name: type_name::<M>(),
+            binding: core,
+            observability,
+            runner: None,
+        });
+        actor_ref
     }
 }

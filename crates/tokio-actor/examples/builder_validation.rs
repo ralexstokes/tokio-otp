@@ -1,7 +1,28 @@
-use tokio_actor::{ActorContext, ActorSpec, BuildError, GraphBuilder};
+use std::marker::PhantomData;
 
-fn idle_actor(id: &str) -> ActorSpec {
-    ActorSpec::from_actor(id, |_ctx: ActorContext| async { Ok(()) })
+use tokio_actor::{Actor, ActorContext, ActorResult, BuildError, GraphBuilder};
+
+struct Idle<M>(PhantomData<fn(M)>);
+
+impl<M> Idle<M> {
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> Clone for Idle<M> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: Send + 'static> Actor for Idle<M> {
+    type Msg = M;
+
+    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
 }
 
 fn report(label: &str, result: Result<tokio_actor::Graph, BuildError>) {
@@ -14,52 +35,27 @@ fn report(label: &str, result: Result<tokio_actor::Graph, BuildError>) {
 fn main() {
     report("empty graph", GraphBuilder::new().build());
 
-    report(
-        "zero mailbox capacity",
-        GraphBuilder::new()
-            .actor(idle_actor("worker"))
-            .mailbox_capacity(0)
-            .build(),
-    );
+    let mut zero_capacity = GraphBuilder::new();
+    zero_capacity.mailbox_capacity(0);
+    zero_capacity.actor("worker", Idle::<()>::new());
+    report("zero mailbox capacity", zero_capacity.build());
 
-    report(
-        "duplicate actor ids",
-        GraphBuilder::new()
-            .actor(idle_actor("worker"))
-            .actor(idle_actor("worker"))
-            .build(),
-    );
+    let mut duplicate = GraphBuilder::new();
+    duplicate.actor("worker", Idle::<()>::new());
+    duplicate.actor("worker", Idle::<()>::new());
+    report("duplicate actor ids", duplicate.build());
 
-    report(
-        "duplicate ingress names",
-        GraphBuilder::new()
-            .actor(idle_actor("worker"))
-            .ingress("requests", "worker")
-            .ingress("requests", "worker")
-            .build(),
-    );
+    let mut mismatch = GraphBuilder::new();
+    mismatch.declare::<u32>("worker");
+    mismatch.actor("worker", Idle::<String>::new());
+    report("message type mismatch", mismatch.build());
 
-    report(
-        "unknown link source",
-        GraphBuilder::new()
-            .actor(idle_actor("worker"))
-            .link("missing", "worker")
-            .build(),
-    );
+    let mut missing = GraphBuilder::new();
+    missing.declare::<String>("ghost");
+    report("declared but missing actor", missing.build());
 
-    report(
-        "unknown link target",
-        GraphBuilder::new()
-            .actor(idle_actor("worker"))
-            .link("worker", "missing")
-            .build(),
-    );
-
-    report(
-        "unknown ingress target",
-        GraphBuilder::new()
-            .actor(idle_actor("worker"))
-            .ingress("requests", "missing")
-            .build(),
-    );
+    let mut empty_name = GraphBuilder::new();
+    empty_name.name("");
+    empty_name.actor("worker", Idle::<()>::new());
+    report("empty graph name", empty_name.build());
 }

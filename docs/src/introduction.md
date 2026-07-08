@@ -12,7 +12,7 @@ a *supervisor* restart the ones that fail.
 | Crate | Role |
 |-------|------|
 | [`tokio-supervisor`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor) | Structured supervision of async tasks: restart policies, restart intensity limits, graceful shutdown, and supervision trees. |
-| [`tokio-actor`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-actor) | Static graphs of communicating actors: typed wiring between mailboxes, stable ingress points, and byte envelopes. |
+| [`tokio-actor`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and blocking-task integration. |
 | [`tokio-otp`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp) | The composition layer: run each actor of a graph as its own supervised child, with one integrated `Runtime`. |
 | [`tokio-otp-console`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp-console) | A live web console for watching a running supervision tree. |
 
@@ -34,7 +34,7 @@ If you have used Erlang/OTP or Elixir, the mapping is direct:
 | `permanent` / `transient` / `temporary` | `Restart::Permanent` / `Restart::Transient` / `Restart::Temporary` |
 | Restart intensity (`MaxR`/`MaxT`) | `RestartIntensity::new(max_restarts, within)` |
 | GenServer-ish process with a mailbox | An actor with an [`ActorContext`] |
-| Registered process name | Actor id + `ActorRef` / `IngressHandle` |
+| Registered process name | Actor id + typed `ActorRef<M>` |
 
 If you have not: don't worry. This tutorial builds everything up from scratch.
 
@@ -44,12 +44,12 @@ Throughout the tutorial we build a tiny **print shop** service:
 
 ```text
                  ┌────────────┐      ┌───────┐      ┌──────────┐
-  orders ──────▶ │ front-desk │ ───▶ │ press │ ───▶ │ shipping │
-  (ingress)      └────────────┘      └───────┘      └──────────┘
+  orders ref ──▶ │ front-desk │ ───▶ │ press │ ───▶ │ shipping │
+                 └────────────┘      └───────┘      └──────────┘
 ```
 
-- Customers submit print orders through an **ingress** (the stable entry point
-  into the graph).
+- Customers submit print orders through a typed `ActorRef<Order>` (the stable
+  entry point into the graph).
 - The **front-desk** actor validates orders and forwards them.
 - The **press** actor does the actual printing — and occasionally jams.
 - The **shipping** actor records finished jobs.

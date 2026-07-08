@@ -204,13 +204,13 @@ impl std::error::Error for BlockingTaskFailure {
 }
 
 /// Synchronous context passed to blocking task closures.
-pub struct BlockingContext {
-    myself: ActorRef,
+pub struct BlockingContext<M> {
+    myself: ActorRef<M>,
     actor_shutdown: CancellationToken,
     task_cancel: CancellationToken,
 }
 
-impl BlockingContext {
+impl<M> BlockingContext<M> {
     /// Returns `true` if the task or its owning actor has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.task_cancel.is_cancelled() || self.actor_shutdown.is_cancelled()
@@ -226,7 +226,7 @@ impl BlockingContext {
     }
 
     /// Returns a sender targeting the owning actor's mailbox.
-    pub fn myself(&self) -> &ActorRef {
+    pub fn myself(&self) -> &ActorRef<M> {
         &self.myself
     }
 }
@@ -279,12 +279,12 @@ impl fmt::Debug for BlockingHandle {
 }
 
 #[derive(Clone)]
-pub(crate) struct BlockingSpawner {
-    inner: Arc<BlockingRuntimeInner>,
+pub(crate) struct BlockingSpawner<M> {
+    inner: Arc<BlockingRuntimeInner<M>>,
 }
 
-impl BlockingSpawner {
-    fn new(inner: Arc<BlockingRuntimeInner>) -> Self {
+impl<M> BlockingSpawner<M> {
+    fn new(inner: Arc<BlockingRuntimeInner<M>>) -> Self {
         Self { inner }
     }
 
@@ -294,14 +294,15 @@ impl BlockingSpawner {
         f: F,
     ) -> Result<BlockingHandle, SpawnBlockingError>
     where
-        F: FnOnce(BlockingContext) -> Result<(), BlockingOperationError> + Send + 'static,
+        F: FnOnce(BlockingContext<M>) -> Result<(), BlockingOperationError> + Send + 'static,
+        M: Send + 'static,
     {
         self.inner.spawn_blocking(options, f)
     }
 }
 
-pub(crate) struct BlockingRuntime {
-    inner: Arc<BlockingRuntimeInner>,
+pub(crate) struct BlockingRuntime<M> {
+    inner: Arc<BlockingRuntimeInner<M>>,
     event_rx: mpsc::UnboundedReceiver<BlockingRuntimeEvent>,
     shutdown_timeout: std::time::Duration,
 }
@@ -310,10 +311,10 @@ pub(crate) enum BlockingRuntimeEvent {
     Completed { task_id: BlockingTaskId },
 }
 
-impl BlockingRuntime {
+impl<M: Send + 'static> BlockingRuntime<M> {
     pub(crate) fn new(
         actor_id: Arc<str>,
-        myself: ActorRef,
+        myself: ActorRef<M>,
         actor_shutdown: CancellationToken,
         observability: GraphObservability,
         max_blocking_tasks: Option<usize>,
@@ -336,7 +337,7 @@ impl BlockingRuntime {
         }
     }
 
-    pub(crate) fn spawner(&self) -> BlockingSpawner {
+    pub(crate) fn spawner(&self) -> BlockingSpawner<M> {
         BlockingSpawner::new(Arc::clone(&self.inner))
     }
 
@@ -487,9 +488,9 @@ impl BlockingAdmission {
     }
 }
 
-struct BlockingRuntimeInner {
+struct BlockingRuntimeInner<M> {
     actor_id: Arc<str>,
-    myself: ActorRef,
+    myself: ActorRef<M>,
     actor_shutdown: CancellationToken,
     state: Mutex<BlockingState>,
     event_tx: mpsc::UnboundedSender<BlockingRuntimeEvent>,
@@ -497,14 +498,14 @@ struct BlockingRuntimeInner {
     observability: GraphObservability,
 }
 
-impl BlockingRuntimeInner {
+impl<M: Send + 'static> BlockingRuntimeInner<M> {
     fn spawn_blocking<F>(
         &self,
         options: BlockingOptions,
         f: F,
     ) -> Result<BlockingHandle, SpawnBlockingError>
     where
-        F: FnOnce(BlockingContext) -> Result<(), BlockingOperationError> + Send + 'static,
+        F: FnOnce(BlockingContext<M>) -> Result<(), BlockingOperationError> + Send + 'static,
     {
         let task_name = options.into_name();
         let cancel = CancellationToken::new();

@@ -1,9 +1,10 @@
-//! Static actor graphs for Tokio, intended to compose with `tokio-supervisor`.
+//! Static typed actor graphs for Tokio, intended to compose with
+//! `tokio-supervisor`.
 //!
 //! `tokio-actor` focuses on two responsibilities only:
 //!
-//! - defining a graph of actors and directed links between them
-//! - moving byte envelopes between actors and external ingress points
+//! - defining a graph of actors with typed mailboxes
+//! - providing restart-stable typed actor references
 //!
 //! Internal restart policy and supervision are intentionally out of scope.
 //! When an actor fails, panics, or exits before shutdown, the whole graph run
@@ -17,19 +18,18 @@
 //! | [`GraphBuilder`] | Constructs and validates the actor graph. |
 //! | [`Graph`] | Immutable, cloneable graph spec that can be rerun. |
 //! | [`ActorSet`] | Decomposed graph where actors can be run independently. |
-//! | [`RunnableActor`] | One actor plus stable peer wiring for per-actor supervision. |
-//! | [`ActorSpec`] | Actor definition. |
-//! | [`ActorContext`] | Mailbox, peers, and shutdown token visible to one actor. |
-//! | [`ActorRef`] | Cloneable stable mailbox sender for a linked peer. |
-//! | [`IngressHandle`] | Stable external sender that survives graph reruns. |
-//! | [`Envelope`] | Opaque byte payload passed through the graph. |
+//! | [`RunnableActor`] | One actor plus stable binding for per-actor supervision. |
+//! | [`Actor`] | Typed actor definition. |
+//! | [`ActorContext`] | Mailbox, registry, blocking tasks, and shutdown token visible to one actor. |
+//! | [`ActorRef`] | Cloneable stable typed mailbox sender. |
+//! | [`Reply`] | One-shot response channel carried inside request messages. |
 //!
 //! # Stable mailbox handles
 //!
-//! `ActorRef` and `IngressHandle` are bound to long-lived mailbox bindings
-//! instead of a single actor runtime. When a graph is rerun or a decomposed
-//! actor is restarted from the same graph wiring, those handles transparently
-//! follow the current mailbox for the target actor.
+//! `ActorRef<M>` is bound to a long-lived mailbox binding instead of a single
+//! actor runtime. When a graph is rerun or a decomposed actor is restarted
+//! from the same graph wiring, those handles transparently follow the current
+//! mailbox for the target actor.
 //!
 //! This is especially useful when the graph is hosted inside a supervised
 //! child task and can be restarted by `tokio-supervisor`, or when a graph is
@@ -41,7 +41,7 @@
 //! `tokio-supervisor`:
 //!
 //! - `tracing` spans and structured logs are emitted automatically for graph,
-//!   actor, ingress, and blocking-task lifecycle.
+//!   actor, mailbox, and blocking-task lifecycle.
 //! - optional `metrics` counters, gauges, and histograms are available via the
 //!   `metrics` cargo feature.
 //!
@@ -52,8 +52,7 @@
 //!
 //! Graphs apply conservative defaults for externally-controlled work:
 //!
-//! - mailboxes still default to 64 queued messages per actor
-//! - envelopes larger than 1 MiB are rejected before entering a mailbox
+//! - mailboxes default to 64 queued messages per actor
 //! - actors may run at most 16 blocking tasks concurrently by default
 //! - shutdown waits up to 5 seconds for blocking tasks to stop, then detaches
 //!   any remaining work so the graph can terminate
@@ -65,30 +64,38 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use tokio_actor::{ActorContext, ActorSpec, Envelope, GraphBuilder};
+//! use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, Reply};
+//!
+//! enum CounterMsg {
+//!     Add(u64),
+//!     Total(Reply<u64>),
+//! }
+//!
+//! #[derive(Clone)]
+//! struct Counter;
+//!
+//! impl Actor for Counter {
+//!     type Msg = CounterMsg;
+//!
+//!     async fn run(&self, mut ctx: ActorContext<CounterMsg>) -> ActorResult {
+//!         let mut total = 0;
+//!         while let Some(message) = ctx.recv().await {
+//!             match message {
+//!                 CounterMsg::Add(n) => total += n,
+//!                 CounterMsg::Total(reply) => reply.send(total),
+//!             }
+//!         }
+//!         Ok(())
+//!     }
+//! }
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let graph = GraphBuilder::new()
-//!     .name("example")
-//!     .actor(ActorSpec::from_actor("frontend", |mut ctx: ActorContext| async move {
-//!         while let Some(envelope) = ctx.recv().await {
-//!             ctx.send("worker", envelope).await?;
-//!         }
-//!         Ok(())
-//!     }))
-//!     .actor(ActorSpec::from_actor("worker", |mut ctx: ActorContext| async move {
-//!         while let Some(envelope) = ctx.recv().await {
-//!             println!("{:?}", envelope.as_slice());
-//!         }
-//!         Ok(())
-//!     }))
-//!     .link("frontend", "worker")
-//!     .ingress("requests", "frontend")
-//!     .build()
-//!     .expect("valid graph");
+//! let mut builder = GraphBuilder::new();
+//! builder.name("example");
+//! let mut counter = builder.actor("counter", Counter);
+//! let graph = builder.build().expect("valid graph");
 //!
-//! let mut ingress = graph.ingress("requests").expect("ingress exists");
 //! let stop = tokio_util::sync::CancellationToken::new();
 //! let task = tokio::spawn({
 //!     let graph = graph.clone();
@@ -96,8 +103,10 @@
 //!     async move { graph.run_until(stop.cancelled()).await }
 //! });
 //!
-//! ingress.wait_for_binding().await;
-//! ingress.send(Envelope::from_static(b"hello")).await.expect("send succeeded");
+//! counter.wait_for_binding().await;
+//! counter.send(CounterMsg::Add(2)).await.expect("send succeeded");
+//! counter.send(CounterMsg::Add(3)).await.expect("send succeeded");
+//! assert_eq!(counter.call(CounterMsg::Total).await?, 5);
 //!
 //! stop.cancel();
 //! task.await.expect("graph task joined").expect("graph stopped cleanly");
@@ -105,51 +114,11 @@
 //! # }
 //! ```
 //!
-//! For larger actor implementations, you can define a reusable actor type and
-//! pass it to [`ActorSpec::from_actor`]:
-//!
-//! ```no_run
-//! use tokio_actor::{Actor, ActorContext, ActorResult, ActorSpec, GraphBuilder};
-//!
-//! #[derive(Clone)]
-//! struct Worker;
-//!
-//! impl Actor for Worker {
-//!     async fn run(&self, mut ctx: ActorContext) -> ActorResult {
-//!         while let Some(envelope) = ctx.recv().await {
-//!             println!("{:?}", envelope.as_slice());
-//!         }
-//!         Ok(())
-//!     }
-//! }
-//!
-//! let graph = GraphBuilder::new()
-//!     .name("example")
-//!     .actor(ActorSpec::from_actor("worker", Worker))
-//!     .build()
-//!     .expect("valid graph");
-//! # let _ = graph;
-//! ```
-//!
 //! # Cargo features
 //!
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `metrics` | no | Enables `metrics` crate integration for counters, gauges, and histograms. |
-//!
-//! # Examples
-//!
-//! - `examples/ingress_rebind.rs` — stable ingress handles across graph reruns.
-//! - `examples/send_vs_send_when_ready.rs` — retry-across-restart semantics.
-//! - `examples/mailbox_backpressure.rs` — bounded mailbox back-pressure.
-//! - `examples/envelope_limits.rs` — per-graph envelope size limits.
-//! - `examples/blocking_work.rs` — spawning tracked blocking tasks.
-//! - `examples/blocking_lifecycle.rs` — blocking task lifecycle handling.
-//! - `examples/blocking_limits.rs` — per-actor blocking task concurrency.
-//! - `examples/graph_failures.rs` — error propagation from actor failures.
-//! - `examples/builder_validation.rs` — build-time graph validation errors.
-//! - `examples/tracing.rs` — structured logging output.
-//! - `examples/metrics.rs` — metrics integration (requires `--features metrics`).
 
 mod actor;
 mod actor_set;
@@ -157,33 +126,29 @@ mod binding;
 mod blocking;
 mod builder;
 mod context;
-mod envelope;
 mod error;
 mod graph;
-mod ingress;
 mod observability;
 mod registry;
 
 pub mod prelude {
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        ActorSpec, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
-        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BuildError, Envelope, Graph,
-        GraphBuilder, GraphError, IngressError, IngressHandle, RegistryError, RunnableActor,
+        BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
+        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BuildError, CallError, Graph,
+        GraphBuilder, GraphError, LookupError, RegistryError, Reply, RunnableActor,
         RunnableActorFactory, SendError, SpawnBlockingError,
     };
 }
 
-pub use actor::{Actor, ActorResult, ActorSpec, BoxError};
+pub use actor::{Actor, ActorResult, BoxError};
 pub use actor_set::{ActorRunError, ActorSet, RunnableActor, RunnableActorFactory};
 pub use blocking::{
     BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions, BlockingTaskError,
     BlockingTaskFailure, BlockingTaskId, SpawnBlockingError,
 };
 pub use builder::GraphBuilder;
-pub use context::{ActorContext, ActorRef};
-pub use envelope::Envelope;
-pub use error::{BuildError, GraphError, IngressError, SendError};
+pub use context::{ActorContext, ActorRef, Reply};
+pub use error::{BuildError, CallError, GraphError, LookupError, SendError};
 pub use graph::Graph;
-pub use ingress::IngressHandle;
 pub use registry::{ActorRegistry, RegistryError};

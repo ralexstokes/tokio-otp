@@ -1,62 +1,33 @@
-#[cfg(feature = "metrics")]
-use metrics_exporter_prometheus::PrometheusBuilder;
-#[cfg(feature = "metrics")]
-use std::{error::Error, thread, time::Duration};
-#[cfg(feature = "metrics")]
-use tokio::{sync::mpsc, time::timeout};
-#[cfg(feature = "metrics")]
-use tokio_actor::{ActorContext, ActorSpec, BlockingOptions, Envelope, GraphBuilder};
-#[cfg(feature = "metrics")]
+use std::error::Error;
+
+use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "metrics")]
+#[derive(Clone)]
+struct Worker;
+
+impl Actor for Worker {
+    type Msg = &'static str;
+
+    async fn run(&self, mut ctx: ActorContext<&'static str>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            println!("processing `{message}`");
+            ctx.run_blocking(BlockingOptions::named("metrics-blocking"), |_job| Ok(()))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let recorder = PrometheusBuilder::new().install_recorder()?;
-    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    #[cfg(feature = "metrics")]
+    let _recorder = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
-    let graph = GraphBuilder::new()
-        .name("metrics-demo")
-        .actor(ActorSpec::from_actor(
-            "dispatcher",
-            |mut ctx: ActorContext| async move {
-                let sink = ctx.peer("sink").expect("linked sink exists");
+    let mut builder = GraphBuilder::new();
+    let mut worker = builder.actor("worker", Worker);
+    let graph = builder.build()?;
 
-                while let Some(envelope) = ctx.recv().await {
-                    let sink = sink.clone();
-                    let _task =
-                        ctx.spawn_blocking(BlockingOptions::named("uppercase"), move |_job| {
-                            thread::sleep(Duration::from_millis(20));
-                            let uppercased: Vec<u8> = envelope
-                                .as_slice()
-                                .iter()
-                                .map(|byte| byte.to_ascii_uppercase())
-                                .collect();
-                            sink.blocking_send(uppercased)?;
-                            Ok(())
-                        })?;
-                }
-
-                Ok(())
-            },
-        ))
-        .actor(ActorSpec::from_actor("sink", {
-            let observed_tx = observed_tx.clone();
-            move |mut ctx: ActorContext| {
-                let observed_tx = observed_tx.clone();
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        observed_tx.send(envelope).expect("receiver alive");
-                    }
-                    Ok(())
-                }
-            }
-        }))
-        .link("dispatcher", "sink")
-        .ingress("requests", "dispatcher")
-        .build()?;
-
-    let mut ingress = graph.ingress("requests").expect("ingress exists");
     let stop = CancellationToken::new();
     let task = tokio::spawn({
         let graph = graph.clone();
@@ -64,28 +35,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         async move { graph.run_until(stop.cancelled()).await }
     });
 
-    ingress.wait_for_binding().await;
-    ingress
-        .send(Envelope::from_static(b"hello metrics"))
-        .await?;
-    let envelope = timeout(Duration::from_secs(1), observed_rx.recv())
-        .await?
-        .expect("processed message received");
-    println!(
-        "processed message: {}",
-        std::str::from_utf8(envelope.as_slice())?
-    );
+    worker.wait_for_binding().await;
+    worker.send("hello metrics").await?;
 
     stop.cancel();
     task.await??;
-
-    println!("# Prometheus snapshot");
-    println!("{}", recorder.render());
-
     Ok(())
-}
-
-#[cfg(not(feature = "metrics"))]
-fn main() {
-    eprintln!("run this example with: cargo run --example metrics --features metrics");
 }

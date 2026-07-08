@@ -1,237 +1,135 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{mpsc, watch};
 
-use crate::{envelope::Envelope, error::SendError, observability::GraphObservability};
+use crate::{error::SendError, observability::GraphObservability};
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum MailboxError {
-    EnvelopeTooLarge {
-        actor_id: Arc<str>,
-        envelope_len: usize,
-        max_envelope_bytes: usize,
-    },
-    MailboxFull {
-        actor_id: Arc<str>,
-    },
-    MailboxClosed {
-        actor_id: Arc<str>,
-    },
-}
-
-impl MailboxError {
-    fn closed(actor_id: &Arc<str>) -> Self {
-        Self::MailboxClosed {
-            actor_id: Arc::clone(actor_id),
-        }
-    }
-
-    fn from_try_send(actor_id: &Arc<str>, err: mpsc::error::TrySendError<Envelope>) -> Self {
-        match err {
-            mpsc::error::TrySendError::Full(_) => Self::MailboxFull {
-                actor_id: Arc::clone(actor_id),
-            },
-            mpsc::error::TrySendError::Closed(_) => Self::closed(actor_id),
-        }
-    }
-
-    pub(crate) fn into_send_error(self) -> SendError {
-        match self {
-            Self::EnvelopeTooLarge {
-                actor_id,
-                envelope_len,
-                max_envelope_bytes,
-            } => SendError::EnvelopeTooLarge {
-                actor_id: actor_id.to_string(),
-                envelope_len,
-                max_envelope_bytes,
-            },
-            Self::MailboxFull { actor_id } => SendError::MailboxFull {
-                actor_id: actor_id.to_string(),
-            },
-            Self::MailboxClosed { actor_id } => SendError::MailboxClosed {
-                actor_id: actor_id.to_string(),
-            },
-        }
-    }
-}
-
-pub(crate) enum MailboxSendFailure {
-    EnvelopeTooLarge {
-        envelope_len: usize,
-        max_envelope_bytes: usize,
-    },
-    MailboxClosed {
-        envelope: Envelope,
-    },
-}
-
-impl MailboxSendFailure {
-    pub(crate) fn into_mailbox_error(self, actor_id: &Arc<str>) -> MailboxError {
-        match self {
-            Self::EnvelopeTooLarge {
-                envelope_len,
-                max_envelope_bytes,
-            } => MailboxError::EnvelopeTooLarge {
-                actor_id: Arc::clone(actor_id),
-                envelope_len,
-                max_envelope_bytes,
-            },
-            Self::MailboxClosed { .. } => MailboxError::MailboxClosed {
-                actor_id: Arc::clone(actor_id),
-            },
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct MailboxRef {
+/// Sender for one bound mailbox instance of an actor.
+pub(crate) struct MailboxRef<M> {
     actor_id: Arc<str>,
-    sender: mpsc::Sender<Envelope>,
-    max_envelope_bytes: Option<usize>,
+    sender: mpsc::Sender<M>,
 }
 
-impl MailboxRef {
-    pub(crate) fn new(
-        actor_id: Arc<str>,
-        sender: mpsc::Sender<Envelope>,
-        max_envelope_bytes: Option<usize>,
-    ) -> Self {
+impl<M> Clone for MailboxRef<M> {
+    fn clone(&self) -> Self {
         Self {
-            actor_id,
-            sender,
-            max_envelope_bytes,
+            actor_id: Arc::clone(&self.actor_id),
+            sender: self.sender.clone(),
         }
     }
+}
 
-    pub(crate) async fn send(&self, envelope: Envelope) -> Result<(), MailboxError> {
-        self.send_retaining(envelope)
-            .await
-            .map_err(|err| err.into_mailbox_error(&self.actor_id))
+impl<M> MailboxRef<M> {
+    pub(crate) fn new(actor_id: Arc<str>, sender: mpsc::Sender<M>) -> Self {
+        Self { actor_id, sender }
     }
 
-    pub(crate) async fn send_retaining(
-        &self,
-        envelope: Envelope,
-    ) -> Result<(), MailboxSendFailure> {
-        self.validate_envelope(&envelope).map_err(|err| match err {
-            MailboxError::EnvelopeTooLarge {
-                envelope_len,
-                max_envelope_bytes,
-                ..
-            } => MailboxSendFailure::EnvelopeTooLarge {
-                envelope_len,
-                max_envelope_bytes,
+    /// Sends, returning the message on failure so callers can retry after a
+    /// rebind.
+    pub(crate) async fn send_retaining(&self, message: M) -> Result<(), M> {
+        self.sender.send(message).await.map_err(|err| err.0)
+    }
+
+    pub(crate) async fn send(&self, message: M) -> Result<(), SendError> {
+        self.send_retaining(message)
+            .await
+            .map_err(|_| SendError::MailboxClosed {
+                actor_id: self.actor_id.to_string(),
+            })
+    }
+
+    pub(crate) fn try_send(&self, message: M) -> Result<(), SendError> {
+        self.sender.try_send(message).map_err(|err| match err {
+            mpsc::error::TrySendError::Full(_) => SendError::MailboxFull {
+                actor_id: self.actor_id.to_string(),
             },
-            MailboxError::MailboxFull { .. } => {
-                unreachable!("async mailbox send never reports full")
-            }
-            MailboxError::MailboxClosed { .. } => {
-                unreachable!("envelope validation never reports a closed mailbox")
-            }
-        })?;
-        self.sender
-            .send(envelope)
-            .await
-            .map_err(|err| MailboxSendFailure::MailboxClosed { envelope: err.0 })
+            mpsc::error::TrySendError::Closed(_) => SendError::MailboxClosed {
+                actor_id: self.actor_id.to_string(),
+            },
+        })
     }
 
-    pub(crate) fn try_send(&self, envelope: Envelope) -> Result<(), MailboxError> {
-        self.validate_envelope(&envelope)?;
-        self.sender
-            .try_send(envelope)
-            .map_err(|err| MailboxError::from_try_send(&self.actor_id, err))
-    }
-
-    pub(crate) fn blocking_send(&self, envelope: Envelope) -> Result<(), MailboxError> {
-        self.try_send(envelope)
+    pub(crate) fn blocking_send(&self, message: M) -> Result<(), SendError> {
+        self.try_send(message)
     }
 
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
         self.sender.same_channel(&other.sender)
     }
-
-    fn validate_envelope(&self, envelope: &Envelope) -> Result<(), MailboxError> {
-        let Some(max_envelope_bytes) = self.max_envelope_bytes else {
-            return Ok(());
-        };
-
-        let envelope_len = envelope.as_slice().len();
-        if envelope_len <= max_envelope_bytes {
-            return Ok(());
-        }
-
-        Err(MailboxError::EnvelopeTooLarge {
-            actor_id: Arc::clone(&self.actor_id),
-            envelope_len,
-            max_envelope_bytes,
-        })
-    }
 }
 
-#[derive(Debug)]
-pub(crate) struct MailboxBinding {
-    current: watch::Sender<Option<MailboxRef>>,
+/// Long-lived binding slot for one actor's current mailbox.
+///
+/// [`ActorRef`](crate::ActorRef)s subscribe to this slot, so they
+/// transparently follow the current mailbox across graph reruns and per-actor
+/// restarts.
+pub(crate) struct BindingCore<M> {
+    actor_id: Arc<str>,
+    current: watch::Sender<Option<MailboxRef<M>>>,
+    observability: Arc<OnceLock<GraphObservability>>,
 }
 
-impl Default for MailboxBinding {
-    fn default() -> Self {
+impl<M> BindingCore<M> {
+    pub(crate) fn new(actor_id: Arc<str>) -> Self {
         let (current, _receiver) = watch::channel(None);
-        Self { current }
-    }
-}
-
-impl MailboxBinding {
-    pub(crate) fn bind(&self, mailbox: MailboxRef) -> bool {
-        self.current.send_replace(Some(mailbox)).is_none()
+        Self {
+            actor_id,
+            current,
+            observability: Arc::new(OnceLock::new()),
+        }
     }
 
-    pub(crate) fn clear(&self) -> bool {
-        self.current.send_replace(None).is_some()
+    pub(crate) fn actor_id(&self) -> &Arc<str> {
+        &self.actor_id
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<Option<MailboxRef>> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<Option<MailboxRef<M>>> {
         self.current.subscribe()
     }
+
+    pub(crate) fn observability_slot(&self) -> Arc<OnceLock<GraphObservability>> {
+        Arc::clone(&self.observability)
+    }
+
+    pub(crate) fn set_observability(&self, observability: GraphObservability) {
+        let _ = self.observability.set(observability);
+    }
+
+    fn bind(&self, mailbox: MailboxRef<M>) {
+        self.current.send_replace(Some(mailbox));
+    }
+
+    fn clear(&self) {
+        self.current.send_replace(None);
+    }
 }
 
-pub(crate) struct MailboxBindingGuard {
-    actor_id: Arc<str>,
-    binding: Arc<MailboxBinding>,
-    ingress_names: Vec<Arc<str>>,
+/// Binds a mailbox on creation and clears the binding when the actor's run
+/// ends.
+pub(crate) struct BindingGuard<M> {
+    core: Arc<BindingCore<M>>,
     observability: GraphObservability,
 }
 
-impl MailboxBindingGuard {
+impl<M> BindingGuard<M> {
     pub(crate) fn bind(
-        actor_id: Arc<str>,
-        binding: Arc<MailboxBinding>,
-        mailbox: MailboxRef,
-        ingress_names: Vec<Arc<str>>,
+        core: Arc<BindingCore<M>>,
+        mailbox: MailboxRef<M>,
         observability: GraphObservability,
     ) -> Self {
-        if binding.bind(mailbox) {
-            for ingress in &ingress_names {
-                observability.emit_ingress_bound(ingress, &actor_id);
-            }
-        }
-
+        core.bind(mailbox);
+        observability.emit_mailbox_bound(core.actor_id());
         Self {
-            actor_id,
-            binding,
-            ingress_names,
+            core,
             observability,
         }
     }
 }
 
-impl Drop for MailboxBindingGuard {
+impl<M> Drop for BindingGuard<M> {
     fn drop(&mut self) {
-        if self.binding.clear() {
-            for ingress in &self.ingress_names {
-                self.observability
-                    .emit_ingress_cleared(ingress, &self.actor_id);
-            }
-        }
+        self.core.clear();
+        self.observability
+            .emit_mailbox_cleared(self.core.actor_id());
     }
 }
