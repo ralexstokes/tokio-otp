@@ -20,6 +20,7 @@
 //! | [`ActorSet`] | Decomposed graph where actors can be run independently. |
 //! | [`RunnableActor`] | One actor plus stable binding for per-actor supervision. |
 //! | [`Actor`] | Typed actor definition. |
+//! | [`MessageHandler`] | Handler-style actor definition with a provided receive loop. |
 //! | [`ActorContext`] | Mailbox, registry, blocking tasks, and shutdown token visible to one actor. |
 //! | [`ActorRef`] | Cloneable stable typed mailbox sender. |
 //! | [`Reply`] | One-shot response channel carried inside request messages. |
@@ -34,6 +35,28 @@
 //! This is especially useful when the graph is hosted inside a supervised
 //! child task and can be restarted by `tokio-supervisor`, or when a graph is
 //! decomposed with [`Graph::into_actor_set`] for per-actor supervision.
+//!
+//! # Message loss at shutdown and restart
+//!
+//! [`ActorContext::recv`] is fail-fast during shutdown: it returns `None` as
+//! soon as shutdown is requested, even when messages are still queued. A
+//! hand-written actor loop that exits at that point drops those queued
+//! messages, and queued [`ActorRef::call`] requests observe
+//! [`CallError::ReplyDropped`].
+//!
+//! Actors that must finish queued work before stopping have two drain options:
+//! implement [`MessageHandler`] and return [`DrainPolicy::Drain`], or write a
+//! custom [`Actor::run`] loop that calls [`ActorContext::try_recv`] after
+//! shutdown. Drains are not separately time-bounded; graph-run actors are
+//! still limited by [`GraphBuilder::actor_shutdown_timeout`], and runnable
+//! actors hosted under `tokio-supervisor` are limited by the child shutdown
+//! policy.
+//!
+//! Restarts also lose queued messages. Each actor run binds a fresh mailbox,
+//! so messages queued behind a poison message are dropped with the old
+//! mailbox. [`ActorRef::send_when_ready`] retries across the restart window,
+//! but it does not resurrect messages that were already accepted by the old
+//! mailbox.
 //!
 //! # Observability
 //!
@@ -64,7 +87,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, Reply};
+//! use tokio_actor::{ActorContext, ActorResult, GraphBuilder, MessageHandler, Reply};
 //!
 //! enum CounterMsg {
 //!     Add(u64),
@@ -72,18 +95,21 @@
 //! }
 //!
 //! #[derive(Clone)]
-//! struct Counter;
+//! struct Counter {
+//!     total: u64,
+//! }
 //!
-//! impl Actor for Counter {
+//! impl MessageHandler for Counter {
 //!     type Msg = CounterMsg;
 //!
-//!     async fn run(&self, mut ctx: ActorContext<CounterMsg>) -> ActorResult {
-//!         let mut total = 0;
-//!         while let Some(message) = ctx.recv().await {
-//!             match message {
-//!                 CounterMsg::Add(n) => total += n,
-//!                 CounterMsg::Total(reply) => reply.send(total),
-//!             }
+//!     async fn handle(
+//!         &mut self,
+//!         message: CounterMsg,
+//!         _ctx: &ActorContext<CounterMsg>,
+//!     ) -> ActorResult {
+//!         match message {
+//!             CounterMsg::Add(n) => self.total += n,
+//!             CounterMsg::Total(reply) => reply.send(self.total),
 //!         }
 //!         Ok(())
 //!     }
@@ -93,7 +119,7 @@
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut builder = GraphBuilder::new();
 //! builder.name("example");
-//! let counter = builder.actor("counter", Counter);
+//! let counter = builder.actor("counter", Counter { total: 0 });
 //! let graph = builder.build().expect("valid graph");
 //!
 //! let handle = graph.spawn()?;
@@ -121,6 +147,7 @@ mod builder;
 mod context;
 mod error;
 mod graph;
+mod handler;
 mod observability;
 mod registry;
 
@@ -128,9 +155,9 @@ pub mod prelude {
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
-        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BuildError, CallError, Graph,
-        GraphBuilder, GraphError, GraphHandle, LookupError, RegistryError, Reply, RunnableActor,
-        RunnableActorFactory, SendError, SpawnBlockingError,
+        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BuildError, CallError, DrainPolicy,
+        Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler, RegistryError,
+        Reply, RunnableActor, RunnableActorFactory, SendError, SpawnBlockingError, TryRecvError,
     };
 }
 
@@ -144,4 +171,6 @@ pub use builder::GraphBuilder;
 pub use context::{ActorContext, ActorRef, Reply};
 pub use error::{BuildError, CallError, GraphError, LookupError, SendError};
 pub use graph::{Graph, GraphHandle};
+pub use handler::{DrainPolicy, MessageHandler};
 pub use registry::{ActorRegistry, RegistryError};
+pub use tokio::sync::mpsc::error::TryRecvError;

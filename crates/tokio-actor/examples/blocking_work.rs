@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
+use tokio_actor::{ActorContext, ActorResult, BlockingOptions, GraphBuilder, MessageHandler};
 
 enum WorkMsg {
     Process(String),
@@ -13,23 +13,21 @@ struct Worker {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for Worker {
+impl MessageHandler for Worker {
     type Msg = WorkMsg;
 
-    async fn run(&self, mut ctx: ActorContext<WorkMsg>) -> ActorResult {
-        while let Some(message) = ctx.recv().await {
-            match message {
-                WorkMsg::Process(input) => {
-                    ctx.run_blocking(BlockingOptions::named("uppercase"), move |job| {
-                        let output = input.to_uppercase();
-                        job.myself().blocking_send(WorkMsg::Finished(output))?;
-                        Ok(())
-                    })
-                    .await?;
-                }
-                WorkMsg::Finished(output) => {
-                    self.observed.send(output).expect("receiver alive");
-                }
+    async fn handle(&mut self, message: WorkMsg, ctx: &ActorContext<WorkMsg>) -> ActorResult {
+        match message {
+            WorkMsg::Process(input) => {
+                ctx.run_blocking(BlockingOptions::named("uppercase"), move |job| {
+                    let output = input.to_uppercase();
+                    job.myself().blocking_send(WorkMsg::Finished(output))?;
+                    Ok(())
+                })
+                .await?;
+            }
+            WorkMsg::Finished(output) => {
+                self.observed.send(output).expect("receiver alive");
             }
         }
         Ok(())

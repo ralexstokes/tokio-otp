@@ -10,6 +10,11 @@ pub type ActorResult = Result<(), BoxError>;
 
 /// Async actor interface with a typed mailbox.
 ///
+/// [`MessageHandler`](crate::MessageHandler) is the recommended starting
+/// point for ordinary actors: it provides the receive loop, lifecycle hooks,
+/// and shutdown drain policy. Implement `Actor` directly when an actor needs
+/// custom loop control.
+///
 /// Implementors can use
 /// `async fn run(&self, ctx: ActorContext<Self::Msg>) -> ActorResult` in their
 /// trait impls. The actor value is cloned for each graph run.

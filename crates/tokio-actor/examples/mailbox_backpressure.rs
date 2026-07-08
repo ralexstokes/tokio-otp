@@ -8,6 +8,8 @@ struct ParkBeforeRecv {
     release: Arc<Notify>,
 }
 
+// Direct `Actor` remains the escape hatch when an actor needs custom loop
+// control. This example parks before receiving so the mailbox visibly fills.
 impl Actor for ParkBeforeRecv {
     type Msg = &'static str;
 

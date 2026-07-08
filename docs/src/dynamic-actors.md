@@ -5,24 +5,22 @@
 `ActorRegistry`, so other actors can discover it with a typed lookup.
 
 ```rust,no_run
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder};
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, MessageHandler};
 use tokio_otp::{DynamicActorOptions, SupervisedActors};
 use tokio_supervisor::{Strategy, SupervisorBuilder};
 
 #[derive(Clone)]
 struct FrontDesk;
 
-impl Actor for FrontDesk {
+impl MessageHandler for FrontDesk {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            let mut rush = ctx
-                .registry()
-                .expect("registry installed")
-                .actor_ref::<String>("rush-press")?;
-            rush.send_when_ready(order).await?;
-        }
+    async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
+        let mut rush = ctx
+            .registry()
+            .expect("registry installed")
+            .actor_ref::<String>("rush-press")?;
+        rush.send_when_ready(order).await?;
         Ok(())
     }
 }
@@ -30,13 +28,11 @@ impl Actor for FrontDesk {
 #[derive(Clone)]
 struct RushPress;
 
-impl Actor for RushPress {
+impl MessageHandler for RushPress {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            println!("RUSH printed {order}");
-        }
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        println!("RUSH printed {order}");
         Ok(())
     }
 }

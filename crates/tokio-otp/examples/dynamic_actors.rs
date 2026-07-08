@@ -1,7 +1,7 @@
 use std::{error::Error, marker::PhantomData};
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder};
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, MessageHandler};
 use tokio_otp::{DynamicActorOptions, SupervisedActors};
 use tokio_supervisor::{Strategy, SupervisorBuilder};
 
@@ -31,17 +31,15 @@ impl<M: Send + 'static> Actor for Drain<M> {
 #[derive(Clone)]
 struct Frontend;
 
-impl Actor for Frontend {
+impl MessageHandler for Frontend {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            let mut rush = ctx
-                .registry()
-                .expect("registry installed")
-                .actor_ref::<String>("rush-press")?;
-            rush.send_when_ready(order).await?;
-        }
+    async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
+        let mut rush = ctx
+            .registry()
+            .expect("registry installed")
+            .actor_ref::<String>("rush-press")?;
+        rush.send_when_ready(order).await?;
         Ok(())
     }
 }
@@ -51,13 +49,11 @@ struct RushPress {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for RushPress {
+impl MessageHandler for RushPress {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            self.observed.send(order).expect("receiver alive");
-        }
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        self.observed.send(order).expect("receiver alive");
         Ok(())
     }
 }

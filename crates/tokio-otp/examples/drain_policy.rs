@@ -1,0 +1,75 @@
+use std::{error::Error, sync::Arc};
+
+use tokio::sync::{Notify, mpsc};
+use tokio_otp::prelude::*;
+
+const JOBS: usize = 5;
+
+enum Msg {
+    Hold,
+    Job(usize),
+}
+
+#[derive(Clone)]
+struct Worker {
+    started: mpsc::UnboundedSender<()>,
+    release: Arc<Notify>,
+    handled: mpsc::UnboundedSender<usize>,
+}
+
+impl MessageHandler for Worker {
+    type Msg = Msg;
+
+    async fn handle(&mut self, message: Msg, _ctx: &ActorContext<Msg>) -> ActorResult {
+        match message {
+            Msg::Hold => {
+                self.started.send(()).expect("receiver alive");
+                self.release.notified().await;
+            }
+            Msg::Job(job) => {
+                self.handled.send(job).expect("receiver alive");
+            }
+        }
+        Ok(())
+    }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        DrainPolicy::Drain
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let release = Arc::new(Notify::new());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (handled_tx, mut handled_rx) = mpsc::unbounded_channel();
+
+    let mut builder = GraphBuilder::new();
+    let worker = builder.actor(
+        "worker",
+        Worker {
+            started: started_tx,
+            release: release.clone(),
+            handled: handled_tx,
+        },
+    );
+    let graph = builder.build()?;
+
+    let handle = graph.spawn()?;
+    worker.send(Msg::Hold).await?;
+    started_rx.recv().await.expect("worker entered hold");
+
+    for job in 1..=JOBS {
+        worker.send(Msg::Job(job)).await?;
+    }
+
+    handle.shutdown();
+    release.notify_one();
+
+    for _ in 0..JOBS {
+        println!("handled {}", handled_rx.recv().await.expect("drained job"));
+    }
+
+    handle.wait().await?;
+    Ok(())
+}

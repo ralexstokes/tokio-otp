@@ -15,14 +15,12 @@ struct FrontDesk {
     press: ActorRef<String>,
 }
 
-impl Actor for FrontDesk {
+impl MessageHandler for FrontDesk {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            let mut press = self.press.clone();
-            press.send_when_ready(order).await?;
-        }
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        let mut press = self.press.clone();
+        press.send_when_ready(order).await?;
         Ok(())
     }
 }
@@ -30,19 +28,22 @@ impl Actor for FrontDesk {
 #[derive(Clone)]
 struct Press {
     runs: Arc<AtomicUsize>,
+    run: usize,
 }
 
-impl Actor for Press {
+impl MessageHandler for Press {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        let run = self.runs.fetch_add(1, Ordering::SeqCst);
-        while let Some(order) = ctx.recv().await {
-            if run == 0 && order.contains("origami") {
-                return Err::<(), BoxError>(Box::new(io::Error::other("paper jam")));
-            }
-            println!("printed {order}");
+    async fn on_start(&mut self, _ctx: &ActorContext<String>) -> ActorResult {
+        self.run = self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        if self.run == 0 && order.contains("origami") {
+            return Err::<(), BoxError>(Box::new(io::Error::other("paper jam")));
         }
+        println!("printed {order}");
         Ok(())
     }
 }
@@ -52,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = GraphBuilder::new();
     let press_ref = builder.declare::<String>("press");
     let mut orders = builder.actor("front-desk", FrontDesk { press: press_ref });
-    builder.actor("press", Press { runs: Arc::new(AtomicUsize::new(0)) });
+    builder.actor("press", Press { runs: Arc::new(AtomicUsize::new(0)), run: 0 });
     let graph = builder.build()?;
 
     let runtime = Runtime::builder()
@@ -62,12 +63,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .restart_intensity(RestartIntensity::new(5, Duration::from_secs(60)))
         .build()?;
     let handle = runtime.spawn();
+    let mut events = handle.subscribe();
 
     orders.send_when_ready("business cards x100".into()).await?;
     orders.send_when_ready("origami cranes x1000".into()).await?;
+    loop {
+        let event = events.recv().await?;
+        if matches!(
+            &event,
+            SupervisorEvent::ChildStarted { id, generation } if id == "press" && *generation > 0
+        ) {
+            break;
+        }
+    }
     orders.send_when_ready("flyers x500".into()).await?;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
     handle.shutdown_and_wait().await?;
     Ok(())
 }
@@ -76,6 +86,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `Runtime::builder()` is the front door for the common case: it decomposes the
 graph, applies uniform policies to every actor child, and packages the result
 into a `Runtime` with a supervisor, registry, and dynamic actor support.
+
+The restart wait before sending `flyers x500` is deliberate. A worker gets a
+fresh mailbox on restart; anything queued behind the crashing `origami` order
+would be dropped with the old mailbox. `send_when_ready` helps while the actor
+is unbound, but it cannot recover messages already accepted by the failed run.
 
 When you need per-actor policies — say a tighter restart budget for the press
 alone — drop down to `SupervisedActors`, which the builder uses under the

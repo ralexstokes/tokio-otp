@@ -8,23 +8,21 @@ use std::{
 };
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder};
+use tokio_actor::{ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, MessageHandler};
 use tokio_otp::SupervisedActors;
-use tokio_supervisor::{Restart, RestartIntensity, Strategy, SupervisorBuilder};
+use tokio_supervisor::{Restart, RestartIntensity, Strategy, SupervisorBuilder, SupervisorEvent};
 
 #[derive(Clone)]
 struct Frontend {
     worker: ActorRef<String>,
 }
 
-impl Actor for Frontend {
+impl MessageHandler for Frontend {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            let mut worker = self.worker.clone();
-            worker.send_when_ready(order).await?;
-        }
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        let mut worker = self.worker.clone();
+        worker.send_when_ready(order).await?;
         Ok(())
     }
 }
@@ -33,19 +31,22 @@ impl Actor for Frontend {
 struct Worker {
     runs: Arc<AtomicUsize>,
     observed: mpsc::UnboundedSender<String>,
+    run: usize,
 }
 
-impl Actor for Worker {
+impl MessageHandler for Worker {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        let run = self.runs.fetch_add(1, Ordering::SeqCst);
-        while let Some(order) = ctx.recv().await {
-            if run == 0 && order == "fail-worker" {
-                return Err::<(), BoxError>(Box::new(io::Error::other("worker failed")));
-            }
-            self.observed.send(order).expect("receiver alive");
+    async fn on_start(&mut self, _ctx: &ActorContext<String>) -> ActorResult {
+        self.run = self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        if self.run == 0 && order == "fail-worker" {
+            return Err::<(), BoxError>(Box::new(io::Error::other("worker failed")));
         }
+        self.observed.send(order).expect("receiver alive");
         Ok(())
     }
 }
@@ -61,6 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Worker {
             runs: Arc::new(AtomicUsize::new(0)),
             observed: observed_tx,
+            run: 0,
         },
     );
     let graph = builder.build()?;
@@ -80,9 +82,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .build()?;
     let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
 
     frontend.wait_for_binding().await;
     frontend.send("fail-worker".to_owned()).await?;
+    loop {
+        let event = events.recv().await?;
+        if matches!(
+            &event,
+            SupervisorEvent::ChildStarted { id, generation } if id == "worker" && *generation > 0
+        ) {
+            break;
+        }
+    }
     frontend.send("after-restart".to_owned()).await?;
     println!("observed {}", observed_rx.recv().await.expect("message"));
 

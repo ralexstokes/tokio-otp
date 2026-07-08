@@ -21,13 +21,11 @@ use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedAc
 /// #[derive(Clone)]
 /// struct Echo;
 ///
-/// impl Actor for Echo {
+/// impl MessageHandler for Echo {
 ///     type Msg = String;
 ///
-///     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-///         while let Some(message) = ctx.recv().await {
-///             println!("{message}");
-///         }
+///     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
+///         println!("{message}");
 ///         Ok(())
 ///     }
 /// }

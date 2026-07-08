@@ -8,7 +8,7 @@ There are no string-addressed sends and no byte envelope type. If the front
 desk sends orders to the press, the front desk owns an `ActorRef<Order>`.
 
 ```rust,no_run
-use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, GraphBuilder, Reply};
+use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, MessageHandler, Reply};
 
 struct Order(String);
 struct Parcel(String);
@@ -23,13 +23,11 @@ struct FrontDesk {
     press: ActorRef<Order>,
 }
 
-impl Actor for FrontDesk {
+impl MessageHandler for FrontDesk {
     type Msg = Order;
 
-    async fn run(&self, mut ctx: ActorContext<Order>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            self.press.send(order).await?;
-        }
+    async fn handle(&mut self, order: Order, _ctx: &ActorContext<Order>) -> ActorResult {
+        self.press.send(order).await?;
         Ok(())
     }
 }
@@ -39,35 +37,36 @@ struct Press {
     shipping: ActorRef<ShippingMsg>,
 }
 
-impl Actor for Press {
+impl MessageHandler for Press {
     type Msg = Order;
 
-    async fn run(&self, mut ctx: ActorContext<Order>) -> ActorResult {
-        while let Some(Order(order)) = ctx.recv().await {
-            self.shipping
-                .send(ShippingMsg::Ship(Parcel(format!("printed[{order}]"))))
-                .await?;
-        }
+    async fn handle(&mut self, Order(order): Order, _ctx: &ActorContext<Order>) -> ActorResult {
+        self.shipping
+            .send(ShippingMsg::Ship(Parcel(format!("printed[{order}]"))))
+            .await?;
         Ok(())
     }
 }
 
-#[derive(Clone)]
-struct Shipping;
+#[derive(Clone, Default)]
+struct Shipping {
+    shipped: usize,
+}
 
-impl Actor for Shipping {
+impl MessageHandler for Shipping {
     type Msg = ShippingMsg;
 
-    async fn run(&self, mut ctx: ActorContext<ShippingMsg>) -> ActorResult {
-        let mut shipped = 0;
-        while let Some(message) = ctx.recv().await {
-            match message {
-                ShippingMsg::Ship(Parcel(parcel)) => {
-                    shipped += 1;
-                    println!("shipping: {parcel}");
-                }
-                ShippingMsg::Total(reply) => reply.send(shipped),
+    async fn handle(
+        &mut self,
+        message: ShippingMsg,
+        _ctx: &ActorContext<ShippingMsg>,
+    ) -> ActorResult {
+        match message {
+            ShippingMsg::Ship(Parcel(parcel)) => {
+                self.shipped += 1;
+                println!("shipping: {parcel}");
             }
+            ShippingMsg::Total(reply) => reply.send(self.shipped),
         }
         Ok(())
     }
@@ -82,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let press = builder.declare::<Order>("press");
     let orders = builder.actor("front-desk", FrontDesk { press: press.clone() });
     builder.actor("press", Press { shipping: shipping.clone() });
-    builder.actor("shipping", Shipping);
+    builder.actor("shipping", Shipping::default());
     let graph = builder.build()?;
 
     let handle = graph.spawn()?;
@@ -130,6 +129,24 @@ The builder validates:
 Refs are bound to long-lived mailbox bindings, not one actor incarnation. A
 ref minted before `build()` keeps working across graph reruns and per-actor
 restarts under `tokio-otp`.
+
+## Message Loss at Shutdown and Restart
+
+`MessageHandler` is the usual actor interface: you implement `handle`, and the
+framework owns the receive loop. Its default shutdown behavior is fail-fast:
+when shutdown is requested, queued messages are dropped and queued `call`
+requests see `CallError::ReplyDropped`.
+
+If an actor must finish messages already accepted by its mailbox, return
+`DrainPolicy::Drain` from `drain_policy`. Hand-written `Actor::run` loops are
+still available as the escape hatch for custom loop control; after
+`ctx.recv().await` returns `None` because shutdown was requested, such actors
+can use `ctx.try_recv()` to drain immediately queued messages.
+
+Restarts have the same loss boundary. Each actor run binds a fresh mailbox, so
+messages queued behind the message that makes an actor crash are lost with the
+old mailbox. `send_when_ready` retries while an actor is between bindings, but
+it cannot recover messages that were already accepted by the old run.
 
 ## Blocking Work
 

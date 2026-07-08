@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder};
+use tokio_actor::{ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, MessageHandler};
 use tokio_otp::SupervisedActors;
 use tokio_supervisor::{RestartIntensity, Strategy, SupervisorBuilder};
 
@@ -19,14 +19,12 @@ struct Frontend {
     worker: ActorRef<String>,
 }
 
-impl Actor for Frontend {
+impl MessageHandler for Frontend {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(message) = ctx.recv().await {
-            let mut worker = self.worker.clone();
-            worker.send_when_ready(message).await?;
-        }
+    async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
+        let mut worker = self.worker.clone();
+        worker.send_when_ready(message).await?;
         Ok(())
     }
 }
@@ -34,18 +32,21 @@ impl Actor for Frontend {
 #[derive(Clone)]
 struct Worker {
     runs: Arc<AtomicUsize>,
+    run: usize,
 }
 
-impl Actor for Worker {
+impl MessageHandler for Worker {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        let run = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
-        while let Some(message) = ctx.recv().await {
-            println!("worker generation {run} received `{message}`");
-            if message.contains("fail") {
-                return Err::<(), BoxError>(Box::new(io::Error::other("simulated failure")));
-            }
+    async fn on_start(&mut self, _ctx: &ActorContext<String>) -> ActorResult {
+        self.run = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(())
+    }
+
+    async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
+        println!("worker generation {} received `{message}`", self.run);
+        if message.contains("fail") {
+            return Err::<(), BoxError>(Box::new(io::Error::other("simulated failure")));
         }
         Ok(())
     }
@@ -60,6 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "worker",
         Worker {
             runs: Arc::new(AtomicUsize::new(0)),
+            run: 0,
         },
     );
     let graph = builder.build()?;

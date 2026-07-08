@@ -30,14 +30,12 @@ struct FrontDesk {
     press: ActorRef<String>,
 }
 
-impl Actor for FrontDesk {
+impl MessageHandler for FrontDesk {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            let mut press = self.press.clone();
-            press.send_when_ready(order).await?;
-        }
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        let mut press = self.press.clone();
+        press.send_when_ready(order).await?;
         Ok(())
     }
 }

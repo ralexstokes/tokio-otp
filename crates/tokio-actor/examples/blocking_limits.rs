@@ -2,7 +2,7 @@ use std::{error::Error, thread, time::Duration};
 
 use tokio::sync::mpsc;
 use tokio_actor::{
-    Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder, SpawnBlockingError,
+    ActorContext, ActorResult, BlockingOptions, GraphBuilder, MessageHandler, SpawnBlockingError,
 };
 
 #[derive(Clone)]
@@ -10,26 +10,24 @@ struct Worker {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for Worker {
+impl MessageHandler for Worker {
     type Msg = ();
 
-    async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
-        while ctx.recv().await.is_some() {
-            let _first = ctx.spawn_blocking(BlockingOptions::named("held"), |_job| {
-                thread::sleep(Duration::from_millis(250));
-                Ok(())
-            })?;
-            match ctx.spawn_blocking(BlockingOptions::named("rejected"), |_job| Ok(())) {
-                Err(SpawnBlockingError::AtCapacity { actor_id, .. }) => {
-                    self.observed
-                        .send(format!("`{actor_id}` is at blocking capacity"))
-                        .expect("receiver alive");
-                }
-                other => self
-                    .observed
-                    .send(format!("unexpected result: {other:?}"))
-                    .expect("receiver alive"),
+    async fn handle(&mut self, _message: (), ctx: &ActorContext<()>) -> ActorResult {
+        let _first = ctx.spawn_blocking(BlockingOptions::named("held"), |_job| {
+            thread::sleep(Duration::from_millis(250));
+            Ok(())
+        })?;
+        match ctx.spawn_blocking(BlockingOptions::named("rejected"), |_job| Ok(())) {
+            Err(SpawnBlockingError::AtCapacity { actor_id, .. }) => {
+                self.observed
+                    .send(format!("`{actor_id}` is at blocking capacity"))
+                    .expect("receiver alive");
             }
+            other => self
+                .observed
+                .send(format!("unexpected result: {other:?}"))
+                .expect("receiver alive"),
         }
         Ok(())
     }

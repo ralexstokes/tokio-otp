@@ -1,7 +1,9 @@
 use std::{error::Error, marker::PhantomData};
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult, Graph, GraphBuilder, GraphError, SendError};
+use tokio_actor::{
+    ActorContext, ActorResult, Graph, GraphBuilder, GraphError, MessageHandler, SendError,
+};
 use tokio_util::sync::CancellationToken;
 
 struct Observe<M> {
@@ -27,13 +29,11 @@ impl<M> Clone for Observe<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Observe<M> {
+impl<M: Send + 'static> MessageHandler for Observe<M> {
     type Msg = M;
 
-    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
-        while let Some(message) = ctx.recv().await {
-            self.observed.send(message).expect("receiver alive");
-        }
+    async fn handle(&mut self, message: M, _ctx: &ActorContext<M>) -> ActorResult {
+        self.observed.send(message).expect("receiver alive");
         Ok(())
     }
 }

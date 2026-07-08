@@ -1,20 +1,22 @@
 use std::{error::Error, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, SendError};
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, MessageHandler, SendError};
 
 #[derive(Clone)]
 struct Sink {
     observed: mpsc::UnboundedSender<&'static str>,
 }
 
-impl Actor for Sink {
+impl MessageHandler for Sink {
     type Msg = &'static str;
 
-    async fn run(&self, mut ctx: ActorContext<&'static str>) -> ActorResult {
-        while let Some(message) = ctx.recv().await {
-            self.observed.send(message).expect("receiver alive");
-        }
+    async fn handle(
+        &mut self,
+        message: &'static str,
+        _ctx: &ActorContext<&'static str>,
+    ) -> ActorResult {
+        self.observed.send(message).expect("receiver alive");
         Ok(())
     }
 }

@@ -4,14 +4,36 @@
 //! For the common setup — every actor of a graph running as its own
 //! supervised child — you need one import and one builder:
 //!
-//! ```ignore
+//! ```no_run
 //! use tokio_otp::prelude::*;
 //!
+//! #[derive(Clone)]
+//! struct Echo;
+//!
+//! impl MessageHandler for Echo {
+//!     type Msg = String;
+//!
+//!     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
+//!         println!("{message}");
+//!         Ok(())
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut graph = GraphBuilder::new();
+//! let mut echo = graph.actor("echo", Echo);
+//!
 //! let runtime = Runtime::builder()
-//!     .graph(graph)
+//!     .graph(graph.build()?)
 //!     .strategy(Strategy::OneForOne)
 //!     .build()?;
 //! let handle = runtime.spawn();
+//!
+//! echo.send_when_ready("hello".to_owned()).await?;
+//! handle.shutdown_and_wait().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! See [`RuntimeBuilder`] for a complete example. The [`prelude`] re-exports
@@ -46,6 +68,8 @@
 //!
 //! - `examples/supervised_actors.rs` — per-actor supervision with default
 //!   policies.
+//! - `examples/drain_policy.rs` — draining queued actor messages during
+//!   shutdown.
 //! - `examples/individual_actor_policies.rs` — per-actor restart/shutdown
 //!   overrides.
 //! - `examples/dynamic_actors.rs` — adding and removing actors at runtime.
@@ -66,7 +90,8 @@ mod supervised_graph;
 pub mod prelude {
     pub use tokio_actor::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        BoxError, Graph, GraphBuilder, LookupError, Reply, RunnableActor, RunnableActorFactory,
+        BoxError, DrainPolicy, Graph, GraphBuilder, LookupError, MessageHandler, Reply,
+        RunnableActor, RunnableActorFactory,
     };
     pub use tokio_supervisor::{
         ChildContext, ChildSpec, Restart, RestartIntensity, ShutdownMode, ShutdownPolicy, Strategy,
@@ -87,3 +112,4 @@ pub use error::{BuildError, DynamicActorError};
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
 pub use supervised_actors::SupervisedActors;
 pub use supervised_graph::SupervisedGraph;
+pub use tokio_actor::{DrainPolicy, MessageHandler};

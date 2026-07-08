@@ -3,7 +3,10 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{
+    mpsc::{self, error::TryRecvError},
+    oneshot, watch,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -330,6 +333,14 @@ impl<M: Send + 'static> ActorContext<M> {
 
     /// Waits for the next mailbox message, or `None` once shutdown has been
     /// requested or the mailbox has been closed.
+    ///
+    /// Shutdown is checked first: as soon as shutdown is requested this
+    /// returns `None`, even when messages are still queued. Queued messages
+    /// are dropped when the actor exits unless the actor drains them with
+    /// [`try_recv`](Self::try_recv), or uses [`MessageHandler`](crate::MessageHandler)
+    /// with [`DrainPolicy::Drain`](crate::DrainPolicy). Queued
+    /// [`call`](ActorRef::call)s whose reply messages are dropped observe
+    /// [`CallError::ReplyDropped`](crate::CallError::ReplyDropped).
     pub async fn recv(&mut self) -> Option<M> {
         let message = tokio::select! {
             biased;
@@ -341,6 +352,26 @@ impl<M: Send + 'static> ActorContext<M> {
             self.observability.emit_message_received(&self.id);
         }
 
+        message
+    }
+
+    /// Attempts to receive a queued message without waiting and without
+    /// consulting the shutdown token.
+    ///
+    /// This is intended for drain-then-exit loops in hand-written
+    /// [`Actor::run`](crate::Actor::run) implementations: after
+    /// [`recv`](Self::recv) returns `None` because shutdown was requested,
+    /// queued messages remain readable here.
+    ///
+    /// A returned [`TryRecvError::Empty`] means no message is immediately
+    /// available; it does not prove the mailbox is fully drained while senders
+    /// hold permits. For typical actors, prefer [`MessageHandler`] with
+    /// [`DrainPolicy::Drain`] so the framework owns the drain loop.
+    pub fn try_recv(&mut self) -> Result<M, TryRecvError> {
+        let message = self.mailbox.try_recv();
+        if message.is_ok() {
+            self.observability.emit_message_received(&self.id);
+        }
         message
     }
 

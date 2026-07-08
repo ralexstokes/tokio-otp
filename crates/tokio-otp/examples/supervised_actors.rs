@@ -15,14 +15,12 @@ struct Frontend {
     worker: ActorRef<String>,
 }
 
-impl Actor for Frontend {
+impl MessageHandler for Frontend {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        while let Some(order) = ctx.recv().await {
-            let mut worker = self.worker.clone();
-            worker.send_when_ready(order).await?;
-        }
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        let mut worker = self.worker.clone();
+        worker.send_when_ready(order).await?;
         Ok(())
     }
 }
@@ -31,19 +29,22 @@ impl Actor for Frontend {
 struct Worker {
     runs: Arc<AtomicUsize>,
     delivered: mpsc::UnboundedSender<String>,
+    run: usize,
 }
 
-impl Actor for Worker {
+impl MessageHandler for Worker {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
-        let run = self.runs.fetch_add(1, Ordering::SeqCst);
-        while let Some(order) = ctx.recv().await {
-            if run == 0 && order.contains("jam") {
-                return Err::<(), BoxError>(Box::new(io::Error::other("press jam")));
-            }
-            self.delivered.send(order).expect("receiver alive");
+    async fn on_start(&mut self, _ctx: &ActorContext<String>) -> ActorResult {
+        self.run = self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
+        if self.run == 0 && order.contains("jam") {
+            return Err::<(), BoxError>(Box::new(io::Error::other("press jam")));
         }
+        self.delivered.send(order).expect("receiver alive");
         Ok(())
     }
 }
@@ -59,6 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Worker {
             runs: Arc::new(AtomicUsize::new(0)),
             delivered: delivered_tx,
+            run: 0,
         },
     );
     let graph = builder.build()?;
