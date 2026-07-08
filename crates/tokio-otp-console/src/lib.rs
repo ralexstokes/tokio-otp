@@ -10,17 +10,17 @@
 //! use tokio_otp_console::Console;
 //! # use tokio::sync::{broadcast, watch};
 //! # use tokio_supervisor::{SupervisorSnapshot, SupervisorEvent, SupervisorStateView, Strategy};
+//! #
+//! # #[tokio::main]
+//! # async fn main() {
 //! # let snapshot = SupervisorSnapshot {
 //! #     state: SupervisorStateView::Running,
 //! #     last_exit: None,
 //! #     strategy: Strategy::OneForOne,
 //! #     children: vec![],
 //! # };
-//! # let (snap_tx, snap_rx) = watch::channel(snapshot);
+//! # let (_snap_tx, snap_rx) = watch::channel(snapshot);
 //! # let (evt_tx, _) = broadcast::channel(64);
-//!
-//! # #[tokio::main]
-//! # async fn main() {
 //! let handle = Console::builder()
 //!     .snapshots(snap_rx)
 //!     .events(evt_tx)

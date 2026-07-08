@@ -65,4 +65,12 @@ in
       cargoExtraArgs = "--locked --workspace --all-targets --all-features";
     }
   );
+
+  cargo-doctest = craneLibStable.cargoTest (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      cargoExtraArgs = "--locked --workspace --doc --all-features";
+    }
+  );
 }

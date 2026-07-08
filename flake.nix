@@ -65,6 +65,7 @@
             git
             just
             mdbook
+            nixfmt
             ripgrep
             rustup
             rustToolchain

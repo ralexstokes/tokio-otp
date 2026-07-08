@@ -69,11 +69,6 @@ common supervised-actor setup.
 
 ## 5. Housekeeping
 
-- The `tokio-otp-console` doctest (`src/lib.rs` usage example) does not
-  compile: the hidden `let` bindings sit outside the hidden
-  `#[tokio::main] async fn main()` wrapper (E0434). It escapes CI because
-  the console crate is not in `default-members` and `--all-targets` skips
-  doctests.
 - Example output filename collisions: both `tokio-supervisor` and
   `tokio-actor` have examples named `metrics` and `tracing`; cargo warns
   this will become a hard error. Rename one pair.
