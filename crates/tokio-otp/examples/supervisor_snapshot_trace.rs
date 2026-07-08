@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::mpsc;
 use tokio_actor::{ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, MessageHandler};
 use tokio_otp::SupervisedActors;
 use tokio_supervisor::{RestartIntensity, Strategy, SupervisorBuilder};
@@ -31,6 +32,7 @@ impl MessageHandler for Frontend {
 struct Worker {
     runs: Arc<AtomicUsize>,
     run: usize,
+    processed: mpsc::UnboundedSender<String>,
 }
 
 impl MessageHandler for Worker {
@@ -46,12 +48,14 @@ impl MessageHandler for Worker {
         if message == "fail-worker" {
             return Err::<(), BoxError>(Box::new(io::Error::other("simulated failure")));
         }
+        let _ = self.processed.send(message);
         Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let (processed_tx, mut processed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     let worker_ref = builder.declare::<String>("worker");
     let frontend = builder.actor("frontend", Frontend { worker: worker_ref });
@@ -60,6 +64,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Worker {
             runs: Arc::new(AtomicUsize::new(0)),
             run: 0,
+            processed: processed_tx,
         },
     );
     let graph = builder.build()?;
@@ -82,6 +87,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     frontend.send("fail-worker".to_owned()).await?;
     restart.await?;
     frontend.send("after-restart".to_owned()).await?;
+
+    // Wait for the worker to finish the last order before shutting down.
+    // Shutdown cancels every child at once; a frontend caught mid-forward
+    // would fail its handoff when the worker's binding terminates.
+    while let Some(message) = processed_rx.recv().await {
+        if message == "after-restart" {
+            break;
+        }
+    }
 
     snapshots.changed().await?;
     println!("snapshot: {:?}", snapshots.borrow().state);
