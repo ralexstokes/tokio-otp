@@ -2,7 +2,7 @@ use std::{marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, GraphBuilder, LookupError};
-use tokio_otp::{Runtime, SupervisedActors};
+use tokio_otp::{BuildError, Runtime, SupervisedActors};
 use tokio_supervisor::{Strategy, SupervisorBuilder, SupervisorExit, SupervisorStateView};
 
 struct Drain<M>(PhantomData<fn(M)>);
@@ -161,6 +161,63 @@ async fn runtime_handle_reports_unknown_actor_lookup() {
         .shutdown_and_wait()
         .await
         .expect("supervisor shut down cleanly");
+}
+
+#[tokio::test]
+async fn runtime_builder_wires_graph_into_supervised_runtime() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let mut builder = GraphBuilder::new();
+    let mut worker_ref = builder.actor(
+        "worker",
+        Observe {
+            observed: observed_tx,
+        },
+    );
+    let graph = builder.build().expect("valid graph");
+
+    let runtime = Runtime::builder()
+        .graph(graph)
+        .strategy(Strategy::OneForOne)
+        .build()
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+
+    // The builder path enables the dynamic registry.
+    assert_eq!(
+        handle
+            .actor_ref::<String>("worker")
+            .expect("registry ref exists")
+            .id(),
+        "worker"
+    );
+
+    worker_ref.wait_for_binding().await;
+    worker_ref
+        .send("built".to_owned())
+        .await
+        .expect("message sent");
+
+    let observed = timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect("worker observed the message")
+        .expect("worker is still running");
+    assert_eq!(observed, "built");
+
+    assert_eq!(
+        handle
+            .shutdown_and_wait()
+            .await
+            .expect("supervisor shut down cleanly"),
+        SupervisorExit::Shutdown
+    );
+}
+
+#[test]
+fn runtime_builder_requires_a_graph() {
+    assert!(matches!(
+        Runtime::builder().build(),
+        Err(BuildError::MissingGraph)
+    ));
 }
 
 #[tokio::test]

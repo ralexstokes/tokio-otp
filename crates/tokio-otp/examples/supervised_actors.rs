@@ -5,13 +5,10 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder};
-use tokio_otp::SupervisedActors;
-use tokio_supervisor::{Restart, Strategy, SupervisorBuilder};
+use tokio_otp::prelude::*;
 
 #[derive(Clone)]
 struct Frontend {
@@ -66,21 +63,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let graph = builder.build()?;
 
-    let runtime = SupervisedActors::new(graph)?
+    let runtime = Runtime::builder()
+        .graph(graph)
+        .strategy(Strategy::OneForOne)
         .restart(Restart::Transient)
-        .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
+        .build()?;
     let handle = runtime.spawn();
+    let mut events = handle.subscribe();
 
     orders.wait_for_binding().await;
     orders.send("business cards x100".to_owned()).await?;
-    orders.send("jam".to_owned()).await?;
-    orders.send("flyers x500".to_owned()).await?;
+    println!("delivered {}", delivered_rx.recv().await.expect("delivery"));
 
-    for _ in 0..2 {
-        println!("delivered {}", delivered_rx.recv().await.expect("delivery"));
+    // Crash the worker. Each run gets a fresh mailbox, so an order queued
+    // behind the jam would be lost with it — wait for the supervisor to
+    // restart the worker before sending more.
+    orders.send("jam".to_owned()).await?;
+    loop {
+        let event = events.recv().await?;
+        if matches!(
+            &event,
+            SupervisorEvent::ChildStarted { id, generation } if id == "worker" && *generation > 0
+        ) {
+            break;
+        }
     }
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    orders.send("flyers x500".to_owned()).await?;
+    println!("delivered {}", delivered_rx.recv().await.expect("delivery"));
+
     handle.shutdown_and_wait().await?;
     Ok(())
 }

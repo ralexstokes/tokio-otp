@@ -3,14 +3,7 @@
 High-level user-facing ergonomics improvements, ranked by impact. From a
 review of the public API surfaces, examples, and the tutorial book.
 
-## 1. Make `tokio-otp` unambiguously the front door
-
-Getting-started still tells users about multiple crates. Lead the book and
-README with `tokio-otp` + prelude, present the sub-crates as à la carte, and
-consider a single `Runtime::builder().graph(graph).strategy(...)` path for the
-common supervised-actor setup.
-
-## 2. Consistency / semantics polish
+## 1. Consistency / semantics polish
 
 - `ChildContext` exposes a public `ctx.token` field while `ActorContext` uses
   `ctx.shutdown_token()`; pick one convention across crates.
@@ -31,6 +24,12 @@ common supervised-actor setup.
   the mailbox is not otherwise reachable. In-flight `call`s at shutdown
   become `ReplyDropped`. Document the fail-fast semantics or add a
   non-blocking `try_recv` for drain-then-exit actors.
+- Crash-restart drops queued messages the same way: each run binds a fresh
+  mailbox, so anything queued behind the poison message is lost with the old
+  one. `examples/supervised_actors.rs` used to hang on this (it now waits for
+  the `ChildStarted` restart event before sending follow-ups), and the book's
+  supervised-actors example still silently loses its last order. Document the
+  loss semantics alongside the shutdown drain story.
 - `ActorRef::blocking_send` has try-send semantics, but tokio's
   `mpsc::Sender::blocking_send` blocks for capacity; the name imports the
   opposite expectation. Consider renaming (e.g. `send_from_blocking`) while
@@ -49,7 +48,7 @@ common supervised-actor setup.
   `build()` reports an empty graph name before any accumulated registration
   errors.
 
-## 3. Future actor ergonomics
+## 2. Future actor ergonomics
 
 - Named registry aliases, e.g. `builder.alias("orders", "front-desk")`, for
   friendlier external lookup names.

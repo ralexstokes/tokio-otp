@@ -1,0 +1,134 @@
+use tokio_actor::Graph;
+use tokio_supervisor::{Restart, RestartIntensity, ShutdownPolicy, Strategy, SupervisorBuilder};
+
+use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedActors};
+
+/// One-stop builder for the common supervised-actor setup.
+///
+/// Wires an actor [`Graph`] into a [`Runtime`] where every actor runs as its
+/// own supervised child, with dynamic actor support enabled. Created via
+/// [`Runtime::builder`].
+///
+/// For per-actor policy overrides, or to compose actor children into a larger
+/// supervision tree, drop down to [`SupervisedActors`] with a
+/// [`SupervisorBuilder`].
+///
+/// # Example
+///
+/// ```no_run
+/// use tokio_otp::prelude::*;
+///
+/// #[derive(Clone)]
+/// struct Echo;
+///
+/// impl Actor for Echo {
+///     type Msg = String;
+///
+///     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+///         while let Some(message) = ctx.recv().await {
+///             println!("{message}");
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut graph = GraphBuilder::new();
+/// let mut echo = graph.actor("echo", Echo);
+///
+/// let runtime = Runtime::builder()
+///     .graph(graph.build()?)
+///     .strategy(Strategy::OneForOne)
+///     .restart(Restart::Transient)
+///     .build()?;
+/// let handle = runtime.spawn();
+///
+/// echo.send_when_ready("hello".to_owned()).await?;
+/// handle.shutdown_and_wait().await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Default)]
+pub struct RuntimeBuilder {
+    graph: Option<Graph>,
+    strategy: Strategy,
+    restart: Restart,
+    shutdown: ShutdownPolicy,
+    restart_intensity: Option<RestartIntensity>,
+}
+
+impl RuntimeBuilder {
+    /// Creates a builder with default settings: [`OneForOne`](Strategy::OneForOne)
+    /// strategy, [`Transient`](Restart::Transient) restart, default shutdown
+    /// policy, and no graph.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the actor graph to run. Required.
+    #[must_use]
+    pub fn graph(mut self, graph: Graph) -> Self {
+        self.graph = Some(graph);
+        self
+    }
+
+    /// Sets the supervisor restart strategy. See [`Strategy`] for options.
+    #[must_use]
+    pub fn strategy(mut self, strategy: Strategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Sets the restart policy applied to every actor child.
+    #[must_use]
+    pub fn restart(mut self, restart: Restart) -> Self {
+        self.restart = restart;
+        self
+    }
+
+    /// Sets the shutdown policy applied to every actor child.
+    #[must_use]
+    pub fn shutdown(mut self, shutdown: ShutdownPolicy) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+
+    /// Sets the supervisor's default restart intensity.
+    #[must_use]
+    pub fn restart_intensity(mut self, intensity: RestartIntensity) -> Self {
+        self.restart_intensity = Some(intensity);
+        self
+    }
+
+    /// Validates the configuration and returns a ready-to-run [`Runtime`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError::MissingGraph`] if no graph was provided, or any
+    /// error from decomposing the graph and building the supervisor.
+    pub fn build(self) -> Result<Runtime, BuildError> {
+        let graph = self.graph.ok_or(BuildError::MissingGraph)?;
+        let actors = SupervisedActors::new(graph)?
+            .restart(self.restart)
+            .shutdown(self.shutdown);
+
+        let mut supervisor = SupervisorBuilder::new().strategy(self.strategy);
+        if let Some(intensity) = self.restart_intensity {
+            supervisor = supervisor.restart_intensity(intensity);
+        }
+
+        actors.build_runtime(supervisor)
+    }
+}
+
+impl std::fmt::Debug for RuntimeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeBuilder")
+            .field("strategy", &self.strategy)
+            .field("restart", &self.restart)
+            .field("shutdown", &self.shutdown)
+            .field("restart_intensity", &self.restart_intensity)
+            .finish_non_exhaustive()
+    }
+}

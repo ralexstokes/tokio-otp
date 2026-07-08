@@ -8,18 +8,13 @@ The core idea is the one that has kept telecom switches running for decades:
 organize your program into small, isolated tasks and let a *supervisor*
 restart the ones that fail.
 
-## Crates
+One dependency is the front door — `tokio-otp` re-exports everything you
+need through its prelude:
 
-| Crate | Role |
-|-------|------|
-| [`tokio-supervisor`](crates/tokio-supervisor) | Structured supervision of async tasks: restart policies (`permanent`/`transient`/`temporary`), restart intensity limits, `one_for_one`/`one_for_all` strategies, graceful shutdown, and nested supervision trees. |
-| [`tokio-actor`](crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and blocking-task integration. |
-| [`tokio-otp`](crates/tokio-otp) | The composition layer: run each actor of a graph as its own supervised child, with one integrated `Runtime` supporting dynamic actors and observability. |
-| [`tokio-otp-console`](crates/tokio-otp-console) | *(experimental)* A live web dashboard for watching a running supervision tree. |
-
-The crates are deliberately independent: `tokio-supervisor` knows nothing
-about actors, `tokio-actor` knows nothing about restarts, and `tokio-otp`
-glues them together without boilerplate.
+```toml
+[dependencies]
+tokio-otp = { git = "https://github.com/ralexstokes/tokio-otp" }
+```
 
 ## A taste
 
@@ -28,9 +23,7 @@ supervisor restarts it — and the `orders` ref keeps working across the
 restart, transparently reconnecting to the replacement:
 
 ```rust
-use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, GraphBuilder};
-use tokio_otp::SupervisedActors;
-use tokio_supervisor::{Restart, Strategy, SupervisorBuilder};
+use tokio_otp::prelude::*;
 
 #[derive(Clone)]
 struct FrontDesk {
@@ -59,9 +52,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph = builder.build()?;
 
     // Run every actor as its own supervised child.
-    let runtime = SupervisedActors::new(graph)?
-        .restart(Restart::Transient)
-        .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
+    let runtime = Runtime::builder()
+        .graph(graph)
+        .strategy(Strategy::OneForOne)
+        .build()?;
     let handle = runtime.spawn();
 
     orders.send_when_ready("business cards x100".to_owned()).await?;
@@ -73,6 +67,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The full runnable version is
 [`crates/tokio-otp/examples/supervised_actors.rs`](crates/tokio-otp/examples/supervised_actors.rs).
+
+## The crates, à la carte
+
+`tokio-otp` is a thin composition layer over two deliberately independent
+crates: `tokio-supervisor` knows nothing about actors, and `tokio-actor`
+knows nothing about restarts. Each is useful on its own — depend on one
+directly if you only need that piece.
+
+| Crate | Role |
+|-------|------|
+| [`tokio-otp`](crates/tokio-otp) | The front door: run each actor of a graph as its own supervised child, with one integrated `Runtime` supporting dynamic actors and observability. Re-exports the common types of the crates below via `tokio_otp::prelude`. |
+| [`tokio-supervisor`](crates/tokio-supervisor) | Structured supervision of async tasks: restart policies (`permanent`/`transient`/`temporary`), restart intensity limits, `one_for_one`/`one_for_all` strategies, graceful shutdown, and nested supervision trees. |
+| [`tokio-actor`](crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and blocking-task integration. |
+| [`tokio-otp-console`](crates/tokio-otp-console) | *(experimental)* A live web dashboard for watching a running supervision tree. |
 
 ## Getting started
 
@@ -87,12 +95,7 @@ The full runnable version is
 ## Status
 
 Early-stage and evolving; APIs may change. The crates are not yet published
-to crates.io — use a git dependency:
-
-```toml
-[dependencies]
-tokio-otp = { git = "https://github.com/ralexstokes/tokio-otp" }
-```
+to crates.io — use a git dependency as shown above.
 
 ## Development
 

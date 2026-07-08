@@ -8,9 +8,7 @@ restarted and then deliver to the new generation.
 ```rust,no_run
 use std::{io, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
 
-use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder};
-use tokio_otp::SupervisedActors;
-use tokio_supervisor::{Restart, RestartIntensity, Strategy, SupervisorBuilder};
+use tokio_otp::prelude::*;
 
 #[derive(Clone)]
 struct FrontDesk {
@@ -57,10 +55,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder.actor("press", Press { runs: Arc::new(AtomicUsize::new(0)) });
     let graph = builder.build()?;
 
-    let runtime = SupervisedActors::new(graph)?
+    let runtime = Runtime::builder()
+        .graph(graph)
+        .strategy(Strategy::OneForOne)
         .restart(Restart::Transient)
-        .actor_restart_intensity("press", RestartIntensity::new(5, Duration::from_secs(60)))
-        .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
+        .restart_intensity(RestartIntensity::new(5, Duration::from_secs(60)))
+        .build()?;
     let handle = runtime.spawn();
 
     orders.send_when_ready("business cards x100".into()).await?;
@@ -71,6 +71,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     handle.shutdown_and_wait().await?;
     Ok(())
 }
+```
+
+`Runtime::builder()` is the front door for the common case: it decomposes the
+graph, applies uniform policies to every actor child, and packages the result
+into a `Runtime` with a supervisor, registry, and dynamic actor support.
+
+When you need per-actor policies — say a tighter restart budget for the press
+alone — drop down to `SupervisedActors`, which the builder uses under the
+hood:
+
+```rust,ignore
+let runtime = SupervisedActors::new(graph)?
+    .restart(Restart::Transient)
+    .actor_restart_intensity("press", RestartIntensity::new(5, Duration::from_secs(60)))
+    .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
 ```
 
 `SupervisedActors::new(graph)` calls `Graph::into_actor_set`, then you choose

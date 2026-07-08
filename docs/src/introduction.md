@@ -9,14 +9,19 @@ a *supervisor* restart the ones that fail.
 
 ## The crates
 
+`tokio-otp` is the front door: depend on it alone, import everything through
+`tokio_otp::prelude`, and build the common setup with `Runtime::builder()`.
+Under the hood it composes two deliberately independent crates, each also
+usable à la carte:
+
 | Crate | Role |
 |-------|------|
+| [`tokio-otp`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp) | The front door: run each actor of a graph as its own supervised child, with one integrated `Runtime`. Re-exports the crates below via its prelude. |
 | [`tokio-supervisor`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor) | Structured supervision of async tasks: restart policies, restart intensity limits, graceful shutdown, and supervision trees. |
 | [`tokio-actor`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and blocking-task integration. |
-| [`tokio-otp`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp) | The composition layer: run each actor of a graph as its own supervised child, with one integrated `Runtime`. |
 | [`tokio-otp-console`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp-console) | A live web console for watching a running supervision tree. |
 
-The crates are deliberately independent:
+The lower-level crates are deliberately independent:
 
 - `tokio-supervisor` knows nothing about actors. It supervises any async task.
 - `tokio-actor` knows nothing about restarts. When an actor fails, the whole
