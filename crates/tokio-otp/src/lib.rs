@@ -9,9 +9,9 @@
 //! |------|------|
 //! | [`SupervisedActors`] | Decomposes a graph into per-actor supervised children with configurable policies. |
 //! | [`SupervisedGraph`] | Wraps a whole graph as a single supervised child. |
-//! | [`Runtime`] | Owns a supervisor and stable ingress handles — the common composition. |
+//! | [`Runtime`] | Owns a supervisor and optional dynamic actor registry — the common composition. |
 //! | [`RuntimeHandle`] | Control surface for a spawned runtime (shutdown, dynamic actors, observability). |
-//! | [`DynamicActorOptions`] | Options for runtime-added actors (restart, shutdown, peers). |
+//! | [`DynamicActorOptions`] | Options for runtime-added actors (restart, shutdown). |
 //!
 //! # Two composition modes
 //!
@@ -45,8 +45,8 @@ mod supervised_graph;
 /// for typical supervised-actor setups.
 pub mod prelude {
     pub use tokio_actor::{
-        Actor, ActorContext, ActorRef, ActorRegistry, ActorRunError, ActorSet, ActorSpec, Envelope,
-        Graph, GraphBuilder, IngressHandle, RunnableActor, RunnableActorFactory,
+        Actor, ActorContext, ActorRef, ActorRegistry, ActorRunError, ActorSet, Graph, GraphBuilder,
+        LookupError, Reply, RunnableActor, RunnableActorFactory,
     };
     pub use tokio_supervisor::{
         ChildContext, ChildSpec, Restart, RestartIntensity, ShutdownMode, ShutdownPolicy, Strategy,

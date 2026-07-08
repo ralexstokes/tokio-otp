@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use tokio_actor::{Graph, IngressHandle};
+use tokio_actor::{ActorRef, Graph, LookupError};
 use tokio_supervisor::ChildSpec;
 
 /// Convenience wrapper for supervising a whole actor graph as a single child.
@@ -19,14 +17,9 @@ impl SupervisedGraph {
         }
     }
 
-    /// Returns a stable handle to a named ingress, if it exists.
-    pub fn ingress(&self, name: &str) -> Option<IngressHandle> {
-        self.graph.ingress(name)
-    }
-
-    /// Returns stable handles for every named ingress.
-    pub fn ingresses(&self) -> HashMap<String, IngressHandle> {
-        self.graph.ingresses()
+    /// Returns a typed actor ref for a graph actor.
+    pub fn actor_ref<M: Send + 'static>(&self, actor_id: &str) -> Result<ActorRef<M>, LookupError> {
+        self.graph.actor_ref(actor_id)
     }
 
     /// Adapts the wrapped graph into a [`ChildSpec`].
