@@ -204,7 +204,13 @@ async fn actor_ref_send_when_ready_waits_for_stale_binding_to_change() {
     let mut sending_ref = actor_ref.clone();
     let send_task =
         tokio::spawn(async move { sending_ref.send_when_ready("held".to_owned()).await });
-    sleep(Duration::from_millis(40)).await;
+    timeout(Duration::from_secs(1), async {
+        while counter.count() == 0 {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("send task observed stale closed mailbox in time");
     assert!(
         !send_task.is_finished(),
         "send_when_ready should wait for a new binding"

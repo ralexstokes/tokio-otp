@@ -539,6 +539,8 @@ impl<M: Send + 'static> BlockingRuntimeInner<M> {
         let actor_id = Arc::clone(&self.actor_id);
         let observability = self.observability.clone();
         let span = observability.blocking_task_span(&actor_id, id, task_name.as_deref());
+        self.observability
+            .emit_blocking_task_started(&self.actor_id, id, task_name.as_deref());
 
         let join_handle = spawn_blocking(move || {
             let _permit = permit;
@@ -588,8 +590,6 @@ impl<M: Send + 'static> BlockingRuntimeInner<M> {
                 join_handle,
             },
         );
-        self.observability
-            .emit_blocking_task_started(&self.actor_id, id, task_name.as_deref());
 
         Ok(BlockingHandle {
             id,
