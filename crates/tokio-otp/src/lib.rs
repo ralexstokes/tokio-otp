@@ -85,19 +85,29 @@ mod supervised_graph;
 
 /// Common imports for `tokio-otp` consumers.
 ///
-/// Re-exports key types from `tokio-actor`, `tokio-supervisor`, and this
-/// crate so a single `use tokio_otp::prelude::*;` brings everything needed
-/// for typical supervised-actor setups.
+/// Re-exports the documented union of the `tokio-actor` and
+/// `tokio-supervisor` preludes, except the conflicts documented below, plus
+/// this crate's runtime types.
 pub mod prelude {
+    // Exclusions: BuildError exists in all three crates and stays out until
+    // the error unification pass; tokio_supervisor::BoxError duplicates the
+    // tokio_actor alias exported here; console types are feature-gated and
+    // experimental, so they remain available only at the crate root.
     pub use tokio_actor::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        BoxError, DrainPolicy, Graph, GraphBuilder, LookupError, MessageHandler, Reply,
-        RunnableActor, RunnableActorFactory,
+        BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
+        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
+        Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler, RebindPolicy,
+        RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError, SpawnBlockingError,
+        TryRecvError,
     };
     pub use tokio_supervisor::{
-        ChildContext, ChildSpec, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
-        ShutdownMode, ShutdownPolicy, Strategy, Supervisor, SupervisorBuilder, SupervisorEvent,
-        SupervisorHandle, SupervisorSnapshot,
+        BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
+        ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart, RestartIntensity,
+        RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy, Strategy, Supervisor,
+        SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorExit, SupervisorHandle,
+        SupervisorSnapshot, SupervisorStateView, SupervisorToken,
+        prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
     };
 
     pub use crate::{

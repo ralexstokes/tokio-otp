@@ -152,13 +152,14 @@ mod observability;
 mod registry;
 
 pub mod prelude {
+    // Keep this list mirrored by tokio_otp::prelude; its prelude test guards drift.
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
-        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BuildError, CallError, DrainPolicy,
-        Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler, RebindPolicy,
-        RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError, SpawnBlockingError,
-        TryRecvError,
+        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, BuildError, CallError,
+        DrainPolicy, Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
+        RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
+        SpawnBlockingError, TryRecvError,
     };
 }
 

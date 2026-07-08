@@ -1,0 +1,136 @@
+use std::time::Duration;
+
+use tokio::{sync::mpsc, time::timeout};
+use tokio_otp::prelude::*;
+
+#[allow(unused_imports)]
+mod coverage_probe {
+    mod actor {
+        use tokio_otp::prelude::{
+            Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
+            BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
+            BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError,
+            DrainPolicy, Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
+            RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
+            SpawnBlockingError, TryRecvError,
+        };
+    }
+
+    mod supervisor {
+        use tokio_otp::prelude::{
+            BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
+            ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart,
+            RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy,
+            Strategy, Supervisor, SupervisorBuilder, SupervisorError, SupervisorEvent,
+            SupervisorEventReceiverExt as _, SupervisorExit, SupervisorHandle, SupervisorSnapshot,
+            SupervisorSnapshotReceiverExt as _, SupervisorStateView, SupervisorToken,
+        };
+    }
+
+    mod otp {
+        use tokio_otp::prelude::{
+            DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuilder, RuntimeHandle,
+            SupervisedActors, SupervisedGraph,
+        };
+    }
+}
+
+const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone)]
+struct BlockingWorker {
+    observed: mpsc::UnboundedSender<String>,
+}
+
+impl MessageHandler for BlockingWorker {
+    type Msg = ();
+
+    async fn handle(&mut self, _message: (), ctx: &ActorContext<()>) -> ActorResult {
+        let observed = self.observed.clone();
+        let handle = ctx.spawn_blocking(BlockingOptions::default(), move |blocking_ctx| {
+            blocking_ctx.checkpoint()?;
+            observed
+                .send(blocking_ctx.myself().id().to_owned())
+                .expect("test receiver dropped");
+            Ok(())
+        })?;
+
+        handle.wait().await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn umbrella_prelude_supports_blocking_and_supervisor_helpers() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let mut graph = GraphBuilder::new();
+    let worker = graph.actor(
+        "worker",
+        BlockingWorker {
+            observed: observed_tx,
+        },
+    );
+
+    let runtime = Runtime::builder()
+        .graph(graph.build().expect("valid graph"))
+        .strategy(Strategy::OneForOne)
+        .build()
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+    let mut events = handle.subscribe();
+    let mut snapshots = handle.subscribe_snapshots();
+
+    worker.send(()).await.expect("worker accepts message");
+    let observed = timeout(EVENT_TIMEOUT, observed_rx.recv())
+        .await
+        .expect("timed out waiting for blocking task")
+        .expect("blocking task reported completion");
+    assert_eq!(observed, "worker");
+
+    let started = timeout(
+        EVENT_TIMEOUT,
+        events.wait_for_event(|event| {
+            matches!(
+                event,
+                SupervisorEvent::ChildStarted { id, generation: 0 } if id == "worker"
+            )
+        }),
+    )
+    .await
+    .expect("timed out waiting for started event")
+    .expect("event stream should remain open");
+    assert!(matches!(
+        started,
+        SupervisorEvent::ChildStarted {
+            ref id,
+            generation: 0
+        } if id == "worker"
+    ));
+
+    let snapshot = timeout(
+        EVENT_TIMEOUT,
+        snapshots.wait_for_snapshot(|snapshot| {
+            snapshot
+                .child("worker")
+                .is_some_and(|child| child.state == ChildStateView::Running)
+        }),
+    )
+    .await
+    .expect("timed out waiting for running snapshot")
+    .expect("snapshot stream should remain open");
+    assert_eq!(
+        snapshot
+            .child("worker")
+            .expect("worker child should exist")
+            .state,
+        ChildStateView::Running
+    );
+
+    assert_eq!(
+        handle
+            .shutdown_and_wait()
+            .await
+            .expect("shutdown should succeed"),
+        SupervisorExit::Shutdown
+    );
+}

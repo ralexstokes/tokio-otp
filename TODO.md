@@ -38,15 +38,19 @@ remaining pattern.~~
 Done with `SupervisorHandle::monitor_restart` / `RuntimeHandle::monitor_restart`
 returning `RestartMonitor`, plus `SupervisorHandle::wait_until_running`.
 
-## 3. Umbrella prelude completeness
+## 3. ~~Umbrella prelude completeness~~ — done
 
-`tokio_supervisor::prelude` has the `wait_for_event` / `wait_for_snapshot`
+~~`tokio_supervisor::prelude` has the `wait_for_event` / `wait_for_snapshot`
 extension traits, but `tokio_otp::prelude` does not re-export them — so
 `examples/supervised_actors.rs` hand-rolls a nine-line event loop that
 `wait_for_event` exists to eliminate. The umbrella prelude is also missing
 `SendError`, `CallError`, `ChildResult`, `BackoffPolicy`, and the
 `BlockingOptions` / `BlockingContext` types needed to call
-`ctx.spawn_blocking`.
+`ctx.spawn_blocking`.~~
+
+Done by defining `tokio_otp::prelude` as the union of the sub-crate preludes
+minus `BuildError` and the duplicate `tokio_supervisor::BoxError`, enforced by
+`crates/tokio-otp/tests/prelude.rs`.
 
 ## 4. Foreground `Runtime::run` loses the control surface
 
