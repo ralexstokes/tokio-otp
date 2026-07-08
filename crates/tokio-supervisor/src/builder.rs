@@ -11,7 +11,8 @@ use crate::{
 /// Builder for constructing a [`Supervisor`] with validated configuration.
 ///
 /// At minimum, one child must be added via [`child`](Self::child) before
-/// calling [`build`](Self::build).
+/// calling [`build`](Self::build), unless [`allow_empty`](Self::allow_empty) is
+/// enabled for a dynamic supervisor.
 ///
 /// # Example
 ///
@@ -33,6 +34,7 @@ pub struct SupervisorBuilder {
     children: Vec<ChildSpec>,
     control_channel_capacity: usize,
     event_channel_capacity: usize,
+    allow_empty: bool,
 }
 
 const DEFAULT_CONTROL_CHANNEL_CAPACITY: usize = 64;
@@ -54,6 +56,7 @@ impl SupervisorBuilder {
             children: Vec::new(),
             control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
             event_channel_capacity: DEFAULT_EVENT_CHANNEL_CAPACITY,
+            allow_empty: false,
         }
     }
 
@@ -98,17 +101,29 @@ impl SupervisorBuilder {
         self
     }
 
+    /// Allows the supervisor to be built with, and to run with, zero children.
+    ///
+    /// With this flag set, the supervisor does not exit merely because no
+    /// children are running. It idles and continues serving control commands
+    /// until shutdown is requested or a restart-intensity escalation stops it.
+    /// Last-child removal is also permitted.
+    #[must_use]
+    pub fn allow_empty(mut self) -> Self {
+        self.allow_empty = true;
+        self
+    }
+
     /// Validates the configuration and returns a ready-to-run [`Supervisor`].
     ///
     /// # Errors
     ///
     /// Returns [`BuildError`] if:
-    /// - No children were added.
+    /// - No children were added and [`allow_empty`](Self::allow_empty) was not enabled.
     /// - Two children share the same id.
     /// - Any channel capacity is zero.
     /// - Any restart intensity or backoff configuration is invalid.
     pub fn build(self) -> Result<Supervisor, BuildError> {
-        if self.children.is_empty() {
+        if self.children.is_empty() && !self.allow_empty {
             return Err(BuildError::EmptyChildren);
         }
 
@@ -147,6 +162,7 @@ impl SupervisorBuilder {
                 .collect(),
             control_channel_capacity: self.control_channel_capacity,
             event_channel_capacity: self.event_channel_capacity,
+            allow_empty: self.allow_empty,
         }))
     }
 }

@@ -300,9 +300,10 @@ impl SupervisorHandle {
     /// Removes a child by id from this supervisor.
     ///
     /// The child is stopped according to its [`ShutdownPolicy`](crate::ShutdownPolicy)
-    /// before being removed. A supervisor must always have at least one child;
-    /// attempting to remove the last active child returns
-    /// [`ControlError::LastChildRemovalUnsupported`].
+    /// before being removed. By default, attempting to remove the last active
+    /// child returns [`ControlError::LastChildRemovalUnsupported`]. Supervisors
+    /// built with [`SupervisorBuilder::allow_empty`](crate::SupervisorBuilder::allow_empty)
+    /// may be reduced to zero children and continue idling.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         self.control_endpoint().remove_child(id.into()).await
     }

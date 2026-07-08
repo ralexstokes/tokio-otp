@@ -25,12 +25,18 @@ impl SupervisorRuntime {
         );
 
         async {
+            let idle_at_shutdown = self.live_tasks == 0 && self.running_children == 0;
             self.state = SupervisorState::Stopping;
             self.cancel_running_children();
             self.send_event(SupervisorEvent::SupervisorStopping);
             self.drain_children(DrainReason::Shutdown).await?;
-            self.finish_with_exit(SupervisorExit::Shutdown);
-            Ok(SupervisorExit::Shutdown)
+            let exit = if self.meta.allow_empty && idle_at_shutdown {
+                self.terminal_status_exit()
+            } else {
+                SupervisorExit::Shutdown
+            };
+            self.finish_with_exit(exit);
+            Ok(exit)
         }
         .instrument(span)
         .await

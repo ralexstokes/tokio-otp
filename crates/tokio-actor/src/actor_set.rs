@@ -17,10 +17,14 @@ use tracing::Instrument;
 use crate::{
     actor::{Actor, BoxError},
     binding::BindingCore,
+    builder::{
+        DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY,
+        DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR,
+    },
     context::ActorRef,
     error::LookupError,
     graph::{ErasedRunner, GraphInner, RunnerStart, TypedRunner},
-    observability::ActorExitStatus,
+    observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     registry::{ActorRegistry, RegistryError},
 };
 
@@ -307,6 +311,17 @@ impl std::fmt::Debug for RunnableActor {
 }
 
 impl RunnableActorFactory {
+    /// Creates a factory with the same defaults [`GraphBuilder`](crate::GraphBuilder)
+    /// uses for a graph without an explicit name.
+    pub fn new() -> Self {
+        Self {
+            observability: GraphObservability::new(anonymous_graph_name()),
+            mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
+            max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
+            blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
+        }
+    }
+
     /// Constructs a runtime actor.
     pub fn actor<A: Actor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
         let actor_id: Arc<str> = actor_id.into().into();
@@ -328,6 +343,12 @@ impl RunnableActorFactory {
                 running: AtomicBool::new(false),
             }),
         }
+    }
+}
+
+impl Default for RunnableActorFactory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -7,7 +7,9 @@ pub enum BuildError {
     /// Two or more children share the same id string.
     #[error("duplicate child id: {0}")]
     DuplicateChildId(String),
-    /// The builder has no children. A supervisor must have at least one child.
+    /// The builder has no children and
+    /// [`SupervisorBuilder::allow_empty`](crate::SupervisorBuilder::allow_empty)
+    /// was not enabled.
     #[error("supervisor requires at least one child")]
     EmptyChildren,
     /// A configuration value (channel capacity, restart intensity, etc.) is
@@ -54,8 +56,8 @@ pub enum ControlError {
     /// The child spec contains invalid configuration.
     #[error("invalid child configuration: {0}")]
     InvalidConfig(&'static str),
-    /// Cannot remove the last active child. A supervisor must always have at
-    /// least one child.
+    /// Cannot remove the last active child because the supervisor was not
+    /// built with [`allow_empty`](crate::SupervisorBuilder::allow_empty).
     #[error("cannot remove the last active child")]
     LastChildRemovalUnsupported,
     /// The supervisor is in the process of shutting down and is no longer

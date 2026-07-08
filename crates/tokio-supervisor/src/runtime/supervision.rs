@@ -116,6 +116,7 @@ impl ChildEntry {
 pub(crate) struct RuntimeMeta {
     pub(crate) strategy: Strategy,
     pub(crate) default_restart_intensity: RestartIntensity,
+    pub(crate) allow_empty: bool,
     pub(crate) registry: Arc<NestedControlRegistry>,
     pub(crate) path_prefix: Vec<String>,
     pub(crate) observability: SupervisorObservability,
@@ -205,6 +206,7 @@ impl SupervisorRuntime {
             meta: RuntimeMeta {
                 strategy: config.strategy,
                 default_restart_intensity,
+                allow_empty: config.allow_empty,
                 registry,
                 path_prefix,
                 observability,
@@ -243,7 +245,7 @@ impl SupervisorRuntime {
                 return result;
             }
 
-            if self.live_tasks == 0 && self.no_running_children() {
+            if !self.meta.allow_empty && self.live_tasks == 0 && self.no_running_children() {
                 return self.finish_natural_exit();
             }
 
@@ -268,7 +270,7 @@ impl SupervisorRuntime {
                         self.handle_nested_snapshot(update);
                     }
                 }
-                maybe = self.join_set.join_next_with_id() => {
+                maybe = self.join_set.join_next_with_id(), if !self.join_set.is_empty() => {
                     let Some(joined) = maybe else {
                         return self.finish_natural_exit();
                     };
@@ -282,10 +284,16 @@ impl SupervisorRuntime {
     }
 
     fn finish_natural_exit(&mut self) -> Result<SupervisorExit, SupervisorError> {
+        let exit = self.terminal_status_exit();
+        self.finish_with_exit(exit);
+        Ok(exit)
+    }
+
+    pub(crate) fn terminal_status_exit(&self) -> SupervisorExit {
         // Only the latest terminal status for each child counts here. Failures
         // from superseded generations are cleared by a later successful
         // restart, so they do not poison a clean natural exit.
-        let exit = if self
+        if self
             .child_order
             .iter()
             .filter_map(|&key| self.children.get(key))
@@ -294,13 +302,12 @@ impl SupervisorRuntime {
                     .terminal_status
                     .as_ref()
                     .is_some_and(TerminalStatus::is_failure)
-            }) {
+            })
+        {
             SupervisorExit::Failed
         } else {
             SupervisorExit::Completed
-        };
-        self.finish_with_exit(exit);
-        Ok(exit)
+        }
     }
 
     async fn handle_command(&mut self, command: SupervisorCommand) {
@@ -393,7 +400,7 @@ impl SupervisorRuntime {
             return Err(ControlError::ChildRemovalInProgress(id));
         }
 
-        if self.active_child_count() <= 1 {
+        if !self.meta.allow_empty && self.active_child_count() <= 1 {
             return Err(ControlError::LastChildRemovalUnsupported);
         }
 

@@ -2,7 +2,7 @@ use std::{future::pending, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, LookupError, SendError};
-use tokio_otp::{DynamicActorError, DynamicActorOptions, Runtime, SupervisedActors};
+use tokio_otp::{BuildError, DynamicActorError, DynamicActorOptions, Runtime, SupervisedActors};
 use tokio_supervisor::{
     ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder, SupervisorExit,
 };
@@ -12,6 +12,14 @@ fn build_runtime(graph: tokio_actor::Graph) -> Runtime {
         .expect("graph decomposes")
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("runtime builds")
+}
+
+#[test]
+fn runtime_builder_without_graph_still_requires_dynamic_mode() {
+    assert!(matches!(
+        Runtime::builder().build(),
+        Err(BuildError::MissingGraph)
+    ));
 }
 
 struct Drain<M>(PhantomData<fn(M)>);
@@ -69,6 +77,140 @@ impl Actor for Observe {
         }
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn graphless_dynamic_runtime_adds_removes_and_readds_actors() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+
+    let runtime = Runtime::builder()
+        .dynamic()
+        .build()
+        .expect("dynamic runtime builds without a graph");
+    let handle = runtime.spawn();
+
+    let mut sink = handle
+        .add_actor(
+            "sink",
+            Observe {
+                observed: observed_tx.clone(),
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("sink added");
+    let mut forwarder = handle
+        .add_actor("forwarder", ForwardToSink, DynamicActorOptions::default())
+        .await
+        .expect("forwarder added");
+
+    sink.wait_for_binding().await;
+    forwarder.wait_for_binding().await;
+    forwarder
+        .send("forwarded".to_owned())
+        .await
+        .expect("message sent to forwarder");
+
+    let observed = timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect("sink observed the forwarded message")
+        .expect("sink is still running");
+    assert_eq!(observed, "forwarded");
+
+    handle
+        .remove_actor("forwarder")
+        .await
+        .expect("forwarder removed");
+    handle.remove_actor("sink").await.expect("sink removed");
+    assert!(handle.snapshot().children.is_empty());
+
+    let mut sink = handle
+        .add_actor(
+            "sink",
+            Observe {
+                observed: observed_tx,
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("sink id can be reused");
+    sink.wait_for_binding().await;
+    sink.send("again".to_owned())
+        .await
+        .expect("message sent to re-added sink");
+
+    let observed = timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect("re-added sink observed the message")
+        .expect("sink is still running");
+    assert_eq!(observed, "again");
+
+    handle
+        .remove_actor("sink")
+        .await
+        .expect("sink removed again");
+    assert_eq!(
+        handle
+            .shutdown_and_wait()
+            .await
+            .expect("runtime shut down cleanly"),
+        SupervisorExit::Completed
+    );
+}
+
+#[tokio::test]
+async fn dynamic_graph_runtime_can_remove_last_graph_actor() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let mut builder = GraphBuilder::new();
+    builder.actor("only", Drain::<()>::new());
+    let graph = builder.build().expect("valid graph");
+
+    let runtime = Runtime::builder()
+        .dynamic()
+        .graph(graph)
+        .build()
+        .expect("dynamic graph runtime builds");
+    let handle = runtime.spawn();
+
+    handle
+        .remove_actor("only")
+        .await
+        .expect("last graph actor can be removed in dynamic mode");
+    assert!(handle.snapshot().children.is_empty());
+
+    let mut dynamic = handle
+        .add_actor(
+            "dynamic",
+            Observe {
+                observed: observed_tx,
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("runtime remains serviceable after reaching zero actors");
+    dynamic.wait_for_binding().await;
+    dynamic
+        .send("after-zero".to_owned())
+        .await
+        .expect("message sent to dynamic actor");
+
+    let observed = timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect("dynamic actor observed the message")
+        .expect("dynamic actor is still running");
+    assert_eq!(observed, "after-zero");
+
+    handle
+        .remove_actor("dynamic")
+        .await
+        .expect("dynamic actor removed");
+    assert_eq!(
+        handle
+            .shutdown_and_wait()
+            .await
+            .expect("runtime shut down cleanly"),
+        SupervisorExit::Completed
+    );
 }
 
 #[tokio::test]

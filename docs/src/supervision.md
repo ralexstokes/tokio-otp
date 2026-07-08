@@ -156,8 +156,10 @@ handle.remove_child("night-shift-press").await?;
 handle.add_child_at(["pressroom"], child).await?;
 ```
 
-A supervisor always keeps at least one child; removing the last one is
-refused. We will use a higher-level version of this API in the [Dynamic
+By default, a supervisor keeps at least one child; removing the last one is
+refused. Use `SupervisorBuilder::allow_empty()` for dynamic supervisors that
+can start empty, return to zero children, and wait for the next `add_child`.
+We will use a higher-level version of this API in the [Dynamic
 actors](dynamic-actors.md) chapter.
 
 [`ChildSpec`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor

@@ -39,9 +39,9 @@ struct Slot {
     runner: Option<Arc<dyn ErasedRunner>>,
 }
 
-const DEFAULT_MAILBOX_CAPACITY: usize = 64;
-const DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR: usize = 16;
-const DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_MAILBOX_CAPACITY: usize = 64;
+pub(crate) const DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR: usize = 16;
+pub(crate) const DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Default for GraphBuilder {
     fn default() -> Self {

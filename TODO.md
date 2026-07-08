@@ -5,16 +5,7 @@ review of the public API surfaces, examples, the README, and the tutorial
 book. Items near the top change what the items below them look like, so work
 roughly in order.
 
-## 1. Dynamic-only runtimes without a placeholder actor
-
-`examples/dynamic_actors.rs` has to register a `Drain::<()>` actor named
-"seed" purely because `GraphBuilder::build` rejects empty graphs and the
-supervisor rejects zero children (`LastChildRemovalUnsupported`). If dynamic
-actors are a headline feature, the front door should support starting empty:
-either a `Runtime::builder().dynamic()` mode that needs no graph, or
-supervisors that can idle with zero children until `add_child`.
-
-## 2. `ActorRef` send-method signatures and waiting semantics
+## 1. `ActorRef` send-method signatures and waiting semantics
 
 - `send_when_ready` and `wait_for_binding` take `&mut self` (they wait on a
   `watch::Receiver`), so every actor storing a ref in `&self` state must
@@ -33,7 +24,7 @@ supervisors that can idle with zero children until `add_child`.
 
 These touch the same methods; do them as one pass.
 
-## 3. First-class readiness and restart-waiting helpers
+## 2. First-class readiness and restart-waiting helpers
 
 Every example calls per-ref `wait_for_binding().await` after `spawn()`, and
 waiting for a restart means hand-matching `ChildStarted { generation > 0 }`
@@ -41,7 +32,7 @@ events — with a subtle race if you subscribe after triggering the crash. Add
 helpers like `RuntimeHandle::wait_until_running()` (all children started) and
 `wait_for_child_restart(id)` to cover the two patterns every consumer needs.
 
-## 4. Umbrella prelude completeness
+## 3. Umbrella prelude completeness
 
 `tokio_supervisor::prelude` has the `wait_for_event` / `wait_for_snapshot`
 extension traits, but `tokio_otp::prelude` does not re-export them — so
@@ -51,7 +42,7 @@ extension traits, but `tokio_otp::prelude` does not re-export them — so
 `BlockingOptions` / `BlockingContext` types needed to call
 `ctx.spawn_blocking`.
 
-## 5. Foreground `Runtime::run` loses the control surface
+## 4. Foreground `Runtime::run` loses the control surface
 
 `Runtime::run()` consumes the runtime with no handle — no shutdown, no
 events, and on a dynamic runtime the registry is silently discarded, so
@@ -61,7 +52,7 @@ and the name implies more than one part. Either offer `runtime.handle()`
 before `run()` (like tokio's own `Runtime`), or document `spawn()` + `wait()`
 as the only full-featured path and rename `into_parts` to `into_supervisor`.
 
-## 6. `actor_shutdown_timeout` only applies in graph-run mode
+## 5. `actor_shutdown_timeout` only applies in graph-run mode
 
 `Graph::run_until` aborts uncooperative actors after the timeout, but
 `RunnableActor::run_until` cancels the token and then waits indefinitely
@@ -70,7 +61,7 @@ as the only full-featured path and rename `into_parts` to `into_supervisor`.
 Either thread the timeout through `RunnableActor` or document the asymmetry
 on both the builder setter and `RunnableActor::run_until`.
 
-## 7. Registry consistency and lookup diagnostics
+## 6. Registry consistency and lookup diagnostics
 
 - Registry entries go stale when a dynamic actor is removed outside
   `RuntimeHandle::remove_actor` (direct `remove_child`, or a transient actor
@@ -82,7 +73,7 @@ on both the builder setter and `RunnableActor::run_until`.
   conflating "no registry configured" with "no such actor" (`add_actor`
   distinguishes the same case as `DynamicActorError::Unsupported`).
 
-## 8. Naming and diagnostics polish
+## 7. Naming and diagnostics polish
 
 - `ChildContext` exposes a public `ctx.token` field while `ActorContext` uses
   `ctx.shutdown_token()`; pick one convention across crates, and fold the
@@ -96,7 +87,7 @@ on both the builder setter and `RunnableActor::run_until`.
   `tokio-otp`) and two identical `BoxError` aliases exist across the crates.
   Workable, but a naming/unification pass is cheap while unpublished.
 
-## 9. Docs front-door polish
+## 8. Docs front-door polish
 
 - The `tokio-otp` crate-level doc example is ` ```ignore ` and references an
   undefined `graph` variable — the one example on the front door is the only
@@ -106,7 +97,7 @@ on both the builder setter and `RunnableActor::run_until`.
   GitHub tree root as placeholders. Publish rustdoc alongside the mdBook and
   link to it.
 
-## 10. Future actor ergonomics
+## 9. Future actor ergonomics
 
 - Named registry aliases, e.g. `builder.alias("orders", "front-desk")`, for
   friendlier external lookup names.

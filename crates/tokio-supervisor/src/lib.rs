@@ -79,8 +79,10 @@
 //! - `try_` variants return [`ControlError::Busy`] immediately instead of
 //!   waiting when the control channel is full.
 //!
-//! A supervisor must always have at least one child; removing the last active
-//! child returns [`ControlError::LastChildRemovalUnsupported`].
+//! By default, a supervisor must always have at least one child; removing the
+//! last active child returns [`ControlError::LastChildRemovalUnsupported`].
+//! [`SupervisorBuilder::allow_empty`] opts into dynamic supervisors that can
+//! start empty, idle with zero children, and accept the next `add_child`.
 //!
 //! # Nested supervisors
 //!

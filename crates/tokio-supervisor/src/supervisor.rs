@@ -51,6 +51,7 @@ pub(crate) struct SupervisorConfig {
     pub(crate) children: Vec<Arc<ChildSpecInner>>,
     pub(crate) control_channel_capacity: usize,
     pub(crate) event_channel_capacity: usize,
+    pub(crate) allow_empty: bool,
 }
 
 impl Supervisor {

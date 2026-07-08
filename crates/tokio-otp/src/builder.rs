@@ -1,4 +1,4 @@
-use tokio_actor::Graph;
+use tokio_actor::{ActorRegistry, Graph, RunnableActorFactory};
 use tokio_supervisor::{Restart, RestartIntensity, ShutdownPolicy, Strategy, SupervisorBuilder};
 
 use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedActors};
@@ -6,7 +6,8 @@ use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedAc
 /// One-stop builder for the common supervised-actor setup.
 ///
 /// Wires an actor [`Graph`] into a [`Runtime`] where every actor runs as its
-/// own supervised child, with dynamic actor support enabled. Created via
+/// own supervised child, with dynamic actor support enabled. It can also build
+/// a graph-less dynamic runtime via [`dynamic`](Self::dynamic). Created via
 /// [`Runtime::builder`].
 ///
 /// For per-actor policy overrides, or to compose actor children into a larger
@@ -47,6 +48,20 @@ use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedAc
 /// # Ok(())
 /// # }
 /// ```
+///
+/// Dynamic-only runtimes can start without a graph:
+///
+/// ```no_run
+/// use tokio_otp::prelude::*;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let runtime = Runtime::builder().dynamic().build()?;
+/// let handle = runtime.spawn();
+/// handle.shutdown_and_wait().await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Default)]
 pub struct RuntimeBuilder {
     graph: Option<Graph>,
@@ -54,6 +69,7 @@ pub struct RuntimeBuilder {
     restart: Restart,
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
+    dynamic: bool,
 }
 
 impl RuntimeBuilder {
@@ -64,10 +80,25 @@ impl RuntimeBuilder {
         Self::default()
     }
 
-    /// Sets the actor graph to run. Required.
+    /// Sets the actor graph to run. Required unless [`dynamic`](Self::dynamic)
+    /// is enabled.
     #[must_use]
     pub fn graph(mut self, graph: Graph) -> Self {
         self.graph = Some(graph);
+        self
+    }
+
+    /// Allows the runtime to start with no actor graph and to idle with zero
+    /// actors.
+    ///
+    /// A dynamic runtime runs until [`shutdown`](crate::RuntimeHandle::shutdown)
+    /// is requested, even after every actor completes or is removed. If no
+    /// graph is supplied, the builder's [`restart`](Self::restart) and
+    /// [`shutdown`](Self::shutdown) settings have no static actors to apply to;
+    /// runtime-added actors use their own [`DynamicActorOptions`](crate::DynamicActorOptions).
+    #[must_use]
+    pub fn dynamic(mut self) -> Self {
+        self.dynamic = true;
         self
     }
 
@@ -103,20 +134,35 @@ impl RuntimeBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::MissingGraph`] if no graph was provided, or any
-    /// error from decomposing the graph and building the supervisor.
+    /// Returns [`BuildError::MissingGraph`] if no graph was provided and
+    /// [`dynamic`](Self::dynamic) was not enabled, or any error from
+    /// decomposing the graph and building the supervisor.
     pub fn build(self) -> Result<Runtime, BuildError> {
-        let graph = self.graph.ok_or(BuildError::MissingGraph)?;
-        let actors = SupervisedActors::new(graph)?
-            .restart(self.restart)
-            .shutdown(self.shutdown);
-
         let mut supervisor = SupervisorBuilder::new().strategy(self.strategy);
+        if self.dynamic {
+            supervisor = supervisor.allow_empty();
+        }
         if let Some(intensity) = self.restart_intensity {
             supervisor = supervisor.restart_intensity(intensity);
         }
 
-        actors.build_runtime(supervisor)
+        match self.graph {
+            Some(graph) => {
+                let actors = SupervisedActors::new(graph)?
+                    .restart(self.restart)
+                    .shutdown(self.shutdown);
+                actors.build_runtime(supervisor)
+            }
+            None if self.dynamic => {
+                let supervisor = supervisor.build()?;
+                Ok(Runtime::with_dynamic(
+                    supervisor,
+                    ActorRegistry::new(),
+                    RunnableActorFactory::new(),
+                ))
+            }
+            None => Err(BuildError::MissingGraph),
+        }
     }
 }
 
@@ -127,6 +173,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("restart", &self.restart)
             .field("shutdown", &self.shutdown)
             .field("restart_intensity", &self.restart_intensity)
+            .field("dynamic", &self.dynamic)
             .finish_non_exhaustive()
     }
 }

@@ -1,32 +1,9 @@
-use std::{error::Error, marker::PhantomData};
+use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, MessageHandler};
-use tokio_otp::{DynamicActorOptions, SupervisedActors};
-use tokio_supervisor::{Strategy, SupervisorBuilder};
-
-struct Drain<M>(PhantomData<fn(M)>);
-
-impl<M> Drain<M> {
-    fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<M> Clone for Drain<M> {
-    fn clone(&self) -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<M: Send + 'static> Actor for Drain<M> {
-    type Msg = M;
-
-    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
-        while ctx.recv().await.is_some() {}
-        Ok(())
-    }
-}
+use tokio_actor::{ActorContext, ActorResult, MessageHandler};
+use tokio_otp::{DynamicActorOptions, Runtime};
+use tokio_supervisor::{Strategy, SupervisorExit};
 
 #[derive(Clone)]
 struct Frontend;
@@ -61,15 +38,16 @@ impl MessageHandler for RushPress {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let mut builder = GraphBuilder::new();
-    let mut orders = builder.actor("front-desk", Frontend);
-    builder.actor("seed", Drain::<()>::new());
-    let graph = builder.build()?;
 
-    let runtime = SupervisedActors::new(graph)?
-        .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
+    let runtime = Runtime::builder()
+        .dynamic()
+        .strategy(Strategy::OneForOne)
+        .build()?;
     let handle = runtime.spawn();
 
+    let mut orders = handle
+        .add_actor("front-desk", Frontend, DynamicActorOptions::default())
+        .await?;
     let mut rush = handle
         .add_actor(
             "rush-press",
@@ -82,14 +60,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     orders.wait_for_binding().await;
     rush.wait_for_binding().await;
+
     orders.send("wedding invites x50".to_owned()).await?;
+    let observed = observed_rx.recv().await.expect("rush job");
+    assert_eq!(observed, "wedding invites x50");
+    println!("rush job {observed}");
+
     rush.send("vip banners x2".to_owned()).await?;
+    let observed = observed_rx.recv().await.expect("rush job");
+    assert_eq!(observed, "vip banners x2");
+    println!("rush job {observed}");
 
-    for _ in 0..2 {
-        println!("rush job {}", observed_rx.recv().await.expect("rush job"));
-    }
-
+    handle.remove_actor("front-desk").await?;
     handle.remove_actor("rush-press").await?;
-    handle.shutdown_and_wait().await?;
+    let exit = handle.shutdown_and_wait().await?;
+    assert_eq!(exit, SupervisorExit::Completed);
     Ok(())
 }

@@ -5,11 +5,235 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_supervisor::{
-    ChildSpec, ControlError, Restart, ShutdownMode, ShutdownPolicy, SupervisorBuilder,
-    SupervisorEvent, SupervisorExit,
+    BuildError, ChildSpec, ControlError, ExitStatusView, Restart, ShutdownMode, ShutdownPolicy,
+    SupervisorBuilder, SupervisorEvent, SupervisorExit,
 };
 
 mod common;
+
+#[test]
+fn allow_empty_builds_without_children() {
+    let err = SupervisorBuilder::new()
+        .build()
+        .expect_err("empty supervisors remain rejected by default");
+    assert_eq!(err, BuildError::EmptyChildren);
+
+    SupervisorBuilder::new()
+        .allow_empty()
+        .build()
+        .expect("allow_empty accepts zero children");
+}
+
+#[tokio::test]
+async fn allow_empty_supervisor_starts_empty_and_accepts_children() {
+    let supervisor = SupervisorBuilder::new()
+        .allow_empty()
+        .build()
+        .expect("empty supervisor builds");
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+
+    assert!(handle.snapshot().children.is_empty());
+
+    handle
+        .add_child(
+            ChildSpec::new("dynamic", |_ctx| async move { Ok(()) }).restart(Restart::Temporary),
+        )
+        .await
+        .expect("empty supervisor accepts a child");
+
+    let mut saw_started = false;
+    let mut saw_exited = false;
+    while !saw_exited {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildStarted { id, .. } if id == "dynamic" => {
+                saw_started = true;
+            }
+            SupervisorEvent::ChildExited { id, status, .. } if id == "dynamic" => {
+                assert!(saw_started, "child should start before exiting");
+                assert_eq!(status, ExitStatusView::Completed);
+                saw_exited = true;
+            }
+            SupervisorEvent::SupervisorStopped => {
+                panic!("allow_empty supervisor stopped instead of idling");
+            }
+            _ => {}
+        }
+    }
+
+    let exit = handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Completed);
+}
+
+#[tokio::test]
+async fn allow_empty_remove_last_child_and_readd_same_id() {
+    let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
+    let initial_starts_tx = starts_tx.clone();
+
+    let supervisor = SupervisorBuilder::new()
+        .allow_empty()
+        .child(ChildSpec::new("dynamic", move |ctx| {
+            let starts_tx = initial_starts_tx.clone();
+            async move {
+                starts_tx
+                    .send(ctx.generation)
+                    .expect("test receiver dropped");
+                ctx.token.cancelled().await;
+                Ok(())
+            }
+        }))
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+    assert_eq!(common::recv_event(&mut starts_rx).await, 0);
+
+    handle
+        .remove_child("dynamic")
+        .await
+        .expect("last child removal should be allowed");
+    assert!(handle.snapshot().children.is_empty());
+
+    let mut events = handle.subscribe();
+    handle
+        .add_child(ChildSpec::new("dynamic", move |_ctx| {
+            let starts_tx = starts_tx.clone();
+            async move {
+                starts_tx.send(0).expect("test receiver dropped");
+                Ok(())
+            }
+        }))
+        .await
+        .expect("removed child id should be reusable");
+    assert_eq!(common::recv_event(&mut starts_rx).await, 0);
+    loop {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildExited { id, status, .. } if id == "dynamic" => {
+                assert_eq!(status, ExitStatusView::Completed);
+                break;
+            }
+            SupervisorEvent::SupervisorStopped => {
+                panic!("allow_empty supervisor stopped after re-added child exited");
+            }
+            _ => {}
+        }
+    }
+
+    let exit = handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Completed);
+}
+
+#[tokio::test]
+async fn allow_empty_transient_success_idles_until_shutdown() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let release_for_child = release.clone();
+
+    let supervisor = SupervisorBuilder::new()
+        .allow_empty()
+        .child(
+            ChildSpec::new("transient", move |_ctx| {
+                let started_tx = started_tx.clone();
+                let release = release_for_child.clone();
+                async move {
+                    started_tx.send(()).expect("test receiver dropped");
+                    release.notified().await;
+                    Ok(())
+                }
+            })
+            .restart(Restart::Transient),
+        )
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+    common::recv_event(&mut started_rx).await;
+    release.notify_one();
+
+    loop {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildExited { id, status, .. } if id == "transient" => {
+                assert_eq!(status, ExitStatusView::Completed);
+                break;
+            }
+            SupervisorEvent::SupervisorStopped => {
+                panic!("allow_empty supervisor stopped on transient completion");
+            }
+            _ => {}
+        }
+    }
+
+    handle
+        .add_child(ChildSpec::new("probe", |_ctx| async move { Ok(()) }))
+        .await
+        .expect("supervisor should still accept children after transient completion");
+
+    let exit = handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Completed);
+}
+
+#[tokio::test]
+async fn allow_empty_terminal_failure_is_reported_on_shutdown() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let release_for_child = release.clone();
+
+    let supervisor = SupervisorBuilder::new()
+        .allow_empty()
+        .child(
+            ChildSpec::new("fails", move |_ctx| {
+                let started_tx = started_tx.clone();
+                let release = release_for_child.clone();
+                async move {
+                    started_tx.send(()).expect("test receiver dropped");
+                    release.notified().await;
+                    Err(common::test_error("terminal failure"))
+                }
+            })
+            .restart(Restart::Temporary),
+        )
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+    common::recv_event(&mut started_rx).await;
+    release.notify_one();
+
+    loop {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildExited { id, status, .. } if id == "fails" => {
+                assert!(matches!(status, ExitStatusView::Failed(_)));
+                break;
+            }
+            SupervisorEvent::SupervisorStopped => {
+                panic!("allow_empty supervisor stopped on terminal failure");
+            }
+            _ => {}
+        }
+    }
+
+    handle
+        .add_child(ChildSpec::new("probe", |_ctx| async move { Ok(()) }))
+        .await
+        .expect("supervisor should still accept children after terminal failure");
+
+    let exit = handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(exit, SupervisorExit::Failed);
+}
 
 #[tokio::test]
 async fn add_child_starts_it_immediately() {

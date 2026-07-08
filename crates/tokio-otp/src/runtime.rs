@@ -54,8 +54,11 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Starts building the common supervised-actor runtime: every actor of a
-    /// graph runs as its own supervised child, with dynamic actor support.
+    /// Starts building a supervised actor runtime.
+    ///
+    /// Provide a graph to run every graph actor as its own supervised child, or
+    /// call [`RuntimeBuilder::dynamic`](crate::RuntimeBuilder::dynamic) to
+    /// start with no actors and add them at runtime.
     ///
     /// See [`RuntimeBuilder`](crate::RuntimeBuilder) for an example.
     pub fn builder() -> crate::RuntimeBuilder {

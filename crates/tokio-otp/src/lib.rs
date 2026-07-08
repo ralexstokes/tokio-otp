@@ -54,7 +54,8 @@
 //!
 //! - **The integrated runtime** via [`Runtime::builder`]: per-actor
 //!   supervision with uniform policies, packaged with a dynamic actor
-//!   registry. The right default for most applications.
+//!   registry. Add [`RuntimeBuilder::dynamic`] to start with no actors or to
+//!   let a graph-backed runtime return to zero actors.
 //!
 //! - **Per-actor supervision** via [`SupervisedActors`]: each actor becomes its
 //!   own child in a supervisor, with individual restart and shutdown policies.
