@@ -11,9 +11,12 @@ use tokio::{
 
 use crate::{
     child::ChildSpec,
-    error::{ControlError, SupervisorError, SupervisorExit},
+    error::{ControlError, RestartMonitorError, SupervisorError, SupervisorExit},
     event::SupervisorEvent,
-    snapshot::SupervisorSnapshot,
+    monitor::RestartMonitor,
+    snapshot::{
+        ChildMembershipView, ChildSnapshot, ChildStateView, SupervisorSnapshot, SupervisorStateView,
+    },
 };
 
 type SupervisorJoinHandle = JoinHandle<Result<SupervisorExit, SupervisorError>>;
@@ -395,6 +398,58 @@ impl SupervisorHandle {
         })
     }
 
+    /// Captures a direct child's current generation and returns an awaitable
+    /// that resolves once the child is next observed running with a greater
+    /// generation.
+    ///
+    /// Call this before triggering the crash: the baseline generation is
+    /// captured here, synchronously, not when the monitor is awaited. A monitor
+    /// created after a restart has fully completed waits for the next restart.
+    ///
+    /// This observes only direct children of this supervisor. Children inside
+    /// nested supervisors are not visible by id at this level; a path-aware
+    /// monitor is a future extension.
+    pub fn monitor_restart(
+        &self,
+        id: impl Into<String>,
+    ) -> Result<RestartMonitor, RestartMonitorError> {
+        let id = id.into();
+        let snapshot = self.snapshots_rx.borrow();
+        let child = snapshot
+            .child(&id)
+            .ok_or_else(|| RestartMonitorError::UnknownChild(id.clone()))?;
+        if child.membership == ChildMembershipView::Removing {
+            return Err(RestartMonitorError::ChildRemoved(id));
+        }
+
+        Ok(RestartMonitor::new(
+            id,
+            child.generation,
+            self.snapshots_rx.clone(),
+        ))
+    }
+
+    /// Resolves when every currently registered child reports running.
+    pub async fn wait_until_running(&self) -> Result<(), SupervisorError> {
+        let mut snapshots = self.subscribe_snapshots();
+
+        loop {
+            let snapshot = snapshots.borrow().clone();
+            if all_children_running(&snapshot) {
+                return Ok(());
+            }
+            if snapshot.state == SupervisorStateView::Stopped {
+                return Err(SupervisorError::Internal(
+                    "supervisor stopped before all children were running".to_owned(),
+                ));
+            }
+
+            snapshots.changed().await.map_err(|_| {
+                SupervisorError::Internal("supervisor snapshot channel closed".to_owned())
+            })?;
+        }
+    }
+
     /// Returns a new receiver for supervisor lifecycle events.
     ///
     /// The receiver is backed by a bounded broadcast channel. If the receiver
@@ -465,4 +520,13 @@ where
     path.into_iter()
         .map(|segment| segment.as_ref().to_owned())
         .collect()
+}
+
+fn all_children_running(snapshot: &SupervisorSnapshot) -> bool {
+    snapshot.children.iter().all(child_running)
+}
+
+fn child_running(child: &ChildSnapshot) -> bool {
+    child.state == ChildStateView::Running
+        && child.supervisor.as_deref().is_none_or(all_children_running)
 }

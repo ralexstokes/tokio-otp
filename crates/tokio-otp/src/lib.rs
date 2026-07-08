@@ -95,8 +95,9 @@ pub mod prelude {
         RunnableActor, RunnableActorFactory,
     };
     pub use tokio_supervisor::{
-        ChildContext, ChildSpec, Restart, RestartIntensity, ShutdownMode, ShutdownPolicy, Strategy,
-        Supervisor, SupervisorBuilder, SupervisorEvent, SupervisorHandle, SupervisorSnapshot,
+        ChildContext, ChildSpec, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
+        ShutdownMode, ShutdownPolicy, Strategy, Supervisor, SupervisorBuilder, SupervisorEvent,
+        SupervisorHandle, SupervisorSnapshot,
     };
 
     pub use crate::{

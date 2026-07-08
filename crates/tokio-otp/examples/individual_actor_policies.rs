@@ -10,7 +10,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_actor::{ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, MessageHandler};
 use tokio_otp::SupervisedActors;
-use tokio_supervisor::{Restart, RestartIntensity, Strategy, SupervisorBuilder, SupervisorEvent};
+use tokio_supervisor::{Restart, RestartIntensity, Strategy, SupervisorBuilder};
 
 #[derive(Clone)]
 struct Frontend {
@@ -82,18 +82,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .build()?;
     let handle = supervisor.spawn();
-    let mut events = handle.subscribe();
 
+    let restart = handle.monitor_restart("worker")?;
     frontend.send("fail-worker".to_owned()).await?;
-    loop {
-        let event = events.recv().await?;
-        if matches!(
-            &event,
-            SupervisorEvent::ChildStarted { id, generation } if id == "worker" && *generation > 0
-        ) {
-            break;
-        }
-    }
+    restart.await?;
     frontend.send("after-restart".to_owned()).await?;
     println!("observed {}", observed_rx.recv().await.expect("message"));
 

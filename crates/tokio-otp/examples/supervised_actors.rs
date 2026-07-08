@@ -71,7 +71,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .restart(Restart::Transient)
         .build()?;
     let handle = runtime.spawn();
-    let mut events = handle.subscribe();
 
     orders.send("business cards x100".to_owned()).await?;
     println!("delivered {}", delivered_rx.recv().await.expect("delivery"));
@@ -79,16 +78,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Crash the worker. Each run gets a fresh mailbox, so an order queued
     // behind the jam would be lost with it — wait for the supervisor to
     // restart the worker before sending more.
+    let restart = handle.monitor_restart("worker")?;
     orders.send("jam".to_owned()).await?;
-    loop {
-        let event = events.recv().await?;
-        if matches!(
-            &event,
-            SupervisorEvent::ChildStarted { id, generation } if id == "worker" && *generation > 0
-        ) {
-            break;
-        }
-    }
+    restart.await?;
 
     orders.send("flyers x500".to_owned()).await?;
     println!("delivered {}", delivered_rx.recv().await.expect("delivery"));

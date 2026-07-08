@@ -77,7 +77,7 @@ impl SupervisorSnapshotReceiverExt for watch::Receiver<crate::SupervisorSnapshot
 pub use crate::{
     BackoffPolicy, BoxError, BuildError, ChildContext, ChildMembershipView, ChildResult,
     ChildSnapshot, ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView,
-    Restart, RestartIntensity, ShutdownMode, ShutdownPolicy, Strategy, Supervisor,
-    SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorExit, SupervisorHandle,
-    SupervisorSnapshot, SupervisorStateView, SupervisorToken,
+    Restart, RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy,
+    Strategy, Supervisor, SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorExit,
+    SupervisorHandle, SupervisorSnapshot, SupervisorStateView, SupervisorToken,
 };

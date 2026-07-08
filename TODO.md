@@ -26,14 +26,17 @@ Done by folding restart-aware waiting into `send`/`call`, deleting
 `send_when_ready`, `wait_for_binding`, and `blocking_send`, and leaving
 timeouts/cancellation to `tokio::time::timeout` / `select!`.
 
-## 2. First-class readiness and restart-waiting helpers
+## 2. ~~First-class readiness and restart-waiting helpers~~ — done
 
 ~~Every example calls per-ref `wait_for_binding().await` after `spawn()`. Add
 helpers like `RuntimeHandle::wait_until_running()` (all children started).~~
-Waiting for a restart still means hand-matching
+~~Waiting for a restart still means hand-matching
 `ChildStarted { generation > 0 }` events — with a subtle race if you subscribe
 after triggering the crash. Add `wait_for_child_restart(id)` to cover that
-remaining pattern.
+remaining pattern.~~
+
+Done with `SupervisorHandle::monitor_restart` / `RuntimeHandle::monitor_restart`
+returning `RestartMonitor`, plus `SupervisorHandle::wait_until_running`.
 
 ## 3. Umbrella prelude completeness
 

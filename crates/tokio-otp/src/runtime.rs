@@ -6,9 +6,9 @@ use tokio_actor::{
     RunnableActorFactory,
 };
 use tokio_supervisor::{
-    ChildSnapshot, ChildSpec, ChildStateView, ControlError, Restart, RestartIntensity,
+    ChildSpec, ControlError, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
     ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorExit, SupervisorHandle,
-    SupervisorSnapshot, SupervisorStateView,
+    SupervisorSnapshot,
 };
 
 use crate::error::DynamicActorError;
@@ -277,25 +277,17 @@ impl RuntimeHandle {
         self.supervisor.wait().await
     }
 
+    /// Delegates to [`SupervisorHandle::monitor_restart`].
+    pub fn monitor_restart(
+        &self,
+        id: impl Into<String>,
+    ) -> Result<RestartMonitor, RestartMonitorError> {
+        self.supervisor.monitor_restart(id)
+    }
+
     /// Resolves when every currently registered child reports running.
     pub async fn wait_until_running(&self) -> Result<(), SupervisorError> {
-        let mut snapshots = self.supervisor.subscribe_snapshots();
-
-        loop {
-            let snapshot = snapshots.borrow().clone();
-            if all_children_running(&snapshot) {
-                return Ok(());
-            }
-            if snapshot.state == SupervisorStateView::Stopped {
-                return Err(SupervisorError::Internal(
-                    "supervisor stopped before all children were running".to_owned(),
-                ));
-            }
-
-            snapshots.changed().await.map_err(|_| {
-                SupervisorError::Internal("supervisor snapshot channel closed".to_owned())
-            })?;
-        }
+        self.supervisor.wait_until_running().await
     }
 
     /// Returns a new receiver for supervisor lifecycle events.
@@ -391,13 +383,4 @@ fn terminate_and_deregister_if_present(
         Err(RegistryError::UnknownActorId(unknown)) if unknown == actor_id => Ok(()),
         Err(error) => Err(error),
     }
-}
-
-fn all_children_running(snapshot: &SupervisorSnapshot) -> bool {
-    snapshot.children.iter().all(child_running)
-}
-
-fn child_running(child: &ChildSnapshot) -> bool {
-    child.state == ChildStateView::Running
-        && child.supervisor.as_deref().is_none_or(all_children_running)
 }

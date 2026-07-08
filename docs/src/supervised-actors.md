@@ -62,19 +62,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .restart_intensity(RestartIntensity::new(5, Duration::from_secs(60)))
         .build()?;
     let handle = runtime.spawn();
-    let mut events = handle.subscribe();
 
     orders.send("business cards x100".into()).await?;
+    let restart = handle.monitor_restart("press")?;
     orders.send("origami cranes x1000".into()).await?;
-    loop {
-        let event = events.recv().await?;
-        if matches!(
-            &event,
-            SupervisorEvent::ChildStarted { id, generation } if id == "press" && *generation > 0
-        ) {
-            break;
-        }
-    }
+    restart.await?;
     orders.send("flyers x500".into()).await?;
 
     handle.shutdown_and_wait().await?;
@@ -86,10 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 graph, applies uniform policies to every actor child, and packages the result
 into a `Runtime` with a supervisor, registry, and dynamic actor support.
 
-The restart wait before sending `flyers x500` is still deliberate. A worker
-gets a fresh mailbox on restart; anything queued behind the crashing `origami`
-order would be dropped with the old mailbox. `send` waits while the actor is
-unbound, but it cannot recover messages already accepted by the failed run.
+The restart monitor before sending `origami cranes x1000` is still deliberate.
+A worker gets a fresh mailbox on restart; anything queued behind the crashing
+`origami` order would be dropped with the old mailbox. `send` waits while the
+actor is unbound, but it cannot recover messages already accepted by the
+failed run.
 
 When you need per-actor policies — say a tighter restart budget for the press
 alone — drop down to `SupervisedActors`, which the builder uses under the

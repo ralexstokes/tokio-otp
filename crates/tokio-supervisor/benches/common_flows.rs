@@ -10,7 +10,10 @@ use std::{
     time::Instant,
 };
 
-use tokio::runtime::{Builder, Runtime};
+use tokio::{
+    runtime::{Builder, Runtime},
+    sync::Notify,
+};
 use tokio_supervisor::{
     BoxError, ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorEvent, SupervisorExit,
 };
@@ -119,11 +122,15 @@ async fn spawn_shutdown_flow(children: usize) {
 
 async fn one_for_one_restart_flow() {
     let attempts = Arc::new(AtomicUsize::new(0));
+    let trigger_failure = Arc::new(Notify::new());
     let flaky_attempts = Arc::clone(&attempts);
+    let flaky_trigger = Arc::clone(&trigger_failure);
     let flaky = ChildSpec::new("flaky", move |ctx| {
         let attempts = Arc::clone(&flaky_attempts);
+        let trigger_failure = Arc::clone(&flaky_trigger);
         async move {
             if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                trigger_failure.notified().await;
                 return Err(bench_error("restart me"));
             }
 
@@ -147,8 +154,12 @@ async fn one_for_one_restart_flow() {
         .build()
         .expect("benchmark supervisor should build")
         .spawn();
-    let mut events = handle.subscribe();
-    wait_for_child_restart(&mut events, "flaky").await;
+    let restart = handle
+        .monitor_restart("flaky")
+        .expect("flaky child should be known");
+    trigger_failure.notify_one();
+    let generation = restart.await.expect("flaky child should restart");
+    black_box(generation);
     black_box(attempts.load(Ordering::Relaxed));
 
     handle.shutdown();
@@ -242,22 +253,6 @@ async fn wait_for_child_start_count(
         }
     }
     started
-}
-
-async fn wait_for_child_restart(
-    events: &mut tokio::sync::broadcast::Receiver<SupervisorEvent>,
-    id: &str,
-) {
-    loop {
-        match events.recv().await.expect("event stream") {
-            SupervisorEvent::ChildRestarted {
-                id: restarted_id,
-                old_generation: 0,
-                new_generation: 1,
-            } if restarted_id == id => return,
-            _ => {}
-        }
-    }
 }
 
 async fn wait_for_restart_count(

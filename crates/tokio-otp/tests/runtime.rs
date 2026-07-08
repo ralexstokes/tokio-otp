@@ -1,4 +1,4 @@
-use std::{io, marker::PhantomData, time::Duration};
+use std::{future::IntoFuture, io, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{
@@ -231,6 +231,55 @@ async fn wait_until_running_resolves_after_spawn_with_multiple_children() {
         .expect("runtime reported running")
         .expect("runtime running result");
     assert_eq!(handle.snapshot().children.len(), 2);
+
+    assert_eq!(
+        handle
+            .shutdown_and_wait()
+            .await
+            .expect("runtime shut down cleanly"),
+        SupervisorExit::Shutdown
+    );
+}
+
+#[derive(Clone)]
+struct FailOnMessage;
+
+impl Actor for FailOnMessage {
+    type Msg = ();
+
+    async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
+        if ctx.recv().await.is_some() {
+            return Err::<(), BoxError>(Box::new(io::Error::other("boom")));
+        }
+
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn runtime_handle_monitor_restart_delegates_to_supervisor() {
+    let mut builder = GraphBuilder::new();
+    let worker_ref = builder.actor("worker", FailOnMessage);
+    let graph = builder.build().expect("valid graph");
+
+    let runtime = Runtime::builder()
+        .graph(graph)
+        .strategy(Strategy::OneForOne)
+        .restart(Restart::Transient)
+        .build()
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+
+    let restart = handle
+        .monitor_restart("worker")
+        .expect("worker child should be known");
+    worker_ref.send(()).await.expect("message sent");
+
+    let generation = timeout(Duration::from_secs(1), restart.into_future())
+        .await
+        .expect("restart monitor should resolve")
+        .expect("restart monitor should succeed");
+    assert_eq!(generation, 1);
 
     assert_eq!(
         handle
