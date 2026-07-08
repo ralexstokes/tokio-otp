@@ -3,10 +3,12 @@ use std::{
     collections::HashMap,
     future::Future,
     io::Error as IoError,
+    pin::Pin,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Context, Poll},
 };
 
 use thiserror::Error;
@@ -18,12 +20,15 @@ use crate::{
     actor::{Actor, BoxError},
     binding::{BindingCore, BindingLifecycle, RebindPolicy},
     builder::{
-        DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY,
-        DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR,
+        DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
+        DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR,
     },
     context::ActorRef,
     error::LookupError,
-    graph::{ErasedRunner, GraphInner, RunnerStart, TypedRunner},
+    graph::{
+        ErasedRunner, GraphInner, RunnerStart, TypedRunner, set_shutdown_deadline,
+        wait_for_shutdown_deadline,
+    },
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     registry::{ActorRegistry, RegistryError},
 };
@@ -67,6 +72,7 @@ pub struct RunnableActorFactory {
     observability: crate::observability::GraphObservability,
     mailbox_capacity: usize,
     max_blocking_tasks_per_actor: Option<usize>,
+    actor_shutdown_timeout: std::time::Duration,
     blocking_shutdown_timeout: std::time::Duration,
 }
 
@@ -89,6 +95,7 @@ impl ActorSet {
                     rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
                     mailbox_capacity: graph.mailbox_capacity,
                     max_blocking_tasks_per_actor: graph.max_blocking_tasks_per_actor,
+                    actor_shutdown_timeout: graph.actor_shutdown_timeout,
                     blocking_shutdown_timeout: graph.blocking_shutdown_timeout,
                     observability: graph.observability.clone(),
                     running: AtomicBool::new(false),
@@ -131,6 +138,7 @@ impl ActorSet {
             observability: self.inner.graph.observability.clone(),
             mailbox_capacity: self.inner.graph.mailbox_capacity,
             max_blocking_tasks_per_actor: self.inner.graph.max_blocking_tasks_per_actor,
+            actor_shutdown_timeout: self.inner.graph.actor_shutdown_timeout,
             blocking_shutdown_timeout: self.inner.graph.blocking_shutdown_timeout,
         }
     }
@@ -164,6 +172,7 @@ struct RunnableActorInner {
     rebind_policy: std::sync::atomic::AtomicU8,
     mailbox_capacity: usize,
     max_blocking_tasks_per_actor: Option<usize>,
+    actor_shutdown_timeout: std::time::Duration,
     blocking_shutdown_timeout: std::time::Duration,
     observability: crate::observability::GraphObservability,
     running: AtomicBool,
@@ -232,6 +241,14 @@ impl RunnableActor {
     }
 
     /// Runs this actor with a fresh mailbox until shutdown resolves.
+    ///
+    /// When shutdown resolves, the actor's shutdown token is cancelled and
+    /// `run_until` waits up to the configured actor shutdown timeout for the
+    /// actor task to stop. If the actor is still running after that deadline,
+    /// the task is aborted. A timeout abort during a requested shutdown is
+    /// reported as `Ok(())` with a `Cancelled` actor exit. Under
+    /// `tokio-supervisor`, the child `ShutdownPolicy` timeout is an
+    /// independent outer bound on this whole future.
     pub async fn run_until<F>(&self, shutdown: F) -> Result<(), ActorRunError>
     where
         F: Future<Output = ()>,
@@ -261,16 +278,26 @@ impl RunnableActor {
 
         self.inner.observability.emit_actor_started(&actor_id);
 
-        let actor_join = actor_task.join();
-        tokio::pin!(actor_join);
         let mut shutdown_requested = false;
+        let mut shutdown_deadline = None;
+        let mut aborted_after_timeout = false;
         let result = loop {
             tokio::select! {
                 biased;
-                joined = &mut actor_join => break joined,
+                joined = &mut actor_task => break joined,
                 _ = shutdown.as_mut(), if !shutdown_requested => {
                     shutdown_requested = true;
                     actor_shutdown.cancel();
+                    set_shutdown_deadline(
+                        &mut shutdown_deadline,
+                        self.inner.actor_shutdown_timeout,
+                    );
+                }
+                _ = wait_for_shutdown_deadline(shutdown_deadline),
+                    if shutdown_deadline.is_some() && !aborted_after_timeout =>
+                {
+                    aborted_after_timeout = true;
+                    actor_task.abort();
                 }
             }
         };
@@ -321,6 +348,19 @@ impl RunnableActor {
                     None,
                 );
                 std::panic::resume_unwind(err.into_panic());
+            }
+            Err(_err) if aborted_after_timeout => {
+                self.apply_run_disposition(run_disposition(
+                    rebind_policy,
+                    shutdown_requested,
+                    ActorExitStatus::Cancelled,
+                ));
+                self.inner.observability.emit_actor_exited(
+                    &actor_id,
+                    ActorExitStatus::Cancelled,
+                    None,
+                );
+                Ok(())
             }
             Err(_err) => {
                 let source: BoxError = Box::new(IoError::other(format!(
@@ -410,6 +450,7 @@ impl RunnableActorFactory {
             observability: GraphObservability::new(anonymous_graph_name()),
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
             max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
+            actor_shutdown_timeout: DEFAULT_ACTOR_SHUTDOWN_TIMEOUT,
             blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
         }
     }
@@ -433,6 +474,7 @@ impl RunnableActorFactory {
                 rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
                 mailbox_capacity: self.mailbox_capacity,
                 max_blocking_tasks_per_actor: self.max_blocking_tasks_per_actor,
+                actor_shutdown_timeout: self.actor_shutdown_timeout,
                 blocking_shutdown_timeout: self.blocking_shutdown_timeout,
                 observability: self.observability.clone(),
                 running: AtomicBool::new(false),
@@ -486,22 +528,34 @@ impl<T> AbortOnDrop<T> {
         }
     }
 
-    async fn join(&mut self) -> Result<T, tokio::task::JoinError> {
-        let result = self
+    fn abort(&self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let handle = self
             .handle
             .as_mut()
-            .expect("join handle is present until joined")
-            .await;
-        self.handle = None;
-        result
+            .expect("join handle is present until joined");
+        match Pin::new(handle).poll(cx) {
+            Poll::Ready(result) => {
+                self.handle = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            handle.abort();
-        }
+        self.abort();
     }
 }
 

@@ -66,14 +66,19 @@ Done by deleting `Runtime::run` (`spawn()` + `wait()` is the foreground path
 and keeps the control surface) and renaming `into_parts` to `into_supervisor`
 with docs making the registry discard explicit.
 
-## 5. `actor_shutdown_timeout` only applies in graph-run mode
+## 5. ~~`actor_shutdown_timeout` only applies in graph-run mode~~ — done
 
-`Graph::run_until` aborts uncooperative actors after the timeout, but
+~~`Graph::run_until` aborts uncooperative actors after the timeout, but
 `RunnableActor::run_until` cancels the token and then waits indefinitely
 (the timeout is never threaded into `RunnableActorInner`; under
 `tokio-supervisor` the child `ShutdownPolicy` timeout is the backstop).
 Either thread the timeout through `RunnableActor` or document the asymmetry
-on both the builder setter and `RunnableActor::run_until`.
+on both the builder setter and `RunnableActor::run_until`.~~
+
+Done by threading `actor_shutdown_timeout` through `RunnableActor` and its
+dynamic factory, adding the same cancel/deadline/abort behavior as graph-run
+mode, and treating timeout aborts during requested shutdown as clean
+`Cancelled` exits.
 
 ## 6. Registry consistency and lookup diagnostics
 

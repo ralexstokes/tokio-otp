@@ -594,11 +594,11 @@ impl GraphRuntime {
     }
 }
 
-fn set_shutdown_deadline(deadline: &mut Option<TokioInstant>, timeout: Duration) {
+pub(crate) fn set_shutdown_deadline(deadline: &mut Option<TokioInstant>, timeout: Duration) {
     deadline.get_or_insert_with(|| TokioInstant::now() + timeout);
 }
 
-async fn wait_for_shutdown_deadline(deadline: Option<TokioInstant>) {
+pub(crate) async fn wait_for_shutdown_deadline(deadline: Option<TokioInstant>) {
     match deadline {
         Some(deadline) => sleep_until(deadline).await,
         None => std::future::pending::<()>().await,

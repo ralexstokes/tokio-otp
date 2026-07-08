@@ -42,6 +42,7 @@ struct Slot {
 
 pub(crate) const DEFAULT_MAILBOX_CAPACITY: usize = 64;
 pub(crate) const DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR: usize = 16;
+pub(crate) const DEFAULT_ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Default for GraphBuilder {
@@ -61,7 +62,7 @@ impl GraphBuilder {
             errors: Vec::new(),
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
             max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
-            actor_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
+            actor_shutdown_timeout: DEFAULT_ACTOR_SHUTDOWN_TIMEOUT,
             blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
         }
     }
@@ -96,11 +97,15 @@ impl GraphBuilder {
         self
     }
 
-    /// Sets how long graph shutdown waits for actor tasks to stop after
+    /// Sets how long shutdown waits for an actor task to stop after
     /// cancellation is requested.
     ///
-    /// The default timeout is 5 seconds. Any actor task still running after the
-    /// timeout is aborted so graph shutdown can complete.
+    /// This applies to [`Graph::run_until`](crate::Graph::run_until) and to
+    /// each [`RunnableActor::run_until`](crate::RunnableActor::run_until)
+    /// independently. The default timeout is 5 seconds. Any actor task still
+    /// running after the timeout is aborted; when this happens during a
+    /// requested shutdown it is reported as a clean shutdown with a
+    /// `Cancelled` actor exit.
     pub fn actor_shutdown_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.actor_shutdown_timeout = timeout;
         self

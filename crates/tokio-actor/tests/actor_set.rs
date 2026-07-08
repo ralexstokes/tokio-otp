@@ -45,6 +45,29 @@ impl<M: Send + 'static> Actor for Drain<M> {
     }
 }
 
+#[derive(Clone)]
+struct NeverStops;
+
+impl Actor for NeverStops {
+    type Msg = ();
+
+    async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+        pending::<ActorResult>().await
+    }
+}
+
+#[derive(Clone)]
+struct StopsOnShutdown;
+
+impl Actor for StopsOnShutdown {
+    type Msg = ();
+
+    async fn run(&self, ctx: ActorContext<()>) -> ActorResult {
+        ctx.shutdown_token().cancelled().await;
+        Ok(())
+    }
+}
+
 fn start_actor(actor: RunnableActor) -> (CancellationToken, JoinHandle<Result<(), ActorRunError>>) {
     let stop = CancellationToken::new();
     let task = tokio::spawn({
@@ -67,6 +90,60 @@ async fn stop_actor(
 
 fn single_actor(actor_set: &ActorSet, id: &str) -> RunnableActor {
     actor_set.actor(id).expect("actor exists").clone()
+}
+
+#[tokio::test(start_paused = true)]
+async fn runnable_actor_shutdown_timeout_aborts_uncooperative_actor_cleanly() {
+    let mut builder = GraphBuilder::new();
+    builder.actor_shutdown_timeout(Duration::from_millis(100));
+    builder.actor("worker", NeverStops);
+    let actor_set = builder
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+    let worker = single_actor(&actor_set, "worker");
+
+    worker
+        .run_until(async {})
+        .await
+        .expect("timeout abort is a clean requested shutdown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn runnable_actor_shutdown_timeout_leaves_cooperative_actor_clean() {
+    let mut builder = GraphBuilder::new();
+    builder.actor_shutdown_timeout(Duration::from_secs(30));
+    builder.actor("worker", StopsOnShutdown);
+    let actor_set = builder
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+    let worker = single_actor(&actor_set, "worker");
+
+    worker
+        .run_until(async {})
+        .await
+        .expect("cooperative shutdown completes cleanly");
+}
+
+#[tokio::test(start_paused = true)]
+async fn dynamic_factory_actor_inherits_shutdown_timeout() {
+    let mut builder = GraphBuilder::new();
+    builder.actor_shutdown_timeout(Duration::from_millis(100));
+    builder.actor("anchor", Drain::<()>::new());
+    let actor_set = builder
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+    let worker = actor_set.dynamic_factory().actor("worker", NeverStops);
+
+    worker
+        .run_until(async {})
+        .await
+        .expect("factory actor uses inherited shutdown timeout");
 }
 
 #[derive(Clone, Default)]
