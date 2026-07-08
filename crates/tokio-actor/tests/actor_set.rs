@@ -1,7 +1,7 @@
 use std::{
     fmt,
     future::pending,
-    io,
+    marker::PhantomData,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -10,17 +10,40 @@ use std::{
 };
 
 use tokio::{
-    sync::mpsc,
+    sync::{Notify, mpsc},
     task::JoinHandle,
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    ActorContext, ActorRunError, ActorSet, ActorSpec, BlockingOptions, BoxError, Envelope,
-    GraphBuilder, IngressError, RunnableActor, SendError,
+    Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
+    BlockingOptions, BoxError, GraphBuilder, LookupError, RunnableActor, SendError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Dispatch, field::Visit};
 use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+struct Drain<M>(PhantomData<fn(M)>);
+
+impl<M> Drain<M> {
+    fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> Clone for Drain<M> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M: Send + 'static> Actor for Drain<M> {
+    type Msg = M;
+
+    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
 
 fn start_actor(actor: RunnableActor) -> (CancellationToken, JoinHandle<Result<(), ActorRunError>>) {
     let stop = CancellationToken::new();
@@ -42,7 +65,7 @@ async fn stop_actor(
         .expect("actor task joined")
 }
 
-fn single_actor_set(actor_set: &ActorSet, id: &str) -> RunnableActor {
+fn single_actor(actor_set: &ActorSet, id: &str) -> RunnableActor {
     actor_set.actor(id).expect("actor exists").clone()
 }
 
@@ -89,59 +112,6 @@ impl Visit for RejectionVisitor {
     }
 }
 
-fn stale_mailbox_actor(started_tx: mpsc::UnboundedSender<()>) -> ActorSpec {
-    ActorSpec::from_actor("worker", move |ctx: ActorContext| {
-        let started_tx = started_tx.clone();
-        async move {
-            ctx.spawn_blocking(BlockingOptions::default(), |_ctx| {
-                std::thread::sleep(Duration::from_millis(400));
-                Ok(())
-            })
-            .expect("blocking task should spawn");
-            started_tx.send(()).expect("receiver alive");
-            Ok(())
-        }
-    })
-}
-
-async fn wait_for_actor_ref_stale_mailbox(actor_ref: &tokio_actor::ActorRef) {
-    timeout(Duration::from_secs(1), async {
-        loop {
-            match actor_ref.try_send(Envelope::from_static(b"probe")) {
-                Err(SendError::MailboxClosed { .. }) => break,
-                Err(SendError::ActorNotRunning { .. }) => {
-                    panic!("binding cleared before stale mailbox was observed");
-                }
-                Ok(()) | Err(SendError::MailboxFull { .. }) => {
-                    sleep(Duration::from_millis(1)).await;
-                }
-                Err(err) => panic!("unexpected send error while probing stale mailbox: {err:?}"),
-            }
-        }
-    })
-    .await
-    .expect("stale mailbox observed in time");
-}
-
-async fn wait_for_ingress_stale_mailbox(ingress: &tokio_actor::IngressHandle) {
-    timeout(Duration::from_secs(1), async {
-        loop {
-            match ingress.try_send(Envelope::from_static(b"probe")) {
-                Err(IngressError::MailboxClosed { .. }) => break,
-                Err(IngressError::NotRunning { .. }) => {
-                    panic!("binding cleared before stale ingress mailbox was observed");
-                }
-                Ok(()) | Err(IngressError::MailboxFull { .. }) => {
-                    sleep(Duration::from_millis(1)).await;
-                }
-                Err(err) => panic!("unexpected ingress error while probing stale mailbox: {err:?}"),
-            }
-        }
-    })
-    .await
-    .expect("stale ingress mailbox observed in time");
-}
-
 fn mailbox_closed_counter_dispatch(counter: MailboxClosedCounter) -> Dispatch {
     Dispatch::new(
         tracing_subscriber::registry()
@@ -150,220 +120,138 @@ fn mailbox_closed_counter_dispatch(counter: MailboxClosedCounter) -> Dispatch {
     )
 }
 
-async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
+async fn wait_for_stale_mailbox(actor_ref: &ActorRef<String>) {
     timeout(Duration::from_secs(1), async {
         loop {
-            if counter.load(Ordering::SeqCst) == expected {
-                break;
+            match actor_ref.try_send("probe".to_owned()) {
+                Err(SendError::MailboxClosed { .. }) => break,
+                Err(SendError::ActorNotRunning { .. }) => {
+                    panic!("binding cleared before stale mailbox was observed");
+                }
+                Ok(()) | Err(SendError::MailboxFull { .. }) => {
+                    sleep(Duration::from_millis(1)).await;
+                }
             }
-            sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("counter reached expected value in time");
+    .expect("stale mailbox observed in time");
 }
 
-#[tokio::test]
-async fn actor_ref_reports_not_running_for_stopped_peer() {
-    let (errors_tx, mut errors_rx) = mpsc::unbounded_channel();
+#[derive(Clone)]
+struct RebindActor {
+    runs: Arc<AtomicUsize>,
+    entered_stale_window: mpsc::UnboundedSender<()>,
+    release_first_run: Arc<Notify>,
+    observed: mpsc::UnboundedSender<String>,
+}
 
-    let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor("frontend", {
-            let errors_tx = errors_tx.clone();
-            move |mut ctx: ActorContext| {
-                let errors_tx = errors_tx.clone();
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        let error = ctx
-                            .send("worker", envelope)
-                            .await
-                            .expect_err("worker is not running");
-                        errors_tx.send(error).expect("receiver alive");
-                    }
-                    Ok(())
-                }
-            }
-        }))
-        .actor(ActorSpec::from_actor(
-            "worker",
-            |_ctx: ActorContext| async move { Ok(()) },
-        ))
-        .link("frontend", "worker")
-        .ingress("requests", "frontend")
-        .build()
-        .expect("valid graph")
-        .into_actor_set()
-        .expect("actor set");
+impl Actor for RebindActor {
+    type Msg = String;
 
-    let frontend = single_actor_set(&graph, "frontend");
-    let mut ingress = graph.ingress("requests").expect("ingress exists");
-    let (stop, task) = start_actor(frontend);
-
-    ingress.wait_for_binding().await;
-    ingress
-        .send(Envelope::from_static(b"hello"))
-        .await
-        .expect("frontend accepts ingress message");
-
-    let error = timeout(Duration::from_secs(1), errors_rx.recv())
-        .await
-        .expect("frontend reported the failure in time")
-        .expect("frontend reported a failure");
-    assert_eq!(
-        error,
-        SendError::ActorNotRunning {
-            actor_id: "worker".to_owned(),
+    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+        let run = self.runs.fetch_add(1, Ordering::SeqCst);
+        if run == 0 {
+            drop(ctx);
+            self.entered_stale_window.send(()).expect("receiver alive");
+            self.release_first_run.notified().await;
+            return Ok(());
         }
-    );
 
-    stop_actor(stop, task)
-        .await
-        .expect("frontend stopped cleanly");
-}
-
-#[tokio::test]
-async fn send_when_ready_returns_promptly_on_shutdown() {
-    let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "frontend",
-            |mut ctx: ActorContext| async move {
-                while let Some(envelope) = ctx.recv().await {
-                    ctx.send_when_ready("worker", envelope).await?;
-                }
-                Ok(())
-            },
-        ))
-        .actor(ActorSpec::from_actor(
-            "worker",
-            |_ctx: ActorContext| async move { Ok(()) },
-        ))
-        .link("frontend", "worker")
-        .ingress("requests", "frontend")
-        .build()
-        .expect("valid graph")
-        .into_actor_set()
-        .expect("actor set");
-
-    let frontend = single_actor_set(&graph, "frontend");
-    let mut ingress = graph.ingress("requests").expect("ingress exists");
-    let (stop, task) = start_actor(frontend);
-
-    ingress.wait_for_binding().await;
-    ingress
-        .send(Envelope::from_static(b"hello"))
-        .await
-        .expect("frontend accepts ingress message");
-
-    stop_actor(stop, task)
-        .await
-        .expect("frontend stopped cleanly while waiting for worker restart");
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("receiver alive");
+        }
+        Ok(())
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn actor_ref_send_when_ready_waits_for_stale_binding_to_change() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let actor_set = GraphBuilder::new()
-        .blocking_shutdown_timeout(Duration::from_millis(250))
-        .actor(stale_mailbox_actor(started_tx))
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+
+    let mut builder = GraphBuilder::new();
+    builder.actor(
+        "worker",
+        RebindActor {
+            runs: Arc::new(AtomicUsize::new(0)),
+            entered_stale_window: entered_tx,
+            release_first_run: release.clone(),
+            observed: observed_tx,
+        },
+    );
+    let actor_set = builder
         .build()
         .expect("valid graph")
         .into_actor_set()
         .expect("actor set");
 
-    let worker = single_actor_set(&actor_set, "worker");
-    let mut actor_ref = worker.actor_ref();
-    let (_stop, task) = start_actor(worker);
+    let worker = single_actor(&actor_set, "worker");
+    let actor_ref = worker.actor_ref::<String>().expect("typed ref");
+    let (_first_stop, first_task) = start_actor(worker.clone());
 
-    timeout(Duration::from_secs(1), started_rx.recv())
+    timeout(Duration::from_secs(1), entered_rx.recv())
         .await
-        .expect("actor started in time")
-        .expect("actor reported start");
-    wait_for_actor_ref_stale_mailbox(&actor_ref).await;
+        .expect("actor entered stale window")
+        .expect("actor reported stale window");
+    wait_for_stale_mailbox(&actor_ref).await;
 
     let counter = MailboxClosedCounter::default();
     let dispatch = mailbox_closed_counter_dispatch(counter.clone());
-    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let guard = tracing::dispatcher::set_default(&dispatch);
 
-    timeout(
-        Duration::from_millis(40),
-        actor_ref.send_when_ready(Envelope::from_static(b"held")),
-    )
-    .await
-    .expect_err("send_when_ready should wait for a binding change");
+    let mut sending_ref = actor_ref.clone();
+    let send_task =
+        tokio::spawn(async move { sending_ref.send_when_ready("held".to_owned()).await });
+    sleep(Duration::from_millis(40)).await;
+    assert!(
+        !send_task.is_finished(),
+        "send_when_ready should wait for a new binding"
+    );
 
-    drop(_guard);
+    drop(guard);
     assert_eq!(
         counter.count(),
         1,
         "stale closed mailbox should be observed once before waiting"
     );
 
-    task.await
-        .expect("actor run task joined")
-        .expect("actor run completed cleanly");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn ingress_send_when_ready_waits_for_stale_binding_to_change() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let actor_set = GraphBuilder::new()
-        .blocking_shutdown_timeout(Duration::from_millis(250))
-        .actor(stale_mailbox_actor(started_tx))
-        .ingress("requests", "worker")
-        .build()
-        .expect("valid graph")
-        .into_actor_set()
-        .expect("actor set");
-
-    let worker = single_actor_set(&actor_set, "worker");
-    let mut ingress = actor_set.ingress("requests").expect("ingress exists");
-    let (_stop, task) = start_actor(worker);
-
-    timeout(Duration::from_secs(1), started_rx.recv())
+    release.notify_one();
+    first_task
         .await
-        .expect("actor started in time")
-        .expect("actor reported start");
-    wait_for_ingress_stale_mailbox(&ingress).await;
+        .expect("first actor task joined")
+        .expect("first actor run completed cleanly");
 
-    let counter = MailboxClosedCounter::default();
-    let dispatch = mailbox_closed_counter_dispatch(counter.clone());
-    let _guard = tracing::dispatcher::set_default(&dispatch);
-
-    timeout(
-        Duration::from_millis(40),
-        ingress.send_when_ready(Envelope::from_static(b"held")),
-    )
-    .await
-    .expect_err("send_when_ready should wait for a binding change");
-
-    drop(_guard);
+    let (second_stop, second_task) = start_actor(worker);
     assert_eq!(
-        counter.count(),
-        1,
-        "stale closed ingress mailbox should be observed once before waiting"
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("held message delivered")
+            .expect("message observed"),
+        "held"
     );
+    send_task
+        .await
+        .expect("send task joined")
+        .expect("send completed after rebind");
 
-    task.await
-        .expect("actor run task joined")
-        .expect("actor run completed cleanly");
+    stop_actor(second_stop, second_task)
+        .await
+        .expect("second actor stopped cleanly");
 }
 
 #[tokio::test]
 async fn runnable_actor_rejects_concurrent_runs() {
-    let actor_set = GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "worker",
-            |mut ctx: ActorContext| async move {
-                while ctx.recv().await.is_some() {}
-                Ok(())
-            },
-        ))
+    let mut builder = GraphBuilder::new();
+    builder.actor("worker", Drain::<()>::new());
+    let actor_set = builder
         .build()
         .expect("valid graph")
         .into_actor_set()
         .expect("actor set");
 
-    let worker = single_actor_set(&actor_set, "worker");
+    let worker = single_actor(&actor_set, "worker");
     let (stop, task) = start_actor(worker.clone());
     sleep(Duration::from_millis(20)).await;
 
@@ -377,172 +265,244 @@ async fn runnable_actor_rejects_concurrent_runs() {
         .expect("worker stopped cleanly");
 }
 
-#[tokio::test]
-async fn aborting_run_until_aborts_inner_actor_task() {
-    struct LiveGuard(Arc<AtomicUsize>);
+struct Work(&'static str);
 
-    impl Drop for LiveGuard {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
+#[derive(Clone)]
+struct Forwarder {
+    worker: ActorRef<Work>,
+}
+
+impl Actor for Forwarder {
+    type Msg = Work;
+
+    async fn run(&self, mut ctx: ActorContext<Work>) -> ActorResult {
+        while let Some(work) = ctx.recv().await {
+            let mut worker = self.worker.clone();
+            worker.send_when_ready(work).await?;
         }
+        Ok(())
     }
+}
 
-    let active = Arc::new(AtomicUsize::new(0));
-    let max_active = Arc::new(AtomicUsize::new(0));
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+#[derive(Clone)]
+struct RestartingWorker {
+    runs: Arc<AtomicUsize>,
+    observed: mpsc::UnboundedSender<&'static str>,
+}
 
-    let actor_set = GraphBuilder::new()
-        .actor(ActorSpec::from_actor("worker", {
-            let active = Arc::clone(&active);
-            let max_active = Arc::clone(&max_active);
-            let started_tx = started_tx.clone();
-            move |_ctx: ActorContext| {
-                let active = Arc::clone(&active);
-                let max_active = Arc::clone(&max_active);
-                let started_tx = started_tx.clone();
-                async move {
-                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_active.fetch_max(current, Ordering::SeqCst);
-                    let _guard = LiveGuard(active);
-                    started_tx.send(()).expect("receiver alive");
-                    pending::<()>().await;
-                    Ok(())
-                }
+impl Actor for RestartingWorker {
+    type Msg = Work;
+
+    async fn run(&self, mut ctx: ActorContext<Work>) -> ActorResult {
+        let run = self.runs.fetch_add(1, Ordering::SeqCst);
+        while let Some(Work(payload)) = ctx.recv().await {
+            self.observed.send(payload).expect("receiver alive");
+            if run == 0 {
+                return Err::<(), BoxError>(std::io::Error::other("boom").into());
             }
-        }))
-        .build()
-        .expect("valid graph")
-        .into_actor_set()
-        .expect("actor set");
-
-    let worker = single_actor_set(&actor_set, "worker");
-    let first_worker = worker.clone();
-    let first_task = tokio::spawn(async move { first_worker.run_until(pending::<()>()).await });
-
-    timeout(Duration::from_secs(1), started_rx.recv())
-        .await
-        .expect("first actor started in time")
-        .expect("first actor reported start");
-
-    first_task.abort();
-    assert!(
-        first_task
-            .await
-            .expect_err("outer run task should be cancelled")
-            .is_cancelled()
-    );
-    wait_for_count(&active, 0).await;
-
-    let second_worker = worker.clone();
-    let second_task = tokio::spawn(async move { second_worker.run_until(pending::<()>()).await });
-    timeout(Duration::from_secs(1), started_rx.recv())
-        .await
-        .expect("second actor started in time")
-        .expect("second actor reported start");
-
-    assert_eq!(
-        max_active.load(Ordering::SeqCst),
-        1,
-        "actor instances must not overlap across aborted run_until restarts"
-    );
-
-    second_task.abort();
-    assert!(
-        second_task
-            .await
-            .expect_err("outer run task should be cancelled")
-            .is_cancelled()
-    );
-    wait_for_count(&active, 0).await;
+        }
+        Ok(())
+    }
 }
 
 #[tokio::test]
-async fn actor_set_preserves_wiring_across_individual_restarts() {
+async fn actor_set_refs_survive_individual_actor_restarts() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let runs = Arc::new(AtomicUsize::new(0));
 
-    let actor_set = GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "frontend",
-            |mut ctx: ActorContext| async move {
-                while let Some(envelope) = ctx.recv().await {
-                    ctx.send_when_ready("worker", envelope).await?;
-                }
-                Ok(())
-            },
-        ))
-        .actor(ActorSpec::from_actor("worker", {
-            let observed_tx = observed_tx.clone();
-            let runs = Arc::clone(&runs);
-            move |mut ctx: ActorContext| {
-                let observed_tx = observed_tx.clone();
-                let run = runs.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    while let Some(envelope) = ctx.recv().await {
-                        observed_tx.send(envelope).expect("receiver alive");
-                        if run == 0 {
-                            return Err::<(), BoxError>(Box::new(io::Error::other("boom")));
-                        }
-                    }
-                    Ok(())
-                }
-            }
-        }))
-        .link("frontend", "worker")
-        .ingress("requests", "frontend")
+    let mut builder = GraphBuilder::new();
+    let worker_ref = builder.declare::<Work>("worker");
+    builder.actor("frontend", Forwarder { worker: worker_ref });
+    builder.actor(
+        "worker",
+        RestartingWorker {
+            runs: Arc::new(AtomicUsize::new(0)),
+            observed: observed_tx,
+        },
+    );
+    let actor_set = builder
         .build()
         .expect("valid graph")
         .into_actor_set()
         .expect("actor set");
 
-    let frontend = single_actor_set(&actor_set, "frontend");
-    let worker = single_actor_set(&actor_set, "worker");
-    let mut ingress = actor_set.ingress("requests").expect("ingress exists");
+    let frontend = single_actor(&actor_set, "frontend");
+    let worker = single_actor(&actor_set, "worker");
+    let mut frontend_ref = actor_set
+        .actor_ref::<Work>("frontend")
+        .expect("frontend ref exists");
+
     let (frontend_stop, frontend_task) = start_actor(frontend);
     let (_first_worker_stop, first_worker_task) = start_actor(worker.clone());
+    frontend_ref.wait_for_binding().await;
 
-    ingress.wait_for_binding().await;
-    ingress
-        .send(Envelope::from_static(b"first"))
-        .await
-        .expect("frontend accepted first message");
-    let first = timeout(Duration::from_secs(1), observed_rx.recv())
-        .await
-        .expect("first worker run observed a message")
-        .expect("worker reported a message");
-    assert_eq!(first.as_slice(), b"first");
-
-    let first_exit = timeout(Duration::from_secs(1), first_worker_task)
-        .await
-        .expect("first worker run exited in time")
-        .expect("first worker task joined");
+    frontend_ref.send(Work("first")).await.expect("first send");
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("first observed")
+            .expect("message observed"),
+        "first"
+    );
     assert!(matches!(
-        first_exit,
+        timeout(Duration::from_secs(1), first_worker_task)
+            .await
+            .expect("first worker exited")
+            .expect("first worker task joined"),
         Err(ActorRunError::Failed { ref actor_id, .. }) if actor_id == "worker"
     ));
 
-    ingress
-        .send(Envelope::from_static(b"second"))
+    frontend_ref
+        .send(Work("second"))
         .await
-        .expect("frontend accepted second message");
+        .expect("second send");
     assert!(
         timeout(Duration::from_millis(100), observed_rx.recv())
             .await
             .is_err(),
-        "frontend should wait for the worker to restart"
+        "frontend should hold the message until worker restarts"
     );
 
     let (second_worker_stop, second_worker_task) = start_actor(worker);
-    let second = timeout(Duration::from_secs(1), observed_rx.recv())
-        .await
-        .expect("second worker run observed a message")
-        .expect("worker reported a message");
-    assert_eq!(second.as_slice(), b"second");
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("second observed")
+            .expect("message observed"),
+        "second"
+    );
 
     stop_actor(frontend_stop, frontend_task)
         .await
         .expect("frontend stopped cleanly");
     stop_actor(second_worker_stop, second_worker_task)
         .await
-        .expect("restarted worker stopped cleanly");
+        .expect("worker stopped cleanly");
+}
+
+enum ProbeMsg {
+    Check,
+}
+
+#[derive(Clone)]
+struct RegistryProbe {
+    result: mpsc::UnboundedSender<bool>,
+}
+
+impl Actor for RegistryProbe {
+    type Msg = ProbeMsg;
+
+    async fn run(&self, mut ctx: ActorContext<ProbeMsg>) -> ActorResult {
+        while let Some(ProbeMsg::Check) = ctx.recv().await {
+            let mismatch = matches!(
+                ctx.registry()
+                    .expect("registry installed")
+                    .actor_ref::<String>("numbers"),
+                Err(LookupError::MessageTypeMismatch { .. })
+            );
+            self.result.send(mismatch).expect("receiver alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn context_registry_lookup_checks_message_type() {
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+    let mut builder = GraphBuilder::new();
+    builder.actor("numbers", Drain::<u32>::new());
+    builder.actor("probe", RegistryProbe { result: result_tx });
+    let actor_set = builder
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+
+    let registry = ActorRegistry::new();
+    for actor in actor_set.actors() {
+        actor.set_registry(registry.clone());
+        actor.register_with(&registry).expect("actor registers");
+    }
+
+    let probe = single_actor(&actor_set, "probe");
+    let mut probe_ref = actor_set.actor_ref::<ProbeMsg>("probe").expect("probe ref");
+    let (stop, task) = start_actor(probe);
+
+    probe_ref.wait_for_binding().await;
+    probe_ref.send(ProbeMsg::Check).await.expect("probe send");
+    assert!(
+        timeout(Duration::from_secs(1), result_rx.recv())
+            .await
+            .expect("probe answered")
+            .expect("probe result")
+    );
+
+    stop_actor(stop, task).await.expect("probe stopped cleanly");
+}
+
+enum BlockingMsg {
+    Start,
+    FromBlocking,
+}
+
+#[derive(Clone)]
+struct BlockingSender {
+    observed: mpsc::UnboundedSender<()>,
+}
+
+impl Actor for BlockingSender {
+    type Msg = BlockingMsg;
+
+    async fn run(&self, mut ctx: ActorContext<BlockingMsg>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            match message {
+                BlockingMsg::Start => {
+                    ctx.run_blocking(BlockingOptions::named("reply"), |job| {
+                        job.myself().blocking_send(BlockingMsg::FromBlocking)?;
+                        Ok(())
+                    })
+                    .await?;
+                }
+                BlockingMsg::FromBlocking => {
+                    self.observed.send(()).expect("receiver alive");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn blocking_context_can_send_to_own_typed_mailbox() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let mut builder = GraphBuilder::new();
+    builder.actor(
+        "worker",
+        BlockingSender {
+            observed: observed_tx,
+        },
+    );
+    let actor_set = builder
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+    let worker = single_actor(&actor_set, "worker");
+    let mut worker_ref = actor_set
+        .actor_ref::<BlockingMsg>("worker")
+        .expect("worker ref");
+
+    let (stop, task) = start_actor(worker);
+    worker_ref.wait_for_binding().await;
+    worker_ref
+        .send(BlockingMsg::Start)
+        .await
+        .expect("start sent");
+    timeout(Duration::from_secs(1), observed_rx.recv())
+        .await
+        .expect("blocking reply observed")
+        .expect("reply received");
+
+    stop_actor(stop, task)
+        .await
+        .expect("worker stopped cleanly");
 }

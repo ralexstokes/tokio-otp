@@ -7,22 +7,31 @@ use crate::actor::BoxError;
 pub enum BuildError {
     /// The graph was built without any actors.
     #[error("graph must contain at least one actor")]
-    EmptyActors,
-    /// Two actors shared the same id.
-    #[error("duplicate actor id `{0}`")]
-    DuplicateActorId(String),
-    /// Two ingress points shared the same name.
-    #[error("duplicate ingress name `{0}`")]
-    DuplicateIngressName(String),
-    /// A link referenced an actor id that was not defined.
-    #[error("link source actor `{actor}` does not exist")]
-    UnknownLinkSource { actor: String },
-    /// A link target referenced an actor id that was not defined.
-    #[error("link from `{from}` references unknown actor `{actor}`")]
-    UnknownLinkTarget { from: String, actor: String },
-    /// An ingress point referenced an actor id that was not defined.
-    #[error("ingress `{ingress}` references unknown actor `{actor}`")]
-    UnknownIngressTarget { ingress: String, actor: String },
+    EmptyGraph,
+    /// Two actor implementations shared the same id.
+    #[error("duplicate actor id `{actor_id}`")]
+    DuplicateActorId {
+        /// Actor id registered twice.
+        actor_id: String,
+    },
+    /// An actor id was referenced with two different message types.
+    #[error(
+        "actor `{actor_id}` is used with message type `{requested}` but was first referenced with `{registered}`"
+    )]
+    MessageTypeMismatch {
+        /// Actor id with conflicting message types.
+        actor_id: String,
+        /// Message type recorded when the actor was first referenced.
+        registered: &'static str,
+        /// Message type of the conflicting reference.
+        requested: &'static str,
+    },
+    /// An actor id was declared but no implementation was registered.
+    #[error("actor `{actor_id}` was declared but never registered")]
+    MissingActor {
+        /// Actor id without an implementation.
+        actor_id: String,
+    },
     /// Generic invalid builder configuration.
     #[error("{0}")]
     InvalidConfig(&'static str),
@@ -58,21 +67,9 @@ pub enum GraphError {
 /// Errors returned when sending to an actor mailbox.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum SendError {
-    /// The sender could not resolve the requested target actor.
-    #[error("actor `{actor_id}` cannot resolve peer `{peer_id}`")]
-    UnknownPeer { actor_id: String, peer_id: String },
     /// The target actor is currently unbound because it is not running.
     #[error("actor `{actor_id}` is not currently running")]
     ActorNotRunning { actor_id: String },
-    /// The envelope exceeds the configured mailbox payload limit.
-    #[error(
-        "envelope for actor `{actor_id}` exceeds max size of {max_envelope_bytes} bytes ({envelope_len} bytes)"
-    )]
-    EnvelopeTooLarge {
-        actor_id: String,
-        envelope_len: usize,
-        max_envelope_bytes: usize,
-    },
     /// The target actor's mailbox is full.
     #[error("mailbox for actor `{actor_id}` is full")]
     MailboxFull { actor_id: String },
@@ -81,26 +78,37 @@ pub enum SendError {
     MailboxClosed { actor_id: String },
 }
 
-/// Errors returned by stable ingress handles.
+/// Errors returned by [`ActorRef::call`](crate::ActorRef::call).
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
-pub enum IngressError {
-    /// The graph is not currently running, so the ingress is not bound.
-    #[error("ingress `{ingress}` is not currently bound to actor `{actor_id}`")]
-    NotRunning { ingress: String, actor_id: String },
-    /// The ingress envelope exceeds the configured mailbox payload limit.
-    #[error(
-        "ingress `{ingress}` envelope for actor `{actor_id}` exceeds max size of {max_envelope_bytes} bytes ({envelope_len} bytes)"
-    )]
-    EnvelopeTooLarge {
-        ingress: String,
+pub enum CallError {
+    /// The request message could not be delivered.
+    #[error(transparent)]
+    Send(#[from] SendError),
+    /// The actor dropped the [`Reply`](crate::Reply) without answering.
+    #[error("actor `{actor_id}` dropped the reply")]
+    ReplyDropped {
+        /// Target actor id.
         actor_id: String,
-        envelope_len: usize,
-        max_envelope_bytes: usize,
     },
-    /// The ingress target mailbox is full.
-    #[error("ingress `{ingress}` target actor `{actor_id}` mailbox is full")]
-    MailboxFull { ingress: String, actor_id: String },
-    /// The ingress target mailbox is closed.
-    #[error("ingress `{ingress}` target actor `{actor_id}` mailbox is closed")]
-    MailboxClosed { ingress: String, actor_id: String },
+}
+
+/// Errors returned by typed actor lookups.
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+pub enum LookupError {
+    /// No actor with the requested id exists.
+    #[error("unknown actor `{actor_id}`")]
+    UnknownActor {
+        /// Requested actor id.
+        actor_id: String,
+    },
+    /// The actor exists but has a different message type.
+    #[error("actor `{actor_id}` has message type `{registered}`, not `{requested}`")]
+    MessageTypeMismatch {
+        /// Requested actor id.
+        actor_id: String,
+        /// Message type the actor was registered with.
+        registered: &'static str,
+        /// Message type requested by the caller.
+        requested: &'static str,
+    },
 }

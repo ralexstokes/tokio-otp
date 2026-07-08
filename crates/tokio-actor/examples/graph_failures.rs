@@ -1,110 +1,43 @@
-use std::{error::Error, future::pending, io, sync::Arc, time::Duration};
+use std::{error::Error, future::pending, io};
 
-use tokio::{sync::Notify, task::JoinHandle, time::timeout};
-use tokio_actor::{ActorContext, ActorSpec, Graph, GraphBuilder, GraphError};
-use tokio_util::sync::CancellationToken;
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, GraphError};
 
-fn start_graph(graph: &Graph) -> (CancellationToken, JoinHandle<Result<(), GraphError>>) {
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
-    (stop, task)
-}
+#[derive(Clone)]
+struct Fails;
 
-async fn stop_graph(
-    stop: CancellationToken,
-    task: JoinHandle<Result<(), GraphError>>,
-) -> Result<(), Box<dyn Error>> {
-    stop.cancel();
+impl Actor for Fails {
+    type Msg = ();
 
-    let joined = timeout(Duration::from_secs(1), task).await?;
-    let result = joined?;
-    result?;
-    Ok(())
-}
-
-async fn demonstrate_already_running() -> Result<(), Box<dyn Error>> {
-    let started = Arc::new(Notify::new());
-    let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor("worker", {
-            let started = Arc::clone(&started);
-            move |mut ctx: ActorContext| {
-                let started = Arc::clone(&started);
-                async move {
-                    started.notify_one();
-                    while ctx.recv().await.is_some() {}
-                    Ok(())
-                }
-            }
-        }))
-        .build()?;
-
-    let (stop, task) = start_graph(&graph);
-
-    started.notified().await;
-    let err = graph
-        .run_until(async {})
-        .await
-        .expect_err("same graph cannot run twice");
-    assert!(matches!(err, GraphError::AlreadyRunning));
-    println!("concurrent rerun returned: {err}");
-
-    stop_graph(stop, task).await?;
-    Ok(())
-}
-
-async fn demonstrate_actor_stopped() -> Result<(), Box<dyn Error>> {
-    let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "worker",
-            |_ctx: ActorContext| async { Ok(()) },
-        ))
-        .build()?;
-
-    let err = graph
-        .run_until(pending::<()>())
-        .await
-        .expect_err("clean actor exit should fail the graph");
-    assert!(matches!(
-        &err,
-        GraphError::ActorStopped { actor_id } if actor_id == "worker"
-    ));
-    println!("clean actor exit returned: {err}");
-
-    Ok(())
-}
-
-async fn demonstrate_actor_failed() -> Result<(), Box<dyn Error>> {
-    let graph = GraphBuilder::new()
-        .actor(ActorSpec::from_actor(
-            "worker",
-            |_ctx: ActorContext| async { Err(io::Error::other("boom").into()) },
-        ))
-        .build()?;
-
-    let err = graph
-        .run_until(pending::<()>())
-        .await
-        .expect_err("actor error should fail the graph");
-
-    match &err {
-        GraphError::ActorFailed { actor_id, source } => {
-            assert_eq!(actor_id, "worker");
-            println!("actor failure returned: {source}");
-        }
-        other => panic!("unexpected result: {other:?}"),
+    async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+        Err(io::Error::other("boom").into())
     }
+}
 
-    Ok(())
+#[derive(Clone)]
+struct RunsForever;
+
+impl Actor for RunsForever {
+    type Msg = ();
+
+    async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+        pending::<()>().await;
+        Ok(())
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    demonstrate_already_running().await?;
-    demonstrate_actor_stopped().await?;
-    demonstrate_actor_failed().await?;
+    let mut builder = GraphBuilder::new();
+    builder.actor("worker", RunsForever);
+    builder.actor("failing", Fails);
+    let graph = builder.build()?;
+
+    match graph.run_until(pending::<()>()).await {
+        Err(GraphError::ActorFailed { actor_id, source }) => {
+            println!("graph stopped because `{actor_id}` failed: {source}");
+        }
+        other => println!("unexpected graph result: {other:?}"),
+    }
+
     Ok(())
 }
