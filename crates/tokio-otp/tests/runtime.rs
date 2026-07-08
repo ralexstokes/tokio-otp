@@ -4,7 +4,7 @@ use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, LookupError, SendError,
 };
-use tokio_otp::{BuildError, Runtime, SupervisedActors};
+use tokio_otp::{BuildError, DynamicActorError, Runtime, SupervisedActors};
 use tokio_supervisor::{
     Restart, RestartIntensity, Strategy, SupervisorBuilder, SupervisorExit, SupervisorStateView,
 };
@@ -194,7 +194,7 @@ async fn runtime_handle_reports_unknown_actor_lookup() {
     let handle = runtime.spawn();
     assert!(matches!(
         handle.actor_ref::<()>("missing"),
-        Err(LookupError::UnknownActor { .. })
+        Err(DynamicActorError::Lookup(LookupError::UnknownActor { .. }))
     ));
 
     handle
@@ -385,7 +385,7 @@ async fn runtime_into_supervisor_round_trips_supervisor() {
 
     assert!(matches!(
         handle.actor_ref::<()>("worker"),
-        Err(LookupError::UnknownActor { .. })
+        Err(DynamicActorError::Unsupported)
     ));
 
     assert_eq!(

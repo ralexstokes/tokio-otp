@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, watch};
 use tokio_actor::{
-    Actor, ActorRef, ActorRegistry, LookupError, RebindPolicy, RegistryError, RunnableActor,
+    Actor, ActorRef, ActorRegistry, RebindPolicy, RegistryError, RunnableActor,
     RunnableActorFactory,
 };
 use tokio_supervisor::{
@@ -146,13 +146,20 @@ impl RuntimeHandle {
     }
 
     /// Returns a stable actor reference for a registered actor id.
-    pub fn actor_ref<M: Send + 'static>(&self, actor_id: &str) -> Result<ActorRef<M>, LookupError> {
-        let Some(dynamic) = &self.dynamic else {
-            return Err(LookupError::UnknownActor {
-                actor_id: actor_id.to_owned(),
-            });
-        };
-        dynamic.registry.actor_ref(actor_id)
+    ///
+    /// Returns [`DynamicActorError::Unsupported`] if the runtime was built
+    /// without a dynamic actor registry (see
+    /// [`RuntimeBuilder::dynamic`](crate::RuntimeBuilder::dynamic)), and
+    /// [`DynamicActorError::Lookup`] if the registry has no matching actor.
+    pub fn actor_ref<M: Send + 'static>(
+        &self,
+        actor_id: &str,
+    ) -> Result<ActorRef<M>, DynamicActorError> {
+        let dynamic = self
+            .dynamic
+            .as_ref()
+            .ok_or(DynamicActorError::Unsupported)?;
+        Ok(dynamic.registry.actor_ref(actor_id)?)
     }
 
     /// Requests a graceful shutdown of the supervisor.

@@ -338,7 +338,7 @@ async fn remove_actor_deregisters_runtime_added_actor() {
 
     assert!(matches!(
         handle.actor_ref::<()>("dynamic"),
-        Err(LookupError::UnknownActor { .. })
+        Err(DynamicActorError::Lookup(LookupError::UnknownActor { .. }))
     ));
     assert!(matches!(
         dynamic_ref.send(()).await,
@@ -396,7 +396,7 @@ async fn timed_out_remove_actor_deregisters_runtime_added_actor() {
 
     assert!(matches!(
         handle.actor_ref::<()>("dynamic"),
-        Err(LookupError::UnknownActor { .. })
+        Err(DynamicActorError::Lookup(LookupError::UnknownActor { .. }))
     ));
     assert!(matches!(
         dynamic_ref.send(()).await,
@@ -442,6 +442,11 @@ async fn manual_runtime_reports_dynamic_support_as_unavailable() {
         .await
         .expect_err("manual runtime should not support dynamic actors");
     assert!(matches!(err, DynamicActorError::Unsupported));
+
+    assert!(matches!(
+        handle.actor_ref::<()>("seed"),
+        Err(DynamicActorError::Unsupported)
+    ));
 
     handle
         .shutdown_and_wait()
