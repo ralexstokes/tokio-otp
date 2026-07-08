@@ -37,10 +37,9 @@ cargo run -p <crate> --example <name>
 
 | Example | Shows |
 |---------|-------|
-| `ingress_rebind` | Stable ingress handles across graph reruns. |
+| `ref_rebind` | Stable typed actor refs across graph reruns. |
 | `send_vs_send_when_ready` | Retry-across-restart send semantics. |
 | `mailbox_backpressure` | Bounded mailbox back-pressure. |
-| `envelope_limits` | Per-graph envelope size limits. |
 | `blocking_work` | Spawning tracked blocking tasks. |
 | `blocking_lifecycle` | Blocking task lifecycle handling. |
 | `blocking_limits` | Per-actor blocking concurrency limits. |
@@ -62,9 +61,8 @@ cargo run -p <crate> --example <name>
 
 Things this tutorial glossed over that matter in production:
 
-- **Envelopes are just bytes.** Pick your own serialization; `Envelope`
-  implements `From<Bytes>`, `From<Vec<u8>>`, `From<&'static [u8]>`, and
-  `From<&'static str>`.
+- **Messages are ordinary owned Rust values.** Use enums to model protocol
+  variants and put `Reply<T>` in a variant when callers need a response.
 - **Messages in a failed actor's mailbox are lost** when it restarts. If an
   order must survive a press jam, persist it outside the graph and re-inject
   it — the same discipline OTP asks of you.
