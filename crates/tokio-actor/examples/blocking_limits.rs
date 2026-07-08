@@ -4,7 +4,6 @@ use tokio::sync::mpsc;
 use tokio_actor::{
     Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder, SpawnBlockingError,
 };
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 struct Worker {
@@ -41,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     builder.max_blocking_tasks_per_actor(1);
-    let mut worker = builder.actor(
+    let worker = builder.actor(
         "worker",
         Worker {
             observed: observed_tx,
@@ -49,18 +48,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let graph = builder.build()?;
 
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let handle = graph.spawn()?;
 
-    worker.wait_for_binding().await;
     worker.send(()).await?;
     println!("{}", observed_rx.recv().await.expect("capacity result"));
 
-    stop.cancel();
-    task.await??;
+    handle.shutdown_and_wait().await?;
     Ok(())
 }

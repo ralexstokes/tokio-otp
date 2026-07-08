@@ -3,21 +3,14 @@
 High-level user-facing ergonomics improvements, ranked by impact. From a
 review of the public API surfaces, examples, and the tutorial book.
 
-## 1. Quick-start ceremony
-
-The `tokio-actor` quick start still needs a manual `CancellationToken`, a
-`tokio::spawn` clone dance, `wait_for_binding()`, then two-layer
-`task.await??`. Mirror the supervisor API with a convenience like
-`graph.spawn() -> GraphHandle` and `shutdown_and_wait()`.
-
-## 2. Make `tokio-otp` unambiguously the front door
+## 1. Make `tokio-otp` unambiguously the front door
 
 Getting-started still tells users about multiple crates. Lead the book and
 README with `tokio-otp` + prelude, present the sub-crates as à la carte, and
 consider a single `Runtime::builder().graph(graph).strategy(...)` path for the
 common supervised-actor setup.
 
-## 3. Consistency / semantics polish
+## 2. Consistency / semantics polish
 
 - `ChildContext` exposes a public `ctx.token` field while `ActorContext` uses
   `ctx.shutdown_token()`; pick one convention across crates.
@@ -56,7 +49,7 @@ common supervised-actor setup.
   `build()` reports an empty graph name before any accumulated registration
   errors.
 
-## 4. Future actor ergonomics
+## 3. Future actor ergonomics
 
 - Named registry aliases, e.g. `builder.alias("orders", "front-desk")`, for
   friendlier external lookup names.

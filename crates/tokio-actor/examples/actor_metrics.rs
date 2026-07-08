@@ -1,7 +1,6 @@
 use std::error::Error;
 
 use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 struct Worker;
@@ -25,20 +24,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _recorder = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
     let mut builder = GraphBuilder::new();
-    let mut worker = builder.actor("worker", Worker);
+    let worker = builder.actor("worker", Worker);
     let graph = builder.build()?;
 
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let handle = graph.spawn()?;
 
-    worker.wait_for_binding().await;
     worker.send("hello metrics").await?;
 
-    stop.cancel();
-    task.await??;
+    handle.shutdown_and_wait().await?;
     Ok(())
 }

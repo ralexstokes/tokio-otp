@@ -55,10 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_actor("rush-press", RushPress, DynamicActorOptions::default())
         .await?;
 
-    orders.wait_for_binding().await;
-    rush.wait_for_binding().await;
-    orders.send("wedding invites x50".into()).await?;
-    rush.send("vip banners x2".into()).await?;
+    orders.send_when_ready("wedding invites x50".into()).await?;
+    rush.send_when_ready("vip banners x2".into()).await?;
 
     handle.remove_actor("rush-press").await?;
     handle.shutdown_and_wait().await?;

@@ -63,10 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
     let handle = runtime.spawn();
 
-    orders.wait_for_binding().await;
-    orders.send("business cards x100".into()).await?;
-    orders.send("origami cranes x1000".into()).await?;
-    orders.send("flyers x500".into()).await?;
+    orders.send_when_ready("business cards x100".into()).await?;
+    orders.send_when_ready("origami cranes x1000".into()).await?;
+    orders.send_when_ready("flyers x500".into()).await?;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     handle.shutdown_and_wait().await?;

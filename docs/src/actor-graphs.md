@@ -9,7 +9,6 @@ desk sends orders to the press, the front desk owns an `ActorRef<Order>`.
 
 ```rust,no_run
 use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, GraphBuilder, Reply};
-use tokio_util::sync::CancellationToken;
 
 struct Order(String);
 struct Parcel(String);
@@ -81,30 +80,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let shipping = builder.declare::<ShippingMsg>("shipping");
     let press = builder.declare::<Order>("press");
-    let mut orders = builder.actor("front-desk", FrontDesk { press: press.clone() });
+    let orders = builder.actor("front-desk", FrontDesk { press: press.clone() });
     builder.actor("press", Press { shipping: shipping.clone() });
     builder.actor("shipping", Shipping);
     let graph = builder.build()?;
 
-    let stop = CancellationToken::new();
-    let run = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let handle = graph.spawn()?;
 
-    orders.wait_for_binding().await;
     orders.send(Order("business cards x100".into())).await?;
     orders.send(Order("flyers x500".into())).await?;
 
     let shipped = shipping.call(ShippingMsg::Total).await?;
     println!("shipped {shipped} jobs");
 
-    stop.cancel();
-    run.await??;
+    handle.shutdown_and_wait().await?;
     Ok(())
 }
 ```
+
+`Graph::run_until` remains available when you want to drive a graph inside
+your own task or `select!` loop. `tokio-otp` uses that lower-level API for
+supervised graph children.
 
 ## Builder-Time Wiring
 

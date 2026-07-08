@@ -64,8 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
     let handle = runtime.spawn();
 
-    orders.wait_for_binding().await;
-    orders.send("business cards x100".to_owned()).await?;
+    orders.send_when_ready("business cards x100".to_owned()).await?;
 
     handle.shutdown_and_wait().await?;
     Ok(())

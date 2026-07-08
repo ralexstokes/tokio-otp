@@ -3,7 +3,6 @@ use std::{error::Error, io, thread, time::Duration};
 use tokio_actor::{
     Actor, ActorContext, ActorResult, BlockingOptions, BlockingTaskError, GraphBuilder,
 };
-use tokio_util::sync::CancellationToken;
 
 enum Command {
     HandleFailure,
@@ -51,21 +50,14 @@ impl Actor for Worker {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
-    let mut worker = builder.actor("worker", Worker);
+    let worker = builder.actor("worker", Worker);
     let graph = builder.build()?;
 
-    let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
-    });
+    let handle = graph.spawn()?;
 
-    worker.wait_for_binding().await;
     worker.send(Command::HandleFailure).await?;
     worker.send(Command::CancelWork).await?;
 
-    stop.cancel();
-    task.await??;
+    handle.shutdown_and_wait().await?;
     Ok(())
 }

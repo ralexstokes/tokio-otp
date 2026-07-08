@@ -12,7 +12,7 @@ use std::{
 
 use tokio::{
     sync::mpsc,
-    task::{Id as TaskId, JoinSet},
+    task::{Id as TaskId, JoinHandle, JoinSet},
     time::{Instant as TokioInstant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
@@ -248,15 +248,52 @@ impl Graph {
                 .await
         };
 
-        let status = if result.is_ok() {
-            GraphRunStatus::Ok
-        } else {
-            GraphRunStatus::Failed
-        };
-        let error = result.as_ref().err().map(std::string::ToString::to_string);
-        observability.emit_graph_stopped(started_at.elapsed(), status, error.as_deref());
+        emit_graph_stopped(&observability, started_at, &result);
 
         result
+    }
+
+    /// Spawns the graph onto the current Tokio runtime and returns a handle.
+    ///
+    /// All actor mailboxes are bound when this returns, so actor refs are
+    /// immediately usable without [`ActorRef::wait_for_binding`].
+    ///
+    /// Panics if called outside a Tokio runtime, matching [`tokio::spawn`].
+    pub fn spawn(&self) -> Result<GraphHandle, GraphError> {
+        let active_run = ActiveRun::start(&self.inner)?;
+        let mut runtime = GraphRuntime::new(Arc::clone(&self.inner));
+        let started_at = Instant::now();
+        let observability = self.inner.observability.clone();
+        let actor_count = self.inner.actors.len();
+        let mailbox_capacity = self.inner.mailbox_capacity;
+
+        observability.emit_graph_started(actor_count, mailbox_capacity);
+
+        let graph_span = observability.graph_span(actor_count, mailbox_capacity);
+        {
+            let _entered = graph_span.enter();
+            runtime.spawn_actors();
+        }
+
+        let stop = CancellationToken::new();
+        let shutdown = stop.clone();
+        let graph_name = Arc::clone(&self.inner.name);
+        let join = tokio::spawn(async move {
+            let _active_run = active_run;
+            let result = {
+                let mut shutdown = std::pin::pin!(shutdown.cancelled());
+                runtime.drive(&mut shutdown).instrument(graph_span).await
+            };
+
+            emit_graph_stopped(&observability, started_at, &result);
+            result
+        });
+
+        Ok(GraphHandle {
+            graph_name,
+            stop,
+            join,
+        })
     }
 }
 
@@ -266,6 +303,80 @@ impl std::fmt::Debug for Graph {
             .field("name", &self.name())
             .finish_non_exhaustive()
     }
+}
+
+/// Handle to a running actor graph, returned by [`Graph::spawn`].
+///
+/// The handle is not cloneable. [`wait`](Self::wait) and
+/// [`shutdown_and_wait`](Self::shutdown_and_wait) consume it because graph
+/// failures can contain non-cloneable error sources.
+///
+/// Dropping the handle does **not** shut down the graph. Call
+/// [`shutdown`](Self::shutdown) explicitly, or use
+/// [`shutdown_and_wait`](Self::shutdown_and_wait), to request graceful
+/// shutdown.
+pub struct GraphHandle {
+    graph_name: Arc<str>,
+    stop: CancellationToken,
+    join: JoinHandle<Result<(), GraphError>>,
+}
+
+impl GraphHandle {
+    /// Requests graceful shutdown of the graph.
+    ///
+    /// This is non-blocking and idempotent. Use [`wait`](Self::wait) or
+    /// [`shutdown_and_wait`](Self::shutdown_and_wait) to await completion.
+    pub fn shutdown(&self) {
+        self.stop.cancel();
+    }
+
+    /// Waits for the graph to finish and returns its result.
+    pub async fn wait(self) -> Result<(), GraphError> {
+        match self.join.await {
+            Ok(result) => result,
+            Err(error) => Err(GraphError::InvalidState {
+                detail: join_error_detail(error),
+            }),
+        }
+    }
+
+    /// Requests graceful shutdown and waits for the graph to finish.
+    pub async fn shutdown_and_wait(self) -> Result<(), GraphError> {
+        self.shutdown();
+        self.wait().await
+    }
+}
+
+impl std::fmt::Debug for GraphHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphHandle")
+            .field("graph_name", &self.graph_name)
+            .field("shutdown_requested", &self.stop.is_cancelled())
+            .field("is_finished", &self.join.is_finished())
+            .finish_non_exhaustive()
+    }
+}
+
+fn join_error_detail(error: tokio::task::JoinError) -> String {
+    if error.is_panic() {
+        format!("graph drive task panicked: {error}")
+    } else {
+        format!("graph drive task was cancelled: {error}")
+    }
+}
+
+fn emit_graph_stopped(
+    observability: &GraphObservability,
+    started_at: Instant,
+    result: &Result<(), GraphError>,
+) {
+    let status = if result.is_ok() {
+        GraphRunStatus::Ok
+    } else {
+        GraphRunStatus::Failed
+    };
+    let error = result.as_ref().err().map(std::string::ToString::to_string);
+    observability.emit_graph_stopped(started_at.elapsed(), status, error.as_deref());
 }
 
 struct ActiveRun {
@@ -322,7 +433,13 @@ impl GraphRuntime {
         F: Future<Output = ()>,
     {
         self.spawn_actors();
+        self.drive(shutdown).await
+    }
 
+    async fn drive<F>(&mut self, shutdown: &mut std::pin::Pin<&mut F>) -> Result<(), GraphError>
+    where
+        F: Future<Output = ()>,
+    {
         let mut shutdown_requested = false;
         let mut shutdown_deadline = None;
         let mut actors_aborted = false;

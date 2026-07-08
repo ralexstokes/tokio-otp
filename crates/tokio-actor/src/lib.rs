@@ -93,23 +93,16 @@
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut builder = GraphBuilder::new();
 //! builder.name("example");
-//! let mut counter = builder.actor("counter", Counter);
+//! let counter = builder.actor("counter", Counter);
 //! let graph = builder.build().expect("valid graph");
 //!
-//! let stop = tokio_util::sync::CancellationToken::new();
-//! let task = tokio::spawn({
-//!     let graph = graph.clone();
-//!     let stop = stop.clone();
-//!     async move { graph.run_until(stop.cancelled()).await }
-//! });
+//! let handle = graph.spawn()?;
 //!
-//! assert!(counter.wait_for_binding().await);
 //! counter.send(CounterMsg::Add(2)).await.expect("send succeeded");
 //! counter.send(CounterMsg::Add(3)).await.expect("send succeeded");
 //! assert_eq!(counter.call(CounterMsg::Total).await?, 5);
 //!
-//! stop.cancel();
-//! task.await.expect("graph task joined").expect("graph stopped cleanly");
+//! handle.shutdown_and_wait().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -136,7 +129,7 @@ pub mod prelude {
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
         BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BuildError, CallError, Graph,
-        GraphBuilder, GraphError, LookupError, RegistryError, Reply, RunnableActor,
+        GraphBuilder, GraphError, GraphHandle, LookupError, RegistryError, Reply, RunnableActor,
         RunnableActorFactory, SendError, SpawnBlockingError,
     };
 }
@@ -150,5 +143,5 @@ pub use blocking::{
 pub use builder::GraphBuilder;
 pub use context::{ActorContext, ActorRef, Reply};
 pub use error::{BuildError, CallError, GraphError, LookupError, SendError};
-pub use graph::Graph;
+pub use graph::{Graph, GraphHandle};
 pub use registry::{ActorRegistry, RegistryError};
