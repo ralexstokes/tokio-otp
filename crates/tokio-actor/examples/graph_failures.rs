@@ -1,11 +1,11 @@
 use std::{error::Error, future::pending, io};
 
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, GraphError};
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, GraphError, RawActor};
 
 #[derive(Clone)]
 struct Fails;
 
-impl Actor for Fails {
+impl RawActor for Fails {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -16,7 +16,7 @@ impl Actor for Fails {
 #[derive(Clone)]
 struct RunsForever;
 
-impl Actor for RunsForever {
+impl RawActor for RunsForever {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {

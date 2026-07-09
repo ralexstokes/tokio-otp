@@ -1,12 +1,12 @@
-error[E0277]: the trait bound `NotActor: MessageHandler` is not satisfied
+error[E0277]: the trait bound `NotActor: Actor` is not satisfied
  --> tests/ui/topology/non_actor_field.rs:8:13
   |
 8 |     worker: NotActor,
   |             ^^^^^^^^ unsatisfied trait bound
   |
-help: the trait `MessageHandler` is not implemented for `NotActor`
+help: the trait `Actor` is not implemented for `NotActor`
  --> tests/ui/topology/non_actor_field.rs:4:1
   |
 4 | struct NotActor;
   | ^^^^^^^^^^^^^^^
-  = note: required for `NotActor` to implement `Actor`
+  = note: required for `NotActor` to implement `RawActor`

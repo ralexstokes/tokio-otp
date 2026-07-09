@@ -11,7 +11,7 @@ mod coverage_probe {
             ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
             BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError,
             DrainPolicy, Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle,
-            LookupError, MessageHandler, RebindPolicy, RegistryError, Reply, RunnableActor,
+            LookupError, RawActor, RebindPolicy, RegistryError, Reply, RunnableActor,
             RunnableActorFactory, SendError, SpawnBlockingError, Topology, TryRecvError,
         };
     }
@@ -43,7 +43,7 @@ struct BlockingWorker {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl MessageHandler for BlockingWorker {
+impl Actor for BlockingWorker {
     type Msg = ();
 
     async fn handle(&mut self, _message: (), ctx: &ActorContext<()>) -> ActorResult {

@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{ActorContext, ActorResult, BlockingOptions, GraphBuilder, MessageHandler};
+use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
 
 enum WorkMsg {
     Process(String),
@@ -13,7 +13,7 @@ struct Worker {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = WorkMsg;
 
     async fn handle(&mut self, message: WorkMsg, ctx: &ActorContext<WorkMsg>) -> ActorResult {

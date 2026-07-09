@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use tokio_actor::{Actor, ActorContext, ActorRegistry, ActorResult, GraphBuilder, LookupError};
+use tokio_actor::{ActorContext, ActorRegistry, ActorResult, GraphBuilder, LookupError, RawActor};
 
 struct Drain<M>(PhantomData<fn(M)>);
 
@@ -16,7 +16,7 @@ impl<M> Clone for Drain<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Drain<M> {
+impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {

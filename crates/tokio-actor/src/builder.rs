@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    actor::Actor,
+    actor::RawActor,
     binding::{BindingCore, BindingLifecycle},
     context::ActorRef,
     error::GraphBuildError,
@@ -172,7 +172,7 @@ impl GraphBuilder {
     /// The slot token's message type must match the actor's message type, so a
     /// mismatched actor is rejected by the compiler. Consuming the token makes
     /// double fills unrepresentable in ordinary Rust code.
-    pub fn define<A: Actor>(&mut self, slot: ActorSlot<A::Msg>, actor: A) {
+    pub fn define<A: RawActor>(&mut self, slot: ActorSlot<A::Msg>, actor: A) {
         if slot.builder_id != self.builder_id {
             self.errors.push(GraphBuildError::InvalidConfig(
                 "actor slot belongs to a different graph builder",
@@ -197,7 +197,7 @@ impl GraphBuilder {
     }
 
     /// Registers an actor and returns its typed, restart-stable ref.
-    pub fn actor<A: Actor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
+    pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
         let Some((index, actor_ref)) = self.push_slot::<A::Msg>(actor_id) else {
             return ActorRef::detached(actor_id.into());
         };
@@ -215,7 +215,7 @@ impl GraphBuilder {
     /// `-2`, `-3`, and so on. Renaming the actor type therefore renames tracing
     /// fields and metric labels; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
-    pub fn add<A: Actor>(&mut self, actor: A) -> ActorRef<A::Msg> {
+    pub fn add<A: RawActor>(&mut self, actor: A) -> ActorRef<A::Msg> {
         let base = short_type_name(type_name::<A>());
         let mut actor_id = base.to_owned();
         let mut suffix = 2;

@@ -1,14 +1,14 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{ActorContext, ActorResult, BlockingOptions, GraphBuilder, MessageHandler};
+use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
 
 #[derive(Clone)]
 struct Worker {
     completed: mpsc::UnboundedSender<()>,
 }
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = &'static str;
 
     async fn handle(

@@ -1,16 +1,16 @@
 use std::{error::Error, sync::Arc};
 
 use tokio::sync::Notify;
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, SendError};
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, RawActor, SendError};
 
 #[derive(Clone)]
 struct ParkBeforeRecv {
     release: Arc<Notify>,
 }
 
-// Direct `Actor` remains the escape hatch when an actor needs custom loop
+// Direct `RawActor` remains the escape hatch when an actor needs custom loop
 // control. This example parks before receiving so the mailbox visibly fills.
-impl Actor for ParkBeforeRecv {
+impl RawActor for ParkBeforeRecv {
     type Msg = &'static str;
 
     async fn run(&self, mut ctx: ActorContext<&'static str>) -> ActorResult {

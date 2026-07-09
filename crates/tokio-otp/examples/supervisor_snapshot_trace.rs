@@ -9,7 +9,7 @@ use std::{
 };
 
 use tokio::sync::mpsc;
-use tokio_actor::{ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, MessageHandler};
+use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder};
 use tokio_otp::SupervisedActors;
 use tokio_supervisor::{RestartIntensity, Strategy, SupervisorBuilder};
 
@@ -18,7 +18,7 @@ struct Frontend {
     worker: ActorRef<String>,
 }
 
-impl MessageHandler for Frontend {
+impl Actor for Frontend {
     type Msg = String;
 
     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
@@ -35,7 +35,7 @@ struct Worker {
     processed: mpsc::UnboundedSender<String>,
 }
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = String;
 
     async fn on_start(&mut self, _ctx: &ActorContext<String>) -> ActorResult {

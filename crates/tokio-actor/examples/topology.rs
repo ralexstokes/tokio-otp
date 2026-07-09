@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{ActorContext, ActorRef, ActorResult, MessageHandler, Topology};
+use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, Topology};
 
 enum FrontendMsg {
     Feed(String),
@@ -17,7 +17,7 @@ struct Frontend {
     acked: mpsc::UnboundedSender<()>,
 }
 
-impl MessageHandler for Frontend {
+impl Actor for Frontend {
     type Msg = FrontendMsg;
 
     async fn handle(
@@ -39,7 +39,7 @@ struct Parser {
     sink: ActorRef<SinkMsg>,
 }
 
-impl MessageHandler for Parser {
+impl Actor for Parser {
     type Msg = ParserMsg;
 
     async fn handle(&mut self, message: ParserMsg, _ctx: &ActorContext<ParserMsg>) -> ActorResult {
@@ -54,7 +54,7 @@ struct Sink {
     out: mpsc::UnboundedSender<String>,
 }
 
-impl MessageHandler for Sink {
+impl Actor for Sink {
     type Msg = SinkMsg;
 
     async fn handle(&mut self, message: SinkMsg, _ctx: &ActorContext<SinkMsg>) -> ActorResult {

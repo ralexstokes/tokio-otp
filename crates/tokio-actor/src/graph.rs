@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::{
-    actor::{Actor, ActorResult},
+    actor::{ActorResult, RawActor},
     actor_set::ActorSet,
     binding::{BindingCore, BindingGuard, BindingLifecycle, MailboxRef, RebindPolicy},
     blocking::{BlockingRuntime, BlockingRuntimeEvent},
@@ -126,12 +126,12 @@ pub(crate) trait ErasedRunner: Send + Sync {
     fn start(&self, start: RunnerStart) -> BoxedActorFuture;
 }
 
-pub(crate) struct TypedRunner<A: Actor> {
+pub(crate) struct TypedRunner<A: RawActor> {
     pub(crate) actor: A,
     pub(crate) binding: Arc<BindingCore<A::Msg>>,
 }
 
-impl<A: Actor> ErasedRunner for TypedRunner<A> {
+impl<A: RawActor> ErasedRunner for TypedRunner<A> {
     fn start(&self, start: RunnerStart) -> BoxedActorFuture {
         let actor_shutdown = start.shutdown;
         let observability = start.observability;

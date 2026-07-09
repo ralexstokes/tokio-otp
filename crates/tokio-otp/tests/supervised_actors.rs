@@ -13,7 +13,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, Reply, SendError,
+    ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Reply, SendError,
 };
 use tokio_otp::{RuntimeBuildError, SupervisedActors};
 use tokio_supervisor::{
@@ -36,7 +36,7 @@ struct Frontend {
     starts: Arc<AtomicUsize>,
 }
 
-impl Actor for Frontend {
+impl RawActor for Frontend {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -56,7 +56,7 @@ struct Worker {
     failed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
-impl Actor for Worker {
+impl RawActor for Worker {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -147,7 +147,7 @@ struct CleanThenReceive {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for CleanThenReceive {
+impl RawActor for CleanThenReceive {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -229,7 +229,7 @@ struct NotifyCleanExit {
     exited: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
-impl Actor for NotifyCleanExit {
+impl RawActor for NotifyCleanExit {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -290,7 +290,7 @@ struct RestartingRpc {
     failed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
-impl Actor for RestartingRpc {
+impl RawActor for RestartingRpc {
     type Msg = RpcMsg;
 
     async fn run(&self, mut ctx: ActorContext<RpcMsg>) -> ActorResult {
@@ -383,7 +383,7 @@ impl<M> Clone for Drain<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Drain<M> {
+impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {

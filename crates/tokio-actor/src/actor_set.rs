@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::{
-    actor::{Actor, BoxError},
+    actor::{BoxError, RawActor},
     binding::{BindingCore, BindingLifecycle, RebindPolicy},
     builder::{
         DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
@@ -456,7 +456,7 @@ impl RunnableActorFactory {
     }
 
     /// Constructs a runtime actor.
-    pub fn actor<A: Actor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
+    pub fn actor<A: RawActor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
         let actor_id: Arc<str> = actor_id.into().into();
         let binding = Arc::new(BindingCore::<A::Msg>::new(actor_id.clone()));
         binding.set_observability(self.observability.clone());

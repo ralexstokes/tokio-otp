@@ -63,8 +63,8 @@ or are discouraged even in OTP).
   pattern with no equivalent: heartbeats, reconnect delays, order timeouts,
   periodic reconciliation all schedule messages to self (`Process.send_after`,
   gen_server timeouts, `:timer.send_interval`). `ActorContext` has nothing,
-  and it compounds: `MessageHandler` owns the receive loop (no hand-rolled
-  `select!` over an interval without dropping to raw `Actor::run`), and the
+  and it compounds: `Actor` owns the receive loop (no hand-rolled
+  `select!` over an interval without dropping to `RawActor::run`), and the
   context exposes no ref to self (`registry()` is `None` on non-dynamic
   runtimes), so the workaround is a side task holding your own `ActorRef` —
   exactly the boilerplate the framework loop exists to eliminate. Sketch:

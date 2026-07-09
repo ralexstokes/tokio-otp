@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuildError, GraphBuilder};
+use tokio_actor::{ActorContext, ActorResult, GraphBuildError, GraphBuilder, RawActor};
 
 struct Idle<M>(PhantomData<fn(M)>);
 
@@ -16,7 +16,7 @@ impl<M> Clone for Idle<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Idle<M> {
+impl<M: Send + 'static> RawActor for Idle<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {

@@ -1,7 +1,7 @@
 use std::{future::pending, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, LookupError, SendError};
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, LookupError, RawActor, SendError};
 use tokio_otp::{
     DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuildError, SupervisedActors,
 };
@@ -38,7 +38,7 @@ impl<M> Clone for Drain<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Drain<M> {
+impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
@@ -50,7 +50,7 @@ impl<M: Send + 'static> Actor for Drain<M> {
 #[derive(Clone)]
 struct ForwardToDynamic;
 
-impl Actor for ForwardToDynamic {
+impl RawActor for ForwardToDynamic {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -70,7 +70,7 @@ struct Observe {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for Observe {
+impl RawActor for Observe {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -263,7 +263,7 @@ async fn static_actor_can_send_to_runtime_added_actor() {
 #[derive(Clone)]
 struct ForwardToSink;
 
-impl Actor for ForwardToSink {
+impl RawActor for ForwardToSink {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -356,7 +356,7 @@ async fn remove_actor_deregisters_runtime_added_actor() {
 #[derive(Clone)]
 struct PendingActor;
 
-impl Actor for PendingActor {
+impl RawActor for PendingActor {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {

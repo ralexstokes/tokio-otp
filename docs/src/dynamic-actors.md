@@ -6,14 +6,14 @@ actor is registered in the runtime `ActorRegistry`, so actors can discover each
 other with typed lookups.
 
 ```rust,no_run
-use tokio_actor::{ActorContext, ActorResult, MessageHandler};
+use tokio_actor::{ActorContext, ActorResult, Actor};
 use tokio_otp::{DynamicActorOptions, Runtime};
 use tokio_supervisor::Strategy;
 
 #[derive(Clone)]
 struct FrontDesk;
 
-impl MessageHandler for FrontDesk {
+impl Actor for FrontDesk {
     type Msg = String;
 
     async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
@@ -29,7 +29,7 @@ impl MessageHandler for FrontDesk {
 #[derive(Clone)]
 struct RushPress;
 
-impl MessageHandler for RushPress {
+impl Actor for RushPress {
     type Msg = String;
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {

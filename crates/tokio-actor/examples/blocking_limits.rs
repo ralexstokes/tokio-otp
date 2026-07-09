@@ -2,7 +2,7 @@ use std::{error::Error, thread, time::Duration};
 
 use tokio::sync::mpsc;
 use tokio_actor::{
-    ActorContext, ActorResult, BlockingOptions, GraphBuilder, MessageHandler, SpawnBlockingError,
+    Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder, SpawnBlockingError,
 };
 
 #[derive(Clone)]
@@ -10,7 +10,7 @@ struct Worker {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = ();
 
     async fn handle(&mut self, _message: (), ctx: &ActorContext<()>) -> ActorResult {

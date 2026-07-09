@@ -2,7 +2,7 @@ use std::{future::IntoFuture, io, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, LookupError, SendError,
+    ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, LookupError, RawActor, SendError,
 };
 use tokio_otp::{DynamicActorError, Runtime, RuntimeBuildError, SupervisedActors};
 use tokio_supervisor::{
@@ -23,7 +23,7 @@ impl<M> Clone for Drain<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Drain<M> {
+impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
@@ -37,7 +37,7 @@ struct Observe {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for Observe {
+impl RawActor for Observe {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -53,7 +53,7 @@ struct ObserveOnce {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for ObserveOnce {
+impl RawActor for ObserveOnce {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -65,7 +65,7 @@ impl Actor for ObserveOnce {
 
 fn build_runtime<A>(actor: A) -> (Runtime, ActorRef<A::Msg>)
 where
-    A: Actor,
+    A: RawActor,
 {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor("worker", actor);
@@ -282,7 +282,7 @@ async fn wait_until_running_resolves_after_spawn_with_multiple_children() {
 #[derive(Clone)]
 struct FailOnMessage;
 
-impl Actor for FailOnMessage {
+impl RawActor for FailOnMessage {
     type Msg = ();
 
     async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
@@ -331,7 +331,7 @@ async fn runtime_handle_monitor_restart_delegates_to_supervisor() {
 #[derive(Clone)]
 struct AlwaysFails;
 
-impl Actor for AlwaysFails {
+impl RawActor for AlwaysFails {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {

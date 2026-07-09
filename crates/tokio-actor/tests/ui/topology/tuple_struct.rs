@@ -1,9 +1,9 @@
-use tokio_actor::{ActorContext, ActorResult, MessageHandler, Topology};
+use tokio_actor::{ActorContext, ActorResult, Actor, Topology};
 
 #[derive(Clone)]
 struct Worker;
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = ();
 
     async fn handle(&mut self, _message: (), _ctx: &ActorContext<()>) -> ActorResult {

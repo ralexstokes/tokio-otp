@@ -15,8 +15,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-    BlockingOptions, BoxError, GraphBuilder, LookupError, RebindPolicy, RunnableActor, SendError,
+    ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet, BlockingOptions,
+    BoxError, GraphBuilder, LookupError, RawActor, RebindPolicy, RunnableActor, SendError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Dispatch, field::Visit};
@@ -36,7 +36,7 @@ impl<M> Clone for Drain<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Drain<M> {
+impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
@@ -48,7 +48,7 @@ impl<M: Send + 'static> Actor for Drain<M> {
 #[derive(Clone)]
 struct NeverStops;
 
-impl Actor for NeverStops {
+impl RawActor for NeverStops {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -59,7 +59,7 @@ impl Actor for NeverStops {
 #[derive(Clone)]
 struct StopsOnShutdown;
 
-impl Actor for StopsOnShutdown {
+impl RawActor for StopsOnShutdown {
     type Msg = ();
 
     async fn run(&self, ctx: ActorContext<()>) -> ActorResult {
@@ -226,7 +226,7 @@ struct RebindActor {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl Actor for RebindActor {
+impl RawActor for RebindActor {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
@@ -358,7 +358,7 @@ struct Forwarder {
     worker: ActorRef<Work>,
 }
 
-impl Actor for Forwarder {
+impl RawActor for Forwarder {
     type Msg = Work;
 
     async fn run(&self, mut ctx: ActorContext<Work>) -> ActorResult {
@@ -376,7 +376,7 @@ struct RestartingWorker {
     observed: mpsc::UnboundedSender<&'static str>,
 }
 
-impl Actor for RestartingWorker {
+impl RawActor for RestartingWorker {
     type Msg = Work;
 
     async fn run(&self, mut ctx: ActorContext<Work>) -> ActorResult {
@@ -474,7 +474,7 @@ struct RegistryProbe {
     result: mpsc::UnboundedSender<bool>,
 }
 
-impl Actor for RegistryProbe {
+impl RawActor for RegistryProbe {
     type Msg = ProbeMsg;
 
     async fn run(&self, mut ctx: ActorContext<ProbeMsg>) -> ActorResult {
@@ -527,7 +527,7 @@ async fn context_registry_lookup_checks_message_type() {
 #[derive(Clone)]
 struct CleanExit;
 
-impl Actor for CleanExit {
+impl RawActor for CleanExit {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -575,7 +575,7 @@ struct BlockingSender {
     observed: mpsc::UnboundedSender<()>,
 }
 
-impl Actor for BlockingSender {
+impl RawActor for BlockingSender {
     type Msg = BlockingMsg;
 
     async fn run(&self, mut ctx: ActorContext<BlockingMsg>) -> ActorResult {

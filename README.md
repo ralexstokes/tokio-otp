@@ -30,7 +30,7 @@ struct FrontDesk {
     press: ActorRef<String>,
 }
 
-impl MessageHandler for FrontDesk {
+impl Actor for FrontDesk {
     type Msg = String;
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {

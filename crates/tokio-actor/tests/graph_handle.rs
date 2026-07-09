@@ -1,7 +1,7 @@
 use std::{io, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, GraphError};
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, GraphError, RawActor};
 
 struct Drain<M>(PhantomData<fn(M)>);
 
@@ -17,7 +17,7 @@ impl<M> Clone for Drain<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Drain<M> {
+impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
@@ -31,7 +31,7 @@ struct Recorder {
     seen: mpsc::UnboundedSender<u32>,
 }
 
-impl Actor for Recorder {
+impl RawActor for Recorder {
     type Msg = u32;
 
     async fn run(&self, mut ctx: ActorContext<u32>) -> ActorResult {
@@ -106,7 +106,7 @@ async fn graph_can_be_respawned_after_shutdown() {
 #[derive(Clone)]
 struct Fail;
 
-impl Actor for Fail {
+impl RawActor for Fail {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -132,7 +132,7 @@ async fn wait_returns_actor_failed_when_actor_errors() {
 #[derive(Clone)]
 struct Quit;
 
-impl Actor for Quit {
+impl RawActor for Quit {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, GraphBuildError, GraphBuilder, MessageHandler,
-    SendError, Topology,
+    Actor, ActorContext, ActorRef, ActorResult, GraphBuildError, GraphBuilder, RawActor, SendError,
+    Topology,
 };
 
 enum FrontendMsg {
@@ -21,7 +21,7 @@ struct Frontend {
     acks: mpsc::UnboundedSender<()>,
 }
 
-impl MessageHandler for Frontend {
+impl Actor for Frontend {
     type Msg = FrontendMsg;
 
     async fn handle(
@@ -43,7 +43,7 @@ struct Parser {
     sink: ActorRef<SinkMsg>,
 }
 
-impl MessageHandler for Parser {
+impl Actor for Parser {
     type Msg = ParserMsg;
 
     async fn handle(&mut self, message: ParserMsg, _ctx: &ActorContext<ParserMsg>) -> ActorResult {
@@ -58,7 +58,7 @@ struct Sink {
     out: mpsc::UnboundedSender<String>,
 }
 
-impl MessageHandler for Sink {
+impl Actor for Sink {
     type Msg = SinkMsg;
 
     async fn handle(&mut self, message: SinkMsg, _ctx: &ActorContext<SinkMsg>) -> ActorResult {
@@ -181,7 +181,7 @@ fn slot_token_from_another_builder_is_a_build_error() {
 #[derive(Clone)]
 struct Park;
 
-impl Actor for Park {
+impl RawActor for Park {
     type Msg = ();
 
     async fn run(&self, ctx: ActorContext<()>) -> ActorResult {

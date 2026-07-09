@@ -17,7 +17,7 @@ struct Worker {
     handled: mpsc::UnboundedSender<usize>,
 }
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = Msg;
 
     async fn handle(&mut self, message: Msg, _ctx: &ActorContext<Msg>) -> ActorResult {

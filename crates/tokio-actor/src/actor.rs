@@ -12,9 +12,9 @@ pub type ActorResult = Result<(), BoxError>;
 
 /// Async actor interface with a typed mailbox.
 ///
-/// [`MessageHandler`](crate::MessageHandler) is the recommended starting
+/// [`Actor`](crate::Actor) is the recommended starting
 /// point for ordinary actors: it provides the receive loop, lifecycle hooks,
-/// and shutdown drain policy. Implement `Actor` directly when an actor needs
+/// and shutdown drain policy. Implement `RawActor` directly when an actor needs
 /// custom loop control.
 ///
 /// Implementors can use
@@ -22,9 +22,9 @@ pub type ActorResult = Result<(), BoxError>;
 /// trait impls. The actor value is cloned for each graph run.
 ///
 /// This trait is deliberately not implemented for plain closures: an actor is
-/// a named type that implements `Actor`, which keeps the message type visible
+/// a named type that implements `RawActor`, which keeps the message type visible
 /// at the definition site and the actor's state explicit.
-pub trait Actor: Clone + Send + Sync + 'static {
+pub trait RawActor: Clone + Send + Sync + 'static {
     /// The message type this actor receives.
     type Msg: Send + 'static;
 

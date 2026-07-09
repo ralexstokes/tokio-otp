@@ -22,7 +22,7 @@ use crate::{error::RuntimeBuildError, runtime::Runtime, supervised_actors::Super
 /// #[derive(Clone)]
 /// struct Echo;
 ///
-/// impl MessageHandler for Echo {
+/// impl Actor for Echo {
 ///     type Msg = String;
 ///
 ///     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {

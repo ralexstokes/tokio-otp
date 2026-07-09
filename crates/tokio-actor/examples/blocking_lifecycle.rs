@@ -2,7 +2,7 @@ use std::{error::Error, io, thread, time::Duration};
 
 use tokio::sync::mpsc;
 use tokio_actor::{
-    ActorContext, ActorResult, BlockingOptions, BlockingTaskError, GraphBuilder, MessageHandler,
+    Actor, ActorContext, ActorResult, BlockingOptions, BlockingTaskError, GraphBuilder,
 };
 
 enum Command {
@@ -15,7 +15,7 @@ struct Worker {
     completed: mpsc::UnboundedSender<()>,
 }
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = Command;
 
     async fn handle(&mut self, command: Command, ctx: &ActorContext<Command>) -> ActorResult {

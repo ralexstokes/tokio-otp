@@ -11,11 +11,11 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 /// Derives a static actor topology from a named-field struct.
 ///
 /// Each field is one actor in the graph. Every field type must implement
-/// `tokio_actor::Actor`; any `MessageHandler` qualifies through the blanket
+/// `tokio_actor::RawActor`; any `Actor` qualifies through the blanket
 /// impl. For a struct named `Pipeline`, the derive generates:
 ///
 /// * a `PipelineRefs` struct with one field per topology field, typed
-///   `ActorRef<<FieldType as Actor>::Msg>`;
+///   `ActorRef<<FieldType as RawActor>::Msg>`;
 /// * `Pipeline::graph(wire)`, which builds the graph with a default
 ///   `GraphBuilder`;
 /// * `Pipeline::graph_with(builder, wire)`, which accepts a preconfigured
@@ -27,7 +27,7 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 /// is cyclic — no forward references or string lookups required:
 ///
 /// ```
-/// # use tokio_actor::{ActorContext, ActorRef, ActorResult, MessageHandler};
+/// # use tokio_actor::{ActorContext, ActorRef, ActorResult, Actor};
 /// # struct FrontendMsg;
 /// # struct ParserMsg;
 /// # struct SinkMsg;
@@ -36,7 +36,7 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 /// # struct Frontend {
 /// #     parser: ActorRef<ParserMsg>,
 /// # }
-/// # impl MessageHandler for Frontend {
+/// # impl Actor for Frontend {
 /// #     type Msg = FrontendMsg;
 /// #     async fn handle(
 /// #         &mut self,
@@ -52,7 +52,7 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 /// #     frontend: ActorRef<FrontendMsg>,
 /// #     sink: ActorRef<SinkMsg>,
 /// # }
-/// # impl MessageHandler for Parser {
+/// # impl Actor for Parser {
 /// #     type Msg = ParserMsg;
 /// #     async fn handle(&mut self, _: ParserMsg, _: &ActorContext<ParserMsg>) -> ActorResult {
 /// #         Ok(())
@@ -61,7 +61,7 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 /// #
 /// # #[derive(Clone)]
 /// # struct Sink;
-/// # impl MessageHandler for Sink {
+/// # impl Actor for Sink {
 /// #     type Msg = SinkMsg;
 /// #     async fn handle(&mut self, _: SinkMsg, _: &ActorContext<SinkMsg>) -> ActorResult {
 /// #         Ok(())
@@ -192,7 +192,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         .iter()
         .map(|ident| format_ident!("{ident}_slot"))
         .collect();
-    // Uses of a field type behind the `Actor` bound are spanned at that field
+    // Uses of a field type behind the `RawActor` bound are spanned at that field
     // type, so a non-actor field reports E0277 there rather than at the
     // derive attribute. User-code spans opt the refs fields into dead-code
     // lints, hence the explicit allow: an unread ref is normal for leaf
@@ -201,7 +201,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         .iter()
         .map(|ty| {
             quote_spanned! {ty.span()=>
-                ::tokio_actor::ActorRef<<#ty as ::tokio_actor::Actor>::Msg>
+                ::tokio_actor::ActorRef<<#ty as ::tokio_actor::RawActor>::Msg>
             }
         })
         .collect();
@@ -213,7 +213,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         .map(|(((ty, slot), ident), name)| {
             quote_spanned! {ty.span()=>
                 let (#slot, #ident) =
-                    builder.slot::<<#ty as ::tokio_actor::Actor>::Msg>(#name);
+                    builder.slot::<<#ty as ::tokio_actor::RawActor>::Msg>(#name);
             }
         })
         .collect();

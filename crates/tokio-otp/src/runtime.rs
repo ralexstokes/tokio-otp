@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, watch};
 use tokio_actor::{
-    Actor, ActorRef, ActorRegistry, RebindPolicy, RegistryError, RunnableActor,
+    ActorRef, ActorRegistry, RawActor, RebindPolicy, RegistryError, RunnableActor,
     RunnableActorFactory,
 };
 use tokio_supervisor::{
@@ -20,7 +20,7 @@ struct DynamicRuntimeState {
 }
 
 impl DynamicRuntimeState {
-    fn build_actor<A: Actor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
+    fn build_actor<A: RawActor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
         let actor = self.actor_factory.actor(actor_id, actor);
         actor.set_registry(self.registry.clone());
         actor
@@ -178,7 +178,7 @@ impl RuntimeHandle {
     }
 
     /// Adds a runtime actor to a supervised actor runtime.
-    pub async fn add_actor<A: Actor>(
+    pub async fn add_actor<A: RawActor>(
         &self,
         actor_id: impl Into<String>,
         actor: A,

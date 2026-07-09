@@ -1,11 +1,11 @@
 use std::future::Future;
 
 use crate::{
-    actor::{Actor, ActorResult},
+    actor::{ActorResult, RawActor},
     context::ActorContext,
 };
 
-/// How the provided [`MessageHandler`] receive loop treats messages still
+/// How the provided [`Actor`] receive loop treats messages still
 /// queued when graph shutdown is requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -31,18 +31,18 @@ pub enum DrainPolicy {
 /// Handler-style actor interface with a framework-owned receive loop.
 ///
 /// Implement this trait when an actor only needs one method per message. The
-/// blanket [`Actor`] implementation receives messages in mailbox order, runs
+/// blanket [`RawActor`] implementation receives messages in mailbox order, runs
 /// lifecycle hooks, and applies [`DrainPolicy`] at shutdown.
 ///
-/// Hand-writing [`Actor::run`] remains the escape hatch for actors that need
+/// Hand-writing [`RawActor::run`] remains the escape hatch for actors that need
 /// custom loop control.
-pub trait MessageHandler: Clone + Send + Sync + 'static {
+pub trait Actor: Clone + Send + Sync + 'static {
     /// The message type this handler receives.
     type Msg: Send + 'static;
 
     /// Handles one received message.
     ///
-    /// Returning `Err` fails the actor exactly like [`Actor::run`] returning
+    /// Returning `Err` fails the actor exactly like [`RawActor::run`] returning
     /// `Err`.
     fn handle(
         &mut self,
@@ -76,7 +76,7 @@ pub trait MessageHandler: Clone + Send + Sync + 'static {
     }
 }
 
-impl<H: MessageHandler> Actor for H {
+impl<H: Actor> RawActor for H {
     type Msg = H::Msg;
 
     async fn run(&self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {

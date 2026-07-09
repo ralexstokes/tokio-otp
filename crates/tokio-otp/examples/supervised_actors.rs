@@ -15,7 +15,7 @@ struct Frontend {
     worker: ActorRef<String>,
 }
 
-impl MessageHandler for Frontend {
+impl Actor for Frontend {
     type Msg = String;
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
@@ -32,7 +32,7 @@ struct Worker {
     run: usize,
 }
 
-impl MessageHandler for Worker {
+impl Actor for Worker {
     type Msg = String;
 
     async fn on_start(&mut self, _ctx: &ActorContext<String>) -> ActorResult {

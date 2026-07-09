@@ -16,8 +16,8 @@ use tokio::{
 };
 use tokio_actor::{
     Actor, ActorContext, ActorRef, ActorResult, BlockingOptions, BlockingTaskFailure, CallError,
-    DrainPolicy, Graph, GraphBuildError, GraphBuilder, GraphError, LookupError, MessageHandler,
-    Reply, SendError, TryRecvError,
+    DrainPolicy, Graph, GraphBuildError, GraphBuilder, GraphError, LookupError, RawActor, Reply,
+    SendError, TryRecvError,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +35,7 @@ impl<M> Clone for Drain<M> {
     }
 }
 
-impl<M: Send + 'static> Actor for Drain<M> {
+impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
     async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
@@ -82,7 +82,7 @@ struct Frontend {
     worker: ActorRef<Job>,
 }
 
-impl Actor for Frontend {
+impl RawActor for Frontend {
     type Msg = Request;
 
     async fn run(&self, mut ctx: ActorContext<Request>) -> ActorResult {
@@ -98,7 +98,7 @@ struct Worker {
     seen: mpsc::UnboundedSender<Job>,
 }
 
-impl Actor for Worker {
+impl RawActor for Worker {
     type Msg = Job;
 
     async fn run(&self, mut ctx: ActorContext<Job>) -> ActorResult {
@@ -135,7 +135,7 @@ struct Echo {
     seen: mpsc::UnboundedSender<u32>,
 }
 
-impl Actor for Echo {
+impl RawActor for Echo {
     type Msg = u32;
 
     async fn run(&self, mut ctx: ActorContext<u32>) -> ActorResult {
@@ -231,7 +231,7 @@ enum CounterMsg {
 #[derive(Clone)]
 struct Counter;
 
-impl Actor for Counter {
+impl RawActor for Counter {
     type Msg = CounterMsg;
 
     async fn run(&self, mut ctx: ActorContext<CounterMsg>) -> ActorResult {
@@ -271,7 +271,7 @@ struct HandlerCounter {
     total: u64,
 }
 
-impl MessageHandler for HandlerCounter {
+impl Actor for HandlerCounter {
     type Msg = HandlerCounterMsg;
 
     async fn handle(
@@ -364,7 +364,7 @@ struct LifecycleHandler {
     events: mpsc::UnboundedSender<LifecycleEvent>,
 }
 
-impl MessageHandler for LifecycleHandler {
+impl Actor for LifecycleHandler {
     type Msg = ();
 
     async fn on_start(&mut self, _ctx: &ActorContext<()>) -> ActorResult {
@@ -420,7 +420,7 @@ struct FailingStartHandler {
     events: mpsc::UnboundedSender<LifecycleEvent>,
 }
 
-impl MessageHandler for FailingStartHandler {
+impl Actor for FailingStartHandler {
     type Msg = ();
 
     async fn on_start(&mut self, _ctx: &ActorContext<()>) -> ActorResult {
@@ -470,7 +470,7 @@ async fn handler_on_start_error_fails_without_handle_or_stop() {
 #[derive(Clone)]
 struct FailingHandler;
 
-impl MessageHandler for FailingHandler {
+impl Actor for FailingHandler {
     type Msg = ();
 
     async fn handle(&mut self, _message: (), _ctx: &ActorContext<()>) -> ActorResult {
@@ -518,7 +518,7 @@ struct GateHandler {
     events: mpsc::UnboundedSender<GateEvent>,
 }
 
-impl MessageHandler for GateHandler {
+impl Actor for GateHandler {
     type Msg = GateMsg;
 
     async fn handle(&mut self, message: GateMsg, _ctx: &ActorContext<GateMsg>) -> ActorResult {
@@ -687,7 +687,7 @@ struct TryDrainActor {
     events: mpsc::UnboundedSender<TryDrainEvent>,
 }
 
-impl Actor for TryDrainActor {
+impl RawActor for TryDrainActor {
     type Msg = TryDrainMsg;
 
     async fn run(&self, mut ctx: ActorContext<TryDrainMsg>) -> ActorResult {
@@ -782,7 +782,7 @@ struct Paddle {
     done: mpsc::UnboundedSender<()>,
 }
 
-impl Actor for Paddle {
+impl RawActor for Paddle {
     type Msg = Ball;
 
     async fn run(&self, mut ctx: ActorContext<Ball>) -> ActorResult {
@@ -915,7 +915,7 @@ fn runtime_lookup_checks_message_type() {
 #[derive(Clone)]
 struct Fail;
 
-impl Actor for Fail {
+impl RawActor for Fail {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -940,7 +940,7 @@ async fn actor_error_fails_the_graph() {
 #[derive(Clone)]
 struct Quit;
 
-impl Actor for Quit {
+impl RawActor for Quit {
     type Msg = ();
 
     async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -994,7 +994,7 @@ async fn graph_shutdown_aborts_uncooperative_actor_after_timeout() {
         live: Arc<AtomicBool>,
     }
 
-    impl Actor for Stubborn {
+    impl RawActor for Stubborn {
         type Msg = ();
 
         async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
@@ -1031,7 +1031,7 @@ async fn graph_shutdown_aborts_uncooperative_actor_after_timeout() {
 #[derive(Clone)]
 struct BlockingFailure;
 
-impl Actor for BlockingFailure {
+impl RawActor for BlockingFailure {
     type Msg = ();
 
     async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
@@ -1083,7 +1083,7 @@ struct HandledBlockingFailure {
     handled: SenderSlot<()>,
 }
 
-impl Actor for HandledBlockingFailure {
+impl RawActor for HandledBlockingFailure {
     type Msg = ();
 
     async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {

@@ -1,7 +1,7 @@
 use std::{error::Error, marker::PhantomData};
 
 use tokio::sync::mpsc;
-use tokio_actor::{ActorContext, ActorResult, GraphBuilder, MessageHandler, SendError};
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, SendError};
 
 struct Observe<M> {
     observed: mpsc::UnboundedSender<M>,
@@ -26,7 +26,7 @@ impl<M> Clone for Observe<M> {
     }
 }
 
-impl<M: Send + 'static> MessageHandler for Observe<M> {
+impl<M: Send + 'static> Actor for Observe<M> {
     type Msg = M;
 
     async fn handle(&mut self, message: M, _ctx: &ActorContext<M>) -> ActorResult {

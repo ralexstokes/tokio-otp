@@ -10,7 +10,7 @@
 //! #[derive(Clone)]
 //! struct Echo;
 //!
-//! impl MessageHandler for Echo {
+//! impl Actor for Echo {
 //!     type Msg = String;
 //!
 //!     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
@@ -97,7 +97,7 @@ pub mod prelude {
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
         BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
-        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
+        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, RawActor,
         RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
         SpawnBlockingError, Topology, TryRecvError,
     };
@@ -124,4 +124,4 @@ pub use error::{DynamicActorError, RuntimeBuildError};
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
 pub use supervised_actors::SupervisedActors;
 pub use supervised_graph::SupervisedGraph;
-pub use tokio_actor::{DrainPolicy, MessageHandler, Topology};
+pub use tokio_actor::{Actor, DrainPolicy, Topology};

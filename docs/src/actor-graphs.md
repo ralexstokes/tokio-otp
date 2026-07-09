@@ -13,7 +13,7 @@ refs struct with one typed `ActorRef` per field, so cycles and forward
 references do not require string lookup.
 
 ```rust,no_run
-use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, MessageHandler, Reply, Topology};
+use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, Actor, Reply, Topology};
 
 struct Order(String);
 struct Parcel(String);
@@ -28,7 +28,7 @@ struct FrontDesk {
     press: ActorRef<Order>,
 }
 
-impl MessageHandler for FrontDesk {
+impl Actor for FrontDesk {
     type Msg = Order;
 
     async fn handle(&mut self, order: Order, _ctx: &ActorContext<Order>) -> ActorResult {
@@ -42,7 +42,7 @@ struct Press {
     shipping: ActorRef<ShippingMsg>,
 }
 
-impl MessageHandler for Press {
+impl Actor for Press {
     type Msg = Order;
 
     async fn handle(&mut self, Order(order): Order, _ctx: &ActorContext<Order>) -> ActorResult {
@@ -58,7 +58,7 @@ struct Shipping {
     shipped: usize,
 }
 
-impl MessageHandler for Shipping {
+impl Actor for Shipping {
     type Msg = ShippingMsg;
 
     async fn handle(
@@ -121,7 +121,7 @@ supervised graph children.
 ## Struct Topologies
 
 `#[derive(Topology)]` supports named-field structs whose fields implement
-`Actor`. Field names become actor ids verbatim, so supervisor child ids,
+`RawActor`. Field names become actor ids verbatim, so supervisor child ids,
 runtime lookups, tracing fields, and metric labels stay human-readable without
 participating in type checking. The generated `graph_with` accepts a
 preconfigured `GraphBuilder` for graph name, mailbox capacity, and shutdown
@@ -168,13 +168,13 @@ restarts under `tokio-otp`.
 
 ## Message Loss at Shutdown and Restart
 
-`MessageHandler` is the usual actor interface: you implement `handle`, and the
+`Actor` is the usual actor interface: you implement `handle`, and the
 framework owns the receive loop. Its default shutdown behavior is fail-fast:
 when shutdown is requested, queued messages are dropped and queued `call`
 requests see `CallError::ReplyDropped`.
 
 If an actor must finish messages already accepted by its mailbox, return
-`DrainPolicy::Drain` from `drain_policy`. Hand-written `Actor::run` loops are
+`DrainPolicy::Drain` from `drain_policy`. Hand-written `RawActor::run` loops are
 still available as the escape hatch for custom loop control; after
 `ctx.recv().await` returns `None` because shutdown was requested, such actors
 can use `ctx.try_recv()` to drain immediately queued messages.

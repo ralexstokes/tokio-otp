@@ -335,7 +335,7 @@ impl<M: Send + 'static> ActorContext<M> {
     /// Shutdown is checked first: as soon as shutdown is requested this
     /// returns `None`, even when messages are still queued. Queued messages
     /// are dropped when the actor exits unless the actor drains them with
-    /// [`try_recv`](Self::try_recv), or uses [`MessageHandler`](crate::MessageHandler)
+    /// [`try_recv`](Self::try_recv), or uses [`Actor`](crate::Actor)
     /// with [`DrainPolicy::Drain`](crate::DrainPolicy). Queued
     /// [`call`](ActorRef::call)s whose reply messages are dropped observe
     /// [`CallError::ReplyDropped`](crate::CallError::ReplyDropped).
@@ -357,14 +357,14 @@ impl<M: Send + 'static> ActorContext<M> {
     /// consulting the shutdown token.
     ///
     /// This is intended for drain-then-exit loops in hand-written
-    /// [`Actor::run`](crate::Actor::run) implementations: after
+    /// [`RawActor::run`](crate::RawActor::run) implementations: after
     /// [`recv`](Self::recv) returns `None` because shutdown was requested,
     /// queued messages remain readable here.
     ///
     /// A returned [`TryRecvError::Empty`] means no message is immediately
     /// available; it does not prove the mailbox is fully drained while senders
     /// hold permits. For typical actors, prefer
-    /// [`MessageHandler`](crate::MessageHandler) with
+    /// [`Actor`](crate::Actor) with
     /// [`DrainPolicy::Drain`](crate::DrainPolicy) so the framework owns the
     /// drain loop.
     pub fn try_recv(&mut self) -> Result<M, TryRecvError> {

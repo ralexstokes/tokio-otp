@@ -7,14 +7,14 @@ use tokio::{
     },
     time::{sleep, timeout},
 };
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, RebindPolicy, SendError};
+use tokio_actor::{ActorContext, ActorResult, GraphBuilder, RawActor, RebindPolicy, SendError};
 
 #[derive(Clone)]
 struct OneMessageSink {
     observed: UnboundedSender<String>,
 }
 
-impl Actor for OneMessageSink {
+impl RawActor for OneMessageSink {
     type Msg = String;
 
     async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {

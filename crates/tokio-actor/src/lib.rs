@@ -19,8 +19,8 @@
 //! | [`Graph`] | Immutable, cloneable graph spec that can be rerun. |
 //! | [`ActorSet`] | Decomposed graph where actors can be run independently. |
 //! | [`RunnableActor`] | One actor plus stable binding for per-actor supervision. |
-//! | [`Actor`] | Typed actor definition. |
-//! | [`MessageHandler`] | Handler-style actor definition with a provided receive loop. |
+//! | [`RawActor`] | Custom-loop typed actor definition. |
+//! | [`Actor`] | Handler-style actor definition with a provided receive loop. |
 //! | [`ActorContext`] | Mailbox, registry, blocking tasks, and shutdown token visible to one actor. |
 //! | [`ActorRef`] | Cloneable stable typed mailbox sender. |
 //! | [`Reply`] | One-shot response channel carried inside request messages. |
@@ -45,8 +45,8 @@
 //! [`CallError::ReplyDropped`].
 //!
 //! Actors that must finish queued work before stopping have two drain options:
-//! implement [`MessageHandler`] and return [`DrainPolicy::Drain`], or write a
-//! custom [`Actor::run`] loop that calls [`ActorContext::try_recv`] after
+//! implement [`Actor`] and return [`DrainPolicy::Drain`], or write a
+//! custom [`RawActor::run`] loop that calls [`ActorContext::try_recv`] after
 //! shutdown. Drains are not separately time-bounded; graph-run actors are
 //! still limited by [`GraphBuilder::actor_shutdown_timeout`], and runnable
 //! actors hosted under `tokio-supervisor` are limited by the child shutdown
@@ -87,7 +87,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use tokio_actor::{ActorContext, ActorResult, GraphBuilder, MessageHandler, Reply};
+//! use tokio_actor::{ActorContext, ActorResult, GraphBuilder, Actor, Reply};
 //!
 //! enum CounterMsg {
 //!     Add(u64),
@@ -99,7 +99,7 @@
 //!     total: u64,
 //! }
 //!
-//! impl MessageHandler for Counter {
+//! impl Actor for Counter {
 //!     type Msg = CounterMsg;
 //!
 //!     async fn handle(
@@ -140,7 +140,7 @@
 //! field before any actor is constructed.
 //!
 //! ```no_run
-//! use tokio_actor::{ActorContext, ActorRef, ActorResult, MessageHandler, Topology};
+//! use tokio_actor::{ActorContext, ActorRef, ActorResult, Actor, Topology};
 //!
 //! enum FrontendMsg {
 //!     Feed(String),
@@ -155,7 +155,7 @@
 //!     parser: ActorRef<ParserMsg>,
 //! }
 //!
-//! impl MessageHandler for Frontend {
+//! impl Actor for Frontend {
 //!     type Msg = FrontendMsg;
 //!
 //!     async fn handle(
@@ -177,7 +177,7 @@
 //!     sink: ActorRef<SinkMsg>,
 //! }
 //!
-//! impl MessageHandler for Parser {
+//! impl Actor for Parser {
 //!     type Msg = ParserMsg;
 //!
 //!     async fn handle(
@@ -194,7 +194,7 @@
 //! #[derive(Clone)]
 //! struct Sink;
 //!
-//! impl MessageHandler for Sink {
+//! impl Actor for Sink {
 //!     type Msg = SinkMsg;
 //!
 //!     async fn handle(&mut self, _message: SinkMsg, _ctx: &ActorContext<SinkMsg>) -> ActorResult {
@@ -252,13 +252,13 @@ pub mod prelude {
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
         BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
-        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
+        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, RawActor,
         RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
         SpawnBlockingError, TryRecvError,
     };
 }
 
-pub use actor::{Actor, ActorResult, BoxError};
+pub use actor::{ActorResult, BoxError, RawActor};
 pub use actor_set::{ActorRunError, ActorSet, RunnableActor, RunnableActorFactory};
 pub use binding::RebindPolicy;
 pub use blocking::{
@@ -269,7 +269,7 @@ pub use builder::{ActorSlot, GraphBuilder};
 pub use context::{ActorContext, ActorRef, Reply};
 pub use error::{CallError, GraphBuildError, GraphError, LookupError, SendError};
 pub use graph::{Graph, GraphHandle};
-pub use handler::{DrainPolicy, MessageHandler};
+pub use handler::{Actor, DrainPolicy};
 pub use registry::{ActorRegistry, RegistryError};
 pub use tokio::sync::mpsc::error::TryRecvError;
 #[cfg(feature = "derive")]

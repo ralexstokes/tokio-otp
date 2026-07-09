@@ -1,14 +1,14 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{ActorContext, ActorResult, MessageHandler};
+use tokio_actor::{Actor, ActorContext, ActorResult};
 use tokio_otp::{DynamicActorOptions, Runtime};
 use tokio_supervisor::{Strategy, SupervisorExit};
 
 #[derive(Clone)]
 struct Frontend;
 
-impl MessageHandler for Frontend {
+impl Actor for Frontend {
     type Msg = String;
 
     async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
@@ -26,7 +26,7 @@ struct RushPress {
     observed: mpsc::UnboundedSender<String>,
 }
 
-impl MessageHandler for RushPress {
+impl Actor for RushPress {
     type Msg = String;
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
