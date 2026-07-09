@@ -98,9 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     handle.shutdown();
-    let exit = handle.wait().await?;
-    assert_eq!(exit, SupervisorExit::Shutdown);
-    println!("supervisor exited with {exit:?}");
+    handle.wait().await?;
+    println!("supervisor stopped");
 
     Ok(())
 }

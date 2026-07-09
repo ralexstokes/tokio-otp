@@ -11,7 +11,7 @@ use tokio::{
 
 use crate::{
     child::ChildSpec,
-    error::{ControlError, RestartMonitorError, SupervisorError, SupervisorExit},
+    error::{ControlError, RestartMonitorError, SupervisorError},
     event::SupervisorEvent,
     monitor::RestartMonitor,
     snapshot::{
@@ -19,9 +19,9 @@ use crate::{
     },
 };
 
-type SupervisorJoinHandle = JoinHandle<Result<SupervisorExit, SupervisorError>>;
-type DoneSender = watch::Sender<Option<Result<SupervisorExit, SupervisorError>>>;
-type DoneReceiver = watch::Receiver<Option<Result<SupervisorExit, SupervisorError>>>;
+type SupervisorJoinHandle = JoinHandle<Result<(), SupervisorError>>;
+type DoneSender = watch::Sender<Option<Result<(), SupervisorError>>>;
+type DoneReceiver = watch::Receiver<Option<Result<(), SupervisorError>>>;
 
 #[derive(Clone)]
 pub(crate) struct ControlEndpoint {
@@ -246,7 +246,7 @@ impl SupervisorHandle {
     }
 
     /// Requests a graceful shutdown and waits for the supervisor to fully stop.
-    pub async fn shutdown_and_wait(&self) -> Result<SupervisorExit, SupervisorError> {
+    pub async fn shutdown_and_wait(&self) -> Result<(), SupervisorError> {
         self.shutdown();
         self.wait().await
     }
@@ -306,10 +306,8 @@ impl SupervisorHandle {
     /// Removes a child by id from this supervisor.
     ///
     /// The child is stopped according to its [`ShutdownPolicy`](crate::ShutdownPolicy)
-    /// before being removed. By default, attempting to remove the last active
-    /// child returns [`ControlError::LastChildRemovalUnsupported`]. Supervisors
-    /// built with [`SupervisorBuilder::allow_empty`](crate::SupervisorBuilder::allow_empty)
-    /// may be reduced to zero children and continue idling.
+    /// before being removed. Removing the last child is valid; the supervisor
+    /// continues idling until shutdown or until another child is added.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         self.control_endpoint().remove_child(id.into()).await
     }
@@ -358,13 +356,13 @@ impl SupervisorHandle {
         }
     }
 
-    /// Waits for the supervisor to exit and returns its exit reason.
+    /// Waits for the supervisor to stop.
     ///
     /// The first caller to `wait` joins the underlying Tokio task. Subsequent
     /// callers (including concurrent ones from cloned handles) receive the
     /// same result via a shared watch channel. A successful return means the
     /// runtime has finished draining and joining supervised child tasks.
-    pub async fn wait(&self) -> Result<SupervisorExit, SupervisorError> {
+    pub async fn wait(&self) -> Result<(), SupervisorError> {
         if let Some(result) = self.done_rx.borrow().clone() {
             return result;
         }

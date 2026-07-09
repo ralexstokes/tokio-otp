@@ -1,4 +1,4 @@
-use std::{io::Error, sync::Arc};
+use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{Instrument, info_span};
@@ -6,7 +6,7 @@ use tracing::{Instrument, info_span};
 use crate::{
     child::{ChildResult, ChildSpec, ChildSpecInner},
     context::ChildContext,
-    error::{SupervisorError, SupervisorExit},
+    error::SupervisorError,
     event::forward_nested_event,
     handle::{
         NestedControlRegistry, NestedControlScope, SupervisorCommand, SupervisorHandle,
@@ -51,7 +51,6 @@ pub(crate) struct SupervisorConfig {
     pub(crate) children: Vec<Arc<ChildSpecInner>>,
     pub(crate) control_channel_capacity: usize,
     pub(crate) event_channel_capacity: usize,
-    pub(crate) allow_empty: bool,
 }
 
 impl Supervisor {
@@ -59,13 +58,13 @@ impl Supervisor {
         Self { config }
     }
 
-    /// Runs the supervisor on the current task, blocking until it exits.
+    /// Runs the supervisor on the current task until a fatal error occurs.
     ///
-    /// No [`SupervisorHandle`](crate::SupervisorHandle) is created, so
-    /// shutdown must be driven externally (e.g. via a signal handler that
-    /// drops a `CancellationToken` observed by all children). For most use
-    /// cases, prefer [`spawn`](Self::spawn).
-    pub async fn run(self) -> Result<SupervisorExit, SupervisorError> {
+    /// No [`SupervisorHandle`](crate::SupervisorHandle) is created, so there is
+    /// no explicit graceful-shutdown control surface. Dropping the returned
+    /// future tears the tree down. For most use cases, prefer
+    /// [`spawn`](Self::spawn) and [`SupervisorHandle::wait`](crate::SupervisorHandle::wait).
+    pub async fn run(self) -> Result<(), SupervisorError> {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let (events_tx, _) = broadcast::channel(self.config.event_channel_capacity);
         // Handle-less runs intentionally start with a closed control channel.
@@ -151,7 +150,7 @@ impl Supervisor {
         command_rx: mpsc::Receiver<SupervisorCommand>,
         registry: Arc<NestedControlRegistry>,
         path_prefix: Vec<String>,
-    ) -> Result<SupervisorExit, SupervisorError> {
+    ) -> Result<(), SupervisorError> {
         let supervisor_name = supervisor_name_for_path(&path_prefix).to_owned();
         let supervisor_path = format_path(&path_prefix);
         let strategy = strategy_label(self.config.strategy);
@@ -200,7 +199,7 @@ impl Supervisor {
                 biased;
                 result = &mut wait => {
                     drain_nested_events(&mut events_rx);
-                    return map_nested_supervisor_result(&child_id, result);
+                    return map_nested_supervisor_result(result);
                 }
                 maybe_event = events_rx.recv() => {
                     handle_nested_event(&observability, maybe_event);
@@ -223,15 +222,9 @@ impl std::fmt::Debug for Supervisor {
     }
 }
 
-fn map_nested_supervisor_result(
-    child_id: &str,
-    result: Result<SupervisorExit, SupervisorError>,
-) -> ChildResult {
+fn map_nested_supervisor_result(result: Result<(), SupervisorError>) -> ChildResult {
     match result {
-        Ok(SupervisorExit::Completed | SupervisorExit::Shutdown) => Ok(()),
-        Ok(SupervisorExit::Failed) => Err(Box::new(Error::other(format!(
-            "nested supervisor `{child_id}` failed"
-        )))),
+        Ok(()) => Ok(()),
         Err(err) => Err(Box::new(err)),
     }
 }
@@ -272,7 +265,6 @@ fn drain_nested_events(events_rx: &mut broadcast::Receiver<crate::event::Supervi
 fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot {
     SupervisorSnapshot {
         state: SupervisorStateView::Running,
-        last_exit: None,
         strategy: config.strategy,
         children: config
             .children

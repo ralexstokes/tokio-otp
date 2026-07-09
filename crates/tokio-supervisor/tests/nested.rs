@@ -5,8 +5,8 @@ use std::sync::{
 
 use tokio::sync::mpsc;
 use tokio_supervisor::{
-    ChildSpec, ControlError, EventPathSegment, ExitStatusView, Restart, SupervisorBuilder,
-    SupervisorEvent, SupervisorExit,
+    ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart,
+    SupervisorBuilder, SupervisorEvent, SupervisorStateView,
 };
 
 mod common;
@@ -23,12 +23,33 @@ async fn nested_supervisor_completes_as_a_clean_child_exit() {
         .build()
         .expect("valid outer supervisor");
 
-    let exit = outer.run().await.expect("outer supervisor should run");
-    assert!(matches!(exit, SupervisorExit::Completed));
+    let handle = outer.spawn();
+    let mut snapshots = handle.subscribe_snapshots();
+    let completed = snapshots
+        .wait_for(|snapshot| {
+            snapshot
+                .descendant(["nested", "leaf"])
+                .is_some_and(|child| child.state == ChildStateView::Stopped)
+        })
+        .await
+        .expect("nested completion snapshot should remain available")
+        .clone();
+    assert_eq!(completed.state, SupervisorStateView::Running);
+    assert!(matches!(
+        completed
+            .descendant(["nested", "leaf"])
+            .expect("leaf remains visible")
+            .last_exit
+            .as_ref(),
+        Some(ExitStatusView::Completed)
+    ));
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
-async fn nested_supervisor_failure_is_visible_to_parent_restart_policy() {
+async fn nested_terminal_failure_remains_in_the_nested_snapshot() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
 
@@ -61,12 +82,28 @@ async fn nested_supervisor_failure_is_visible_to_parent_restart_policy() {
     let handle = outer.spawn();
 
     common::recv_event(&mut starts_rx).await;
-    common::recv_event(&mut starts_rx).await;
+    let mut snapshots = handle.subscribe_snapshots();
+    let failed = snapshots
+        .wait_for(|snapshot| {
+            snapshot
+                .descendant(["nested", "leaf"])
+                .is_some_and(|child| child.state == ChildStateView::Stopped)
+        })
+        .await
+        .expect("nested failure snapshot should remain available")
+        .clone();
+    assert!(matches!(
+        failed
+            .descendant(["nested", "leaf"])
+            .expect("leaf remains visible")
+            .last_exit
+            .as_ref(),
+        Some(ExitStatusView::Failed(message)) if message.contains("nested failure")
+    ));
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    handle.wait().await.expect("shutdown should succeed");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -98,9 +135,7 @@ async fn parent_shutdown_propagates_into_nested_supervisor() {
     common::recv_event(&mut started_rx).await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
     assert_eq!(cancellations.load(Ordering::SeqCst), 1);
 }
 
@@ -190,8 +225,7 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
     assert_eq!(cancellations.load(Ordering::SeqCst), 1);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -315,8 +349,7 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
     assert_eq!(dynamic_cancellations.load(Ordering::SeqCst), 1);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -333,11 +366,6 @@ async fn parent_event_stream_includes_forwarded_nested_events() {
 
     let handle = outer.spawn();
     let mut events = handle.subscribe();
-    let exit = handle
-        .wait()
-        .await
-        .expect("outer supervisor should complete");
-    assert!(matches!(exit, SupervisorExit::Completed));
 
     let mut saw_nested_supervisor_started = false;
     let mut saw_nested_leaf_started = false;
@@ -379,11 +407,16 @@ async fn parent_event_stream_includes_forwarded_nested_events() {
             SupervisorEvent::SupervisorStopped => break,
             _ => {}
         }
+
+        if saw_nested_leaf_exit {
+            handle.shutdown();
+        }
     }
 
     assert!(saw_nested_supervisor_started);
     assert!(saw_nested_leaf_started);
     assert!(saw_nested_leaf_exit);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -409,11 +442,6 @@ async fn nested_events_preserve_the_full_tree_path() {
 
     let handle = outer.spawn();
     let mut events = handle.subscribe();
-    let exit = handle
-        .wait()
-        .await
-        .expect("outer supervisor should complete");
-    assert!(matches!(exit, SupervisorExit::Completed));
 
     loop {
         let event = common::recv_supervisor_event(&mut events).await;
@@ -436,6 +464,9 @@ async fn nested_events_preserve_the_full_tree_path() {
             break;
         }
     }
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -493,6 +524,5 @@ async fn removing_nested_supervisor_unregisters_its_control_endpoint() {
     );
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }

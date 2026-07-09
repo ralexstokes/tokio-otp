@@ -323,8 +323,6 @@
     info.innerHTML =
       '<span class="badge ' + stateBadgeClass(sup.state) + '">' + (sup.state || "Unknown") + '</span> ' +
       '<span class="meta">strategy: ' + (sup.strategy || "?") + '</span>';
-    var exitStr = formatExit(sup.last_exit);
-    if (exitStr) info.innerHTML += ' <span class="meta">last_exit: ' + esc(exitStr) + '</span>';
     frag.appendChild(info);
 
     if (sup.children && sup.children.length > 0) {
@@ -374,14 +372,11 @@
     var root = document.getElementById("stats-root");
     if (!snapshot) { root.innerHTML = '<div class="empty-state">No data yet</div>'; return; }
     var c = countChildren(snapshot);
-    var exitStr = formatExit(snapshot.last_exit);
-
     root.innerHTML =
       '<div class="stat-card">' +
         '<div class="stat-row"><span class="stat-label">Supervisor State</span>' +
           '<span class="stat-value badge ' + stateBadgeClass(snapshot.state) + '">' + (snapshot.state || "?") + '</span></div>' +
         '<div class="stat-row"><span class="stat-label">Strategy</span><span class="stat-value">' + (snapshot.strategy || "?") + '</span></div>' +
-        (exitStr ? '<div class="stat-row"><span class="stat-label">Last Exit</span><span class="stat-value" style="color:#f87171">' + esc(exitStr) + '</span></div>' : '') +
       '</div>' +
       '<div class="stat-card">' +
         '<div class="stat-row"><span class="stat-label">Total Children</span><span class="stat-value">' + c.total + '</span></div>' +

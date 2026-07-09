@@ -125,7 +125,6 @@ mod tests {
     fn resolved_generation_wins_over_terminal_snapshot_state() {
         let snapshot = SupervisorSnapshot {
             state: SupervisorStateView::Stopped,
-            last_exit: None,
             strategy: Strategy::OneForOne,
             children: vec![crate::ChildSnapshot {
                 id: "worker".to_owned(),

@@ -80,5 +80,5 @@ pub use crate::{
     ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart,
     RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy, Strategy,
     Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError, SupervisorEvent,
-    SupervisorExit, SupervisorHandle, SupervisorSnapshot, SupervisorStateView, SupervisorToken,
+    SupervisorHandle, SupervisorSnapshot, SupervisorStateView, SupervisorToken,
 };

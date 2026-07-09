@@ -15,7 +15,6 @@
 //! # async fn main() {
 //! # let snapshot = SupervisorSnapshot {
 //! #     state: SupervisorStateView::Running,
-//! #     last_exit: None,
 //! #     strategy: Strategy::OneForOne,
 //! #     children: vec![],
 //! # };

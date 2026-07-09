@@ -105,7 +105,7 @@ pub mod prelude {
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
         ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart, RestartIntensity,
         RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy, Strategy, Supervisor,
-        SupervisorBuildError, SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorExit,
+        SupervisorBuildError, SupervisorBuilder, SupervisorError, SupervisorEvent,
         SupervisorHandle, SupervisorSnapshot, SupervisorStateView, SupervisorToken,
         prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
     };

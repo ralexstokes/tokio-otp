@@ -6,7 +6,8 @@ use tokio_actor::{
 };
 use tokio_otp::{DynamicActorError, Runtime, RuntimeBuildError, SupervisedActors};
 use tokio_supervisor::{
-    Restart, RestartIntensity, Strategy, SupervisorBuilder, SupervisorExit, SupervisorStateView,
+    ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy, SupervisorBuilder,
+    SupervisorStateView,
 };
 
 struct Drain<M>(PhantomData<fn(M)>);
@@ -113,22 +114,21 @@ async fn runtime_spawn_combines_actor_refs_and_supervisor_control() {
         .expect("worker is still running");
     assert_eq!(observed, "hello");
 
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("supervisor shut down cleanly"),
-        SupervisorExit::Shutdown
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("supervisor shut down cleanly");
 }
 
 #[tokio::test]
-async fn runtime_into_supervisor_run_accepts_ref_cloned_before_startup() {
+async fn runtime_into_supervisor_spawn_accepts_ref_cloned_before_startup() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, worker_ref) = build_runtime(ObserveOnce {
         observed: observed_tx,
     });
 
+    let handle = runtime.into_supervisor().spawn();
+    let mut snapshots = handle.subscribe_snapshots();
     let sender = tokio::spawn(async move {
         worker_ref
             .send("run-path".to_owned())
@@ -136,21 +136,33 @@ async fn runtime_into_supervisor_run_accepts_ref_cloned_before_startup() {
             .expect("message sent through cloned ref");
     });
 
-    assert_eq!(
-        runtime
-            .into_supervisor()
-            .run()
-            .await
-            .expect("runtime exits cleanly"),
-        SupervisorExit::Completed
-    );
     sender.await.expect("sender task joined");
+
+    let completed = snapshots
+        .wait_for(|snapshot| {
+            snapshot
+                .child("worker")
+                .is_some_and(|child| child.state == ChildStateView::Stopped)
+        })
+        .await
+        .expect("completion snapshot remains available")
+        .clone();
+    assert!(matches!(
+        completed
+            .child("worker")
+            .expect("worker remains visible")
+            .last_exit
+            .as_ref(),
+        Some(ExitStatusView::Completed)
+    ));
 
     let observed = timeout(Duration::from_secs(1), observed_rx.recv())
         .await
         .expect("worker observed the message")
         .expect("worker is still running");
     assert_eq!(observed, "run-path");
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -175,16 +187,32 @@ async fn runtime_spawn_wait_drives_to_completion_with_control_surface() {
         .await
         .expect("message sent through cloned ref");
 
-    assert_eq!(
-        handle.wait().await.expect("runtime exits cleanly"),
-        SupervisorExit::Completed
-    );
+    let mut snapshots = control.subscribe_snapshots();
+    let completed = snapshots
+        .wait_for(|snapshot| {
+            snapshot
+                .child("worker")
+                .is_some_and(|child| child.state == ChildStateView::Stopped)
+        })
+        .await
+        .expect("completion snapshot remains available")
+        .clone();
+    assert!(matches!(
+        completed
+            .child("worker")
+            .expect("worker remains visible")
+            .last_exit
+            .as_ref(),
+        Some(ExitStatusView::Completed)
+    ));
 
     let observed = timeout(Duration::from_secs(1), observed_rx.recv())
         .await
         .expect("worker observed the message")
         .expect("worker is still running");
     assert_eq!(observed, "spawn-wait-path");
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -242,13 +270,10 @@ async fn runtime_builder_wires_graph_into_supervised_runtime() {
         .expect("worker is still running");
     assert_eq!(observed, "built");
 
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("supervisor shut down cleanly"),
-        SupervisorExit::Shutdown
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("supervisor shut down cleanly");
 }
 
 #[tokio::test]
@@ -270,13 +295,10 @@ async fn wait_until_running_resolves_after_spawn_with_multiple_children() {
         .expect("runtime running result");
     assert_eq!(handle.snapshot().children.len(), 2);
 
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("runtime shut down cleanly"),
-        SupervisorExit::Shutdown
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("runtime shut down cleanly");
 }
 
 #[derive(Clone)]
@@ -319,13 +341,10 @@ async fn runtime_handle_monitor_restart_delegates_to_supervisor() {
         .expect("restart monitor should succeed");
     assert_eq!(generation, 1);
 
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("runtime shut down cleanly"),
-        SupervisorExit::Shutdown
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("runtime shut down cleanly");
 }
 
 #[derive(Clone)]
@@ -388,11 +407,8 @@ async fn runtime_into_supervisor_round_trips_supervisor() {
         Err(DynamicActorError::Unsupported)
     ));
 
-    assert_eq!(
-        timeout(Duration::from_secs(1), handle.shutdown_and_wait())
-            .await
-            .expect("shutdown completed")
-            .expect("supervisor shut down cleanly"),
-        SupervisorExit::Shutdown
-    );
+    timeout(Duration::from_secs(1), handle.shutdown_and_wait())
+        .await
+        .expect("shutdown completed")
+        .expect("supervisor shut down cleanly");
 }

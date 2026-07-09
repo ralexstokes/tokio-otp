@@ -79,10 +79,8 @@
 //! - `try_` variants return [`ControlError::Busy`] immediately instead of
 //!   waiting when the control channel is full.
 //!
-//! By default, a supervisor must always have at least one child; removing the
-//! last active child returns [`ControlError::LastChildRemovalUnsupported`].
-//! [`SupervisorBuilder::allow_empty`] opts into dynamic supervisors that can
-//! start empty, idle with zero children, and accept the next `add_child`.
+//! Supervisors may start empty or have their last child removed. They idle at
+//! zero children and continue accepting control commands until shutdown.
 //!
 //! # Nested supervisors
 //!
@@ -152,7 +150,7 @@
 //! let _events = handle.subscribe();
 //! let _snapshot = handle.snapshot();
 //! # handle.shutdown();
-//! # let _ = handle.wait().await?;
+//! # handle.wait().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -197,9 +195,7 @@ mod supervisor;
 pub use builder::SupervisorBuilder;
 pub use child::{BoxError, ChildResult, ChildSpec};
 pub use context::{ChildContext, SupervisorToken};
-pub use error::{
-    ControlError, RestartMonitorError, SupervisorBuildError, SupervisorError, SupervisorExit,
-};
+pub use error::{ControlError, RestartMonitorError, SupervisorBuildError, SupervisorError};
 pub use event::{EventPathSegment, ExitStatusView, SupervisorEvent};
 pub use handle::SupervisorHandle;
 pub use monitor::RestartMonitor;

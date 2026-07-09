@@ -37,9 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app_shutdown.cancelled().await;
     handle.shutdown();
 
-    let exit = handle.wait().await?;
-    assert_eq!(exit, SupervisorExit::Shutdown);
-    println!("supervisor exited with {exit:?}");
+    handle.wait().await?;
+    println!("supervisor stopped");
 
     trigger.await?;
     Ok(())

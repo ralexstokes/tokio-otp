@@ -8,8 +8,8 @@ use tokio::{
     time::{Duration, sleep, timeout},
 };
 use tokio_supervisor::{
-    BackoffPolicy, ChildSpec, Restart, RestartIntensity, Strategy, SupervisorBuilder,
-    SupervisorEvent, SupervisorExit,
+    BackoffPolicy, ChildSpec, ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy,
+    SupervisorBuilder, SupervisorEvent,
 };
 
 mod common;
@@ -80,8 +80,7 @@ async fn failed_transient_child_restarts_and_sibling_keeps_running() {
     .expect("sibling should keep running while flaky child restarts");
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -116,8 +115,7 @@ async fn permanent_child_restarts_after_completion() {
     assert_eq!(common::recv_n(&mut starts_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -141,14 +139,33 @@ async fn temporary_child_does_not_restart() {
         .expect("valid supervisor");
 
     let handle = supervisor.spawn();
+    let mut snapshots = handle.subscribe_snapshots();
 
     assert_eq!(common::recv_event(&mut starts_rx).await, 0);
-    let _ = timeout(Duration::from_secs(1), handle.wait())
-        .await
-        .expect("supervisor should finish once its only temporary child stops")
-        .expect("supervisor should exit cleanly");
+    let stopped = timeout(
+        Duration::from_secs(1),
+        snapshots.wait_for(|snapshot| {
+            snapshot
+                .child("temporary")
+                .is_some_and(|child| child.state == ChildStateView::Stopped)
+        }),
+    )
+    .await
+    .expect("temporary child should stop")
+    .expect("snapshot stream should remain open")
+    .clone();
+    assert!(matches!(
+        stopped
+            .child("temporary")
+            .expect("temporary child remains visible")
+            .last_exit
+            .as_ref(),
+        Some(ExitStatusView::Failed(message)) if message.contains("no restart")
+    ));
 
     common::assert_no_event(&mut starts_rx).await;
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -218,8 +235,7 @@ async fn child_restart_intensity_is_isolated_per_child() {
     assert_eq!(common::recv_n(&mut child_b_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -292,6 +308,5 @@ async fn restart_events_follow_exit_schedule_start_restart_order() {
     );
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }

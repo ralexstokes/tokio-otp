@@ -68,11 +68,10 @@ async fn prelude_supports_handle_event_and_snapshot_helpers() {
         ChildStateView::Running
     );
 
-    let exit = handle
+    handle
         .shutdown_and_wait()
         .await
         .expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
 }
 
 #[tokio::test]
@@ -111,11 +110,10 @@ async fn prelude_snapshot_helpers_walk_nested_children() {
     assert!(nested.child("leaf").is_some());
     assert!(snapshot.descendant(["nested", "leaf"]).is_some());
 
-    let exit = handle
+    handle
         .shutdown_and_wait()
         .await
         .expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
 }
 
 #[test]

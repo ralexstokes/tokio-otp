@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let handle = supervisor.spawn();
     match handle.wait().await {
-        Ok(exit) => println!("supervisor exited cleanly: {exit:?}"),
+        Ok(()) => println!("supervisor stopped cleanly"),
         Err(error) => println!("supervisor gave up: {error}"),
     }
     Ok(())
@@ -156,9 +156,9 @@ handle.remove_child("night-shift-press").await?;
 handle.add_child_at(["pressroom"], child).await?;
 ```
 
-By default, a supervisor keeps at least one child; removing the last one is
-refused. Use `SupervisorBuilder::allow_empty()` for dynamic supervisors that
-can start empty, return to zero children, and wait for the next `add_child`.
+Supervisors can start empty or have their last child removed. At zero children
+they keep serving control commands and wait for the next `add_child` or an
+explicit shutdown.
 We will use a higher-level version of this API in the [Dynamic
 actors](dynamic-actors.md) chapter.
 

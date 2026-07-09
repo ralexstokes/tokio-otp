@@ -50,8 +50,8 @@ pub enum SupervisorEvent {
     SupervisorStopping,
     /// The supervisor has fully stopped. No further events will be emitted.
     ///
-    /// Emitted after explicit shutdown and after natural completion or
-    /// failure once all child tasks have been joined.
+    /// Emitted after explicit shutdown or a fatal supervisor error once all
+    /// child tasks have been joined.
     SupervisorStopped,
     /// An event forwarded from a nested (child) supervisor. Nested events form
     /// a recursive wrapper; use [`path`](SupervisorEvent::path) or

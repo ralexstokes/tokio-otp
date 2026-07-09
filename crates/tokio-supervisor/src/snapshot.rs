@@ -9,7 +9,7 @@ use std::{
 
 use tokio::sync::mpsc;
 
-use crate::{error::SupervisorExit, event::ExitStatusView, strategy::Strategy};
+use crate::{event::ExitStatusView, strategy::Strategy};
 
 /// Point-in-time snapshot of a supervisor's state, including the state of every
 /// child.
@@ -23,8 +23,6 @@ use crate::{error::SupervisorExit, event::ExitStatusView, strategy::Strategy};
 pub struct SupervisorSnapshot {
     /// Current lifecycle state of the supervisor.
     pub state: SupervisorStateView,
-    /// The supervisor's last exit reason, if it has stopped.
-    pub last_exit: Option<SupervisorExit>,
     /// The restart strategy in use.
     pub strategy: Strategy,
     /// Ordered list of child snapshots, matching the supervisor's child order.

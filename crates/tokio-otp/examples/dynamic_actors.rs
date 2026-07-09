@@ -3,7 +3,7 @@ use std::error::Error;
 use tokio::sync::mpsc;
 use tokio_actor::{Actor, ActorContext, ActorResult};
 use tokio_otp::{DynamicActorOptions, Runtime};
-use tokio_supervisor::{Strategy, SupervisorExit};
+use tokio_supervisor::Strategy;
 
 #[derive(Clone)]
 struct Frontend;
@@ -70,7 +70,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     handle.remove_actor("front-desk").await?;
     handle.remove_actor("rush-press").await?;
-    let exit = handle.shutdown_and_wait().await?;
-    assert_eq!(exit, SupervisorExit::Completed);
+    handle.shutdown_and_wait().await?;
     Ok(())
 }

@@ -9,7 +9,7 @@ use tokio::{
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildSpec, ControlError, Restart, RestartIntensity, ShutdownMode,
-    ShutdownPolicy, SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorExit,
+    ShutdownPolicy, SupervisorBuilder, SupervisorError, SupervisorEvent,
 };
 
 mod common;
@@ -44,8 +44,7 @@ async fn external_shutdown_stops_all_children() {
     common::recv_event(&mut started_rx).await;
     handle.shutdown();
 
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
     assert_eq!(exits.load(Ordering::SeqCst), 2);
 }
 
@@ -66,11 +65,8 @@ async fn shutdown_is_idempotent_across_handle_clones() {
     clone.shutdown();
     handle.shutdown();
 
-    let first = handle.wait().await.expect("first waiter should resolve");
-    let second = clone.wait().await.expect("second waiter should resolve");
-
-    assert!(matches!(first, SupervisorExit::Shutdown));
-    assert!(matches!(second, SupervisorExit::Shutdown));
+    handle.wait().await.expect("first waiter should resolve");
+    clone.wait().await.expect("second waiter should resolve");
 }
 
 #[tokio::test]
@@ -112,6 +108,24 @@ async fn dropping_last_handle_clone_requests_graceful_shutdown() {
 }
 
 #[tokio::test]
+async fn dropping_last_handle_stops_a_supervisor_idling_at_zero_children() {
+    let supervisor = SupervisorBuilder::new()
+        .build()
+        .expect("empty supervisor builds");
+
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+
+    drop(handle);
+
+    loop {
+        if common::recv_supervisor_event(&mut events).await == SupervisorEvent::SupervisorStopped {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
 async fn cooperative_child_observes_cancellation_before_shutdown_finishes() {
     let saw_cancel = Arc::new(AtomicBool::new(false));
 
@@ -131,8 +145,7 @@ async fn cooperative_child_observes_cancellation_before_shutdown_finishes() {
     let handle = supervisor.spawn();
     handle.shutdown();
 
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
     assert!(saw_cancel.load(Ordering::SeqCst));
 }
 
@@ -167,8 +180,7 @@ async fn stubborn_child_is_aborted_in_cooperative_then_abort_mode() {
     let handle = supervisor.spawn();
     handle.shutdown();
 
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
     assert!(!saw_cancel.load(Ordering::SeqCst));
     assert!(
         !live_flag.is_live(),
@@ -333,8 +345,7 @@ async fn cooperative_remove_child_times_out_with_stuck_child_name() {
     );
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -369,9 +380,7 @@ async fn wait_only_resolves_after_child_lifetimes_end() {
     assert!(live_flag.is_live());
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
     assert!(
         !live_flag.is_live(),
         "child must be dropped before wait completes"
@@ -425,8 +434,7 @@ async fn shutdown_preempts_zero_delay_restart() {
         }
     }
 
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -496,8 +504,7 @@ async fn shutdown_preempts_delayed_restart_in_cooperative_mode() {
         }
     }
 
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
     assert!(
         saw_cancel.load(Ordering::SeqCst),
         "cooperative child should observe shutdown cancellation"

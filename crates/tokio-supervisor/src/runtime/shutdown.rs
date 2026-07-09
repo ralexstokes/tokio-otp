@@ -5,7 +5,7 @@ use tokio::time::{Instant, sleep_until};
 use tracing::{Instrument, info_span};
 
 use crate::{
-    error::{SupervisorError, SupervisorExit},
+    error::SupervisorError,
     event::SupervisorEvent,
     runtime::{
         child_runtime::RuntimeChildState,
@@ -17,7 +17,7 @@ use crate::{
 use super::supervision::SupervisorRuntime;
 
 impl SupervisorRuntime {
-    pub(crate) async fn shutdown_all(&mut self) -> Result<SupervisorExit, SupervisorError> {
+    pub(crate) async fn shutdown_all(&mut self) -> Result<(), SupervisorError> {
         let span = info_span!(
             "shutdown",
             supervisor_name = %self.meta.observability.supervisor_name(),
@@ -25,18 +25,12 @@ impl SupervisorRuntime {
         );
 
         async {
-            let idle_at_shutdown = self.live_tasks == 0 && self.running_children == 0;
             self.state = SupervisorState::Stopping;
             self.cancel_running_children();
             self.send_event(SupervisorEvent::SupervisorStopping);
             self.drain_children(DrainReason::Shutdown).await?;
-            let exit = if self.meta.allow_empty && idle_at_shutdown {
-                self.terminal_status_exit()
-            } else {
-                SupervisorExit::Shutdown
-            };
-            self.finish_with_exit(exit);
-            Ok(exit)
+            self.finish();
+            Ok(())
         }
         .instrument(span)
         .await
@@ -95,7 +89,7 @@ impl SupervisorRuntime {
             matches!(child.runtime.spec.shutdown_policy.mode, ShutdownMode::Abort)
         });
         tokio::task::yield_now().await;
-        self.drain_ready_joins(reason).await?;
+        self.drain_ready_joins().await?;
         if self.live_tasks == 0 {
             self.meta.observability.record_shutdown_duration(
                 shutdown_operation(reason),
@@ -117,7 +111,7 @@ impl SupervisorRuntime {
                         let Some(joined) = maybe else {
                             break;
                         };
-                        self.handle_drained_join(joined, reason)?;
+                        self.handle_drained_join(joined)?;
                     }
                     _ = sleep_until(deadline) => {
                         break;
@@ -137,7 +131,7 @@ impl SupervisorRuntime {
         if !remaining.is_empty() {
             abort_matching_children(&self.children, |_| true);
             tokio::task::yield_now().await;
-            self.drain_ready_joins(reason).await?;
+            self.drain_ready_joins().await?;
         }
 
         let remaining = active_task_names(&self.children);

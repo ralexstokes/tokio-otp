@@ -95,9 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("nested subtree recovered internally without restarting outer siblings");
 
     handle.shutdown();
-    let exit = handle.wait().await?;
-    assert_eq!(exit, SupervisorExit::Shutdown);
-    println!("supervisor exited with {exit:?}");
+    handle.wait().await?;
+    println!("supervisor stopped");
 
     Ok(())
 }

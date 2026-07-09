@@ -15,7 +15,7 @@ use tokio::{
     sync::Notify,
 };
 use tokio_supervisor::{
-    BoxError, ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorEvent, SupervisorExit,
+    BoxError, ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorEvent,
 };
 
 const DEFAULT_WARMUP_ITERS: usize = 10;
@@ -116,8 +116,7 @@ async fn spawn_shutdown_flow(children: usize) {
     black_box(started);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 async fn one_for_one_restart_flow() {
@@ -163,8 +162,7 @@ async fn one_for_one_restart_flow() {
     black_box(attempts.load(Ordering::Relaxed));
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 async fn one_for_all_restart_flow() {
@@ -205,8 +203,7 @@ async fn one_for_all_restart_flow() {
     black_box(restarted);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 async fn dynamic_add_remove_flow() {
@@ -238,8 +235,7 @@ async fn dynamic_add_remove_flow() {
     wait_for_named_child_removed(&mut events, "dynamic").await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 async fn wait_for_child_start_count(

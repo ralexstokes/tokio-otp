@@ -46,8 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sleep(Duration::from_millis(200)).await;
     handle.shutdown();
 
-    let exit = handle.wait().await?;
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await?;
     observer.await??;
 
     Ok(())
@@ -56,8 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn print_snapshot(snapshot: &SupervisorSnapshot, depth: usize) {
     let indent = "  ".repeat(depth);
     println!(
-        "{indent}supervisor state={:?} last_exit={:?} strategy={:?}",
-        snapshot.state, snapshot.last_exit, snapshot.strategy
+        "{indent}supervisor state={:?} strategy={:?}",
+        snapshot.state, snapshot.strategy
     );
 
     for child in &snapshot.children {

@@ -292,7 +292,7 @@ future, and the docs say so.
 - `SupervisorBuilder` collects children plus `strategy`, default
   `restart_intensity`, `control_channel_capacity` (default 64),
   `event_channel_capacity` (default 256).
-- `build()` validates: non-empty, unique child ids; non-zero capacities;
+- `build()` validates: unique child ids; non-zero capacities;
   valid intensity/backoff (non-zero durations, non-zero factor). Errors:
   `SupervisorBuildError`. Zero children is valid — the supervisor starts
   idle (D1).

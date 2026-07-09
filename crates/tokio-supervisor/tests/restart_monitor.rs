@@ -14,7 +14,7 @@ use tokio::{
 use tokio_supervisor::{
     BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, Restart,
     RestartIntensity, RestartMonitorError, ShutdownMode, ShutdownPolicy, SupervisorBuilder,
-    SupervisorError, SupervisorExit, SupervisorSnapshot,
+    SupervisorError, SupervisorSnapshot,
 };
 
 mod common;
@@ -140,7 +140,6 @@ async fn monitor_restart_allows_coalesced_generations() {
 #[tokio::test]
 async fn monitor_restart_errors_when_child_is_removed() {
     let handle = SupervisorBuilder::new()
-        .allow_empty()
         .child(ChildSpec::new("worker", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
             Ok(())
@@ -166,8 +165,7 @@ async fn monitor_restart_errors_when_child_is_removed() {
     );
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Completed);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -210,7 +208,6 @@ async fn monitor_restart_errors_when_restart_intensity_is_exhausted() {
 #[tokio::test]
 async fn monitor_restart_errors_synchronously_during_removal_window() {
     let handle = SupervisorBuilder::new()
-        .allow_empty()
         .child(
             ChildSpec::new("worker", |_ctx| async move {
                 std::future::pending::<()>().await;
@@ -325,6 +322,5 @@ async fn wait_for_snapshot(
 
 async fn shutdown(handle: tokio_supervisor::SupervisorHandle) {
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }

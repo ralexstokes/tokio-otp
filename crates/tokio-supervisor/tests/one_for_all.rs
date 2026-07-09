@@ -8,8 +8,8 @@ use tokio::{
     time::{Duration, sleep, timeout},
 };
 use tokio_supervisor::{
-    BackoffPolicy, ChildSpec, Restart, RestartIntensity, ShutdownMode, ShutdownPolicy, Strategy,
-    SupervisorBuilder, SupervisorEvent, SupervisorExit,
+    BackoffPolicy, ChildSpec, ChildStateView, ExitStatusView, Restart, RestartIntensity,
+    ShutdownMode, ShutdownPolicy, Strategy, SupervisorBuilder, SupervisorEvent,
 };
 
 mod common;
@@ -62,8 +62,7 @@ async fn restartable_child_failure_restarts_the_whole_group() {
     assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -131,8 +130,7 @@ async fn control_plane_remains_available_after_group_restart() {
     assert_eq!(common::recv_event(&mut dynamic_rx).await, 0);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -208,8 +206,7 @@ async fn completed_temporary_child_is_not_respawned_during_group_restart() {
     common::assert_no_event(&mut temporary_rx).await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -269,8 +266,7 @@ async fn one_for_all_does_not_overlap_old_and_new_generations() {
     assert_eq!(peer_events, vec![(0, 1), (1, 1)]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -334,8 +330,7 @@ async fn one_for_all_restarts_after_aborting_stubborn_cooperative_then_abort_pee
     assert_eq!(common::recv_event(&mut peer_rx).await, 1);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
     assert!(
         !peer_live_flag.is_live(),
         "stubborn peer should be dropped before wait resolves"
@@ -343,7 +338,7 @@ async fn one_for_all_restarts_after_aborting_stubborn_cooperative_then_abort_pee
 }
 
 #[tokio::test]
-async fn drained_old_generation_failure_does_not_poison_later_completed_exit() {
+async fn superseded_group_failure_leaves_latest_child_exits_completed() {
     let release_failure = Arc::new(Notify::new());
     let finish_generation_one = Arc::new(Barrier::new(3));
     let trigger_attempts = Arc::new(AtomicUsize::new(0));
@@ -413,11 +408,29 @@ async fn drained_old_generation_failure_does_not_poison_later_completed_exit() {
 
     finish_generation_one.wait().await;
 
-    let exit = timeout(Duration::from_secs(1), handle.wait())
-        .await
-        .expect("supervisor should exit after generation one completes")
-        .expect("supervisor should exit cleanly");
-    assert!(matches!(exit, SupervisorExit::Completed));
+    let mut snapshots = handle.subscribe_snapshots();
+    let completed = timeout(
+        Duration::from_secs(1),
+        snapshots.wait_for(|snapshot| {
+            snapshot
+                .children
+                .iter()
+                .all(|child| child.state == ChildStateView::Stopped)
+        }),
+    )
+    .await
+    .expect("children should stop after generation one completes")
+    .expect("snapshot stream should remain open")
+    .clone();
+    assert!(
+        completed
+            .children
+            .iter()
+            .all(|child| { matches!(child.last_exit.as_ref(), Some(ExitStatusView::Completed)) })
+    );
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -483,8 +496,7 @@ async fn group_restart_uses_the_failing_child_restart_intensity() {
     assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -610,8 +622,7 @@ async fn group_restart_scheduled_precedes_child_restart_events() {
     );
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -676,8 +687,7 @@ async fn removing_failed_child_abandons_pending_group_restart() {
     common::assert_no_event(&mut replacement_rx).await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -767,6 +777,5 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
     );
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }

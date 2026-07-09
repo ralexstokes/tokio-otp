@@ -5,9 +5,7 @@ use tokio_actor::{ActorContext, ActorResult, GraphBuilder, LookupError, RawActor
 use tokio_otp::{
     DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuildError, SupervisedActors,
 };
-use tokio_supervisor::{
-    ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder, SupervisorExit,
-};
+use tokio_supervisor::{ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder};
 
 fn build_runtime(graph: tokio_actor::Graph) -> Runtime {
     SupervisedActors::new(graph)
@@ -152,13 +150,10 @@ async fn graphless_dynamic_runtime_adds_removes_and_readds_actors() {
         .remove_actor("sink")
         .await
         .expect("sink removed again");
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("runtime shut down cleanly"),
-        SupervisorExit::Completed
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("runtime shut down cleanly");
 }
 
 #[tokio::test]
@@ -206,13 +201,10 @@ async fn dynamic_graph_runtime_can_remove_last_graph_actor() {
         .remove_actor("dynamic")
         .await
         .expect("dynamic actor removed");
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("runtime shut down cleanly"),
-        SupervisorExit::Completed
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("runtime shut down cleanly");
 }
 
 #[tokio::test]
@@ -251,13 +243,10 @@ async fn static_actor_can_send_to_runtime_added_actor() {
     assert_eq!(observed, "hello-dynamic");
 
     assert!(handle.actor_ref::<String>("dynamic").is_ok());
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("runtime shut down cleanly"),
-        SupervisorExit::Shutdown
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("runtime shut down cleanly");
 }
 
 #[derive(Clone)]

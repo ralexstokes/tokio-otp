@@ -5,12 +5,10 @@ use tokio_supervisor::{
 };
 
 #[test]
-fn empty_children_are_rejected() {
-    let err = SupervisorBuilder::new()
+fn empty_children_are_accepted() {
+    SupervisorBuilder::new()
         .build()
-        .expect_err("building without any children must fail");
-
-    assert!(matches!(err, SupervisorBuildError::EmptyChildren));
+        .expect("building without children should succeed");
 }
 
 #[test]

@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
 use crate::{
-    error::{ControlError, SupervisorError, SupervisorExit},
+    error::{ControlError, SupervisorError},
     event::{ExitStatusView, SupervisorEvent},
     handle::{NestedControlRegistry, SupervisorCommand},
     observability::{SupervisorObservability, format_child_path},
@@ -83,7 +83,6 @@ pub(crate) struct ChildEntry {
     /// Unique instance counter for this slab slot. See struct-level docs.
     pub(crate) instance: u64,
     pub(crate) runtime: ChildRuntime,
-    terminal_status: Option<TerminalStatus>,
     last_exit: Option<ExitStatusView>,
     pub(crate) nested_snapshot: Option<SupervisorSnapshot>,
     pub(crate) nested_snapshot_state: Option<NestedSnapshotState>,
@@ -103,7 +102,6 @@ impl ChildEntry {
             formatted_path,
             instance,
             runtime: ChildRuntime::new(spec, default_restart_intensity),
-            terminal_status: None,
             last_exit: None,
             nested_snapshot: None,
             nested_snapshot_state: None,
@@ -116,7 +114,6 @@ impl ChildEntry {
 pub(crate) struct RuntimeMeta {
     pub(crate) strategy: Strategy,
     pub(crate) default_restart_intensity: RestartIntensity,
-    pub(crate) allow_empty: bool,
     pub(crate) registry: Arc<NestedControlRegistry>,
     pub(crate) path_prefix: Vec<String>,
     pub(crate) observability: SupervisorObservability,
@@ -162,8 +159,7 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) nested_snapshot_rx: mpsc::Receiver<NestedSnapshotNotification>,
     pub(crate) commands_open: bool,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
-    pub(crate) pending_exit: Option<Result<SupervisorExit, SupervisorError>>,
-    pub(crate) last_exit: Option<SupervisorExit>,
+    pub(crate) pending_exit: Option<Result<(), SupervisorError>>,
 }
 
 impl SupervisorRuntime {
@@ -206,7 +202,6 @@ impl SupervisorRuntime {
             meta: RuntimeMeta {
                 strategy: config.strategy,
                 default_restart_intensity,
-                allow_empty: config.allow_empty,
                 registry,
                 path_prefix,
                 observability,
@@ -229,11 +224,10 @@ impl SupervisorRuntime {
             commands_open: true,
             task_map: HashMap::new(),
             pending_exit: None,
-            last_exit: None,
         }
     }
 
-    pub(crate) async fn run(&mut self) -> Result<SupervisorExit, SupervisorError> {
+    pub(crate) async fn run(&mut self) -> Result<(), SupervisorError> {
         self.send_event(SupervisorEvent::SupervisorStarted);
         let initial_children = self.child_order.clone();
         for key in initial_children {
@@ -243,10 +237,6 @@ impl SupervisorRuntime {
         loop {
             if let Some(result) = self.pending_exit.take() {
                 return result;
-            }
-
-            if !self.meta.allow_empty && self.live_tasks == 0 && self.no_running_children() {
-                return self.finish_natural_exit();
             }
 
             tokio::select! {
@@ -271,42 +261,13 @@ impl SupervisorRuntime {
                     }
                 }
                 maybe = self.join_set.join_next_with_id(), if !self.join_set.is_empty() => {
-                    let Some(joined) = maybe else {
-                        return self.finish_natural_exit();
-                    };
+                    let Some(joined) = maybe else { continue };
                     self.handle_joined_child(joined).await?;
                     if let Some(result) = self.pending_exit.take() {
                         return result;
                     }
                 }
             }
-        }
-    }
-
-    fn finish_natural_exit(&mut self) -> Result<SupervisorExit, SupervisorError> {
-        let exit = self.terminal_status_exit();
-        self.finish_with_exit(exit);
-        Ok(exit)
-    }
-
-    pub(crate) fn terminal_status_exit(&self) -> SupervisorExit {
-        // Only the latest terminal status for each child counts here. Failures
-        // from superseded generations are cleared by a later successful
-        // restart, so they do not poison a clean natural exit.
-        if self
-            .child_order
-            .iter()
-            .filter_map(|&key| self.children.get(key))
-            .any(|entry| {
-                entry
-                    .terminal_status
-                    .as_ref()
-                    .is_some_and(TerminalStatus::is_failure)
-            })
-        {
-            SupervisorExit::Failed
-        } else {
-            SupervisorExit::Completed
         }
     }
 
@@ -363,9 +324,8 @@ impl SupervisorRuntime {
         Ok(())
     }
 
-    pub(crate) fn finish_with_exit(&mut self, exit: SupervisorExit) {
+    pub(crate) fn finish(&mut self) {
         self.state = SupervisorState::Stopped;
-        self.last_exit = Some(exit);
         self.send_event(SupervisorEvent::SupervisorStopped);
     }
 
@@ -400,10 +360,6 @@ impl SupervisorRuntime {
             return Err(ControlError::ChildRemovalInProgress(id));
         }
 
-        if !self.meta.allow_empty && self.active_child_count() <= 1 {
-            return Err(ControlError::LastChildRemovalUnsupported);
-        }
-
         let (mode, grace, active, was_running) = {
             let entry = &mut self.children[key];
             let was_running = counts_as_running(entry.membership, entry.runtime.state);
@@ -432,7 +388,7 @@ impl SupervisorRuntime {
 
         match mode {
             crate::shutdown::ShutdownMode::Abort => {
-                self.abort_and_detach_child(key, DrainReason::Shutdown)
+                self.abort_and_detach_child(key)
                     .await
                     .map_err(map_supervisor_error_to_control)?;
                 Ok(())
@@ -489,7 +445,7 @@ impl SupervisorRuntime {
                     if timeout_is_error {
                         removal_error = Some(ControlError::ShutdownTimedOut(child_id.clone()));
                     }
-                    self.abort_and_detach_child(key, DrainReason::Shutdown)
+                    self.abort_and_detach_child(key)
                         .await
                         .map_err(map_supervisor_error_to_control)?;
                     self.meta.observability.record_shutdown_duration(
@@ -548,10 +504,6 @@ impl SupervisorRuntime {
         }
     }
 
-    fn active_child_count(&self) -> usize {
-        self.children_by_id.len()
-    }
-
     fn shutdown_requested(
         &self,
         changed: Result<(), tokio::sync::watch::error::RecvError>,
@@ -584,7 +536,6 @@ impl SupervisorRuntime {
         let had_live_task = self.children[key].runtime.abort_handle.is_some();
         let mut entry = self.children.remove(key);
         entry.membership = MembershipState::Removed;
-        entry.terminal_status = None;
         entry.last_exit = None;
         entry.nested_snapshot = None;
         if let Some(state) = entry.nested_snapshot_state.as_ref() {
@@ -626,8 +577,6 @@ impl SupervisorRuntime {
                 }
                 Strategy::OneForAll => self.handle_one_for_all_restart(classified.key).await?,
             }
-        } else {
-            self.record_terminal_status(classified.key, classified.generation, &classified.status);
         }
 
         Ok(())
@@ -636,20 +585,11 @@ impl SupervisorRuntime {
     pub(crate) fn handle_drained_join(
         &mut self,
         joined: Result<(Id, ChildEnvelope), JoinError>,
-        reason: DrainReason,
     ) -> Result<(), SupervisorError> {
         let Some(classified) = self.consume_joined_child(joined)? else {
             return Ok(());
         };
         self.record_exit(classified.key, classified.generation, &classified.status);
-        if matches!(reason, DrainReason::GroupRestart)
-            && matches!(
-                self.children[classified.key].runtime.spec.restart,
-                Restart::Temporary
-            )
-        {
-            self.record_terminal_status(classified.key, classified.generation, &classified.status);
-        }
         Ok(())
     }
 
@@ -709,18 +649,6 @@ impl SupervisorRuntime {
             generation,
             status: status.view(),
         });
-    }
-
-    fn record_terminal_status(&mut self, key: ChildKey, generation: u64, status: &ExitStatus) {
-        let terminal_status = TerminalStatus::new(generation, status.is_failure());
-        match &mut self.children[key].terminal_status {
-            Some(current) if current.generation > generation => {}
-            slot => *slot = Some(terminal_status),
-        }
-    }
-
-    pub(crate) fn clear_terminal_status(&mut self, key: ChildKey) {
-        self.children[key].terminal_status = None;
     }
 
     async fn handle_one_for_one_restart(
@@ -879,10 +807,6 @@ impl SupervisorRuntime {
         }
     }
 
-    fn no_running_children(&self) -> bool {
-        self.running_children == 0
-    }
-
     fn running_child_count(&self) -> usize {
         self.running_children
     }
@@ -950,32 +874,24 @@ impl SupervisorRuntime {
                 SupervisorState::Stopping => SupervisorStateView::Stopping,
                 SupervisorState::Stopped => SupervisorStateView::Stopped,
             },
-            last_exit: self.last_exit,
             strategy: self.meta.strategy,
             children,
         }
     }
 
-    pub(crate) async fn drain_ready_joins(
-        &mut self,
-        reason: DrainReason,
-    ) -> Result<(), SupervisorError> {
+    pub(crate) async fn drain_ready_joins(&mut self) -> Result<(), SupervisorError> {
         loop {
             match tokio::time::timeout(Duration::ZERO, self.join_set.join_next_with_id()).await {
-                Ok(Some(joined)) => self.handle_drained_join(joined, reason)?,
+                Ok(Some(joined)) => self.handle_drained_join(joined)?,
                 Ok(None) | Err(_) => return Ok(()),
             }
         }
     }
 
-    async fn abort_and_detach_child(
-        &mut self,
-        key: ChildKey,
-        reason: DrainReason,
-    ) -> Result<(), SupervisorError> {
+    async fn abort_and_detach_child(&mut self, key: ChildKey) -> Result<(), SupervisorError> {
         self.abort_child(key);
         tokio::task::yield_now().await;
-        self.drain_ready_joins(reason).await?;
+        self.drain_ready_joins().await?;
         self.finalize_removed_child_if_present(key);
         Ok(())
     }
@@ -1021,9 +937,6 @@ fn map_build_error_to_control(id: &str, err: crate::error::SupervisorBuildError)
         crate::error::SupervisorBuildError::DuplicateChildId(_) => {
             ControlError::DuplicateChildId(id.to_owned())
         }
-        crate::error::SupervisorBuildError::EmptyChildren => {
-            ControlError::InvalidConfig("supervisor requires at least one child")
-        }
         crate::error::SupervisorBuildError::InvalidConfig(message) => {
             ControlError::InvalidConfig(message)
         }
@@ -1045,30 +958,7 @@ struct ClassifiedExit {
     status: ExitStatus,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-// Tracks the newest terminal outcome observed for a child generation.
-struct TerminalStatus {
-    generation: u64,
-    is_failure: bool,
-}
-
-impl TerminalStatus {
-    fn new(generation: u64, is_failure: bool) -> Self {
-        Self {
-            generation,
-            is_failure,
-        }
-    }
-
-    fn is_failure(&self) -> bool {
-        self.is_failure
-    }
-}
-
-/// Why the supervisor is draining its join set. Affects how exits from
-/// `Temporary` children are handled: during a `GroupRestart`, temporary
-/// children that exit are recorded as terminal (they won't be respawned);
-/// during `Shutdown`, all exits are simply collected.
+/// Why the supervisor is draining its join set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DrainReason {
     Shutdown,

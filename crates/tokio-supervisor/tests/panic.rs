@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use tokio::sync::mpsc;
-use tokio_supervisor::{ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorExit};
+use tokio_supervisor::{ChildSpec, Restart, Strategy, SupervisorBuilder};
 
 mod common;
 
@@ -40,8 +40,7 @@ async fn transient_child_panic_causes_restart() {
     assert_eq!(common::recv_n(&mut starts_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -74,8 +73,7 @@ async fn transient_factory_panic_causes_restart() {
     assert_eq!(common::recv_n(&mut starts_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -126,8 +124,7 @@ async fn one_for_all_panic_restarts_the_whole_group() {
     assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -176,6 +173,5 @@ async fn one_for_all_factory_panic_restarts_the_whole_group() {
     assert_eq!(common::recv_n(&mut peer_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }

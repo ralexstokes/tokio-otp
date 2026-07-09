@@ -16,7 +16,6 @@ impl SupervisorRuntime {
         &mut self,
         key: usize,
     ) -> Result<(Option<u64>, u64), SupervisorError> {
-        self.clear_terminal_status(key);
         let (
             child_id,
             generation,

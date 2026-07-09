@@ -22,9 +22,8 @@ mod coverage_probe {
             ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart,
             RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy,
             Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
-            SupervisorEvent, SupervisorEventReceiverExt as _, SupervisorExit, SupervisorHandle,
-            SupervisorSnapshot, SupervisorSnapshotReceiverExt as _, SupervisorStateView,
-            SupervisorToken,
+            SupervisorEvent, SupervisorEventReceiverExt as _, SupervisorHandle, SupervisorSnapshot,
+            SupervisorSnapshotReceiverExt as _, SupervisorStateView, SupervisorToken,
         };
     }
 
@@ -127,11 +126,8 @@ async fn umbrella_prelude_supports_blocking_and_supervisor_helpers() {
         ChildStateView::Running
     );
 
-    assert_eq!(
-        handle
-            .shutdown_and_wait()
-            .await
-            .expect("shutdown should succeed"),
-        SupervisorExit::Shutdown
-    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
 }

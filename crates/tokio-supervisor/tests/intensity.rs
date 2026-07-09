@@ -12,7 +12,6 @@ use tokio::{
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildSpec, Restart, RestartIntensity, SupervisorBuilder, SupervisorError,
-    SupervisorExit,
 };
 
 mod common;
@@ -149,8 +148,7 @@ async fn exponential_backoff_delays_restart_attempts_by_expected_steps() {
     );
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -243,8 +241,7 @@ async fn restart_intensity_is_tracked_per_child_for_one_for_one() {
     assert_eq!(common::recv_n(&mut beta_rx, 2).await, vec![0, 1]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -338,8 +335,7 @@ async fn restart_budget_recovers_after_failures_age_out_of_window() {
     common::assert_no_event(&mut starts_rx).await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -414,6 +410,5 @@ async fn restart_intensity_is_tracked_per_failing_child_for_one_for_all() {
     assert_eq!(common::recv_event(&mut beta_rx).await, 2);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }

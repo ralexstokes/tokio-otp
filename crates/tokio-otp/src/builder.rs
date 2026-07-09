@@ -139,9 +139,6 @@ impl RuntimeBuilder {
     /// decomposing the graph and building the supervisor.
     pub fn build(self) -> Result<Runtime, RuntimeBuildError> {
         let mut supervisor = SupervisorBuilder::new().strategy(self.strategy);
-        if self.dynamic {
-            supervisor = supervisor.allow_empty();
-        }
         if let Some(intensity) = self.restart_intensity {
             supervisor = supervisor.restart_intensity(intensity);
         }

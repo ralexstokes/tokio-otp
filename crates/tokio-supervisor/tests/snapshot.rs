@@ -12,8 +12,8 @@ use tokio::{
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, ExitStatusView,
-    Restart, RestartIntensity, SupervisorBuilder, SupervisorEvent, SupervisorExit,
-    SupervisorSnapshot, SupervisorStateView,
+    Restart, RestartIntensity, SupervisorBuilder, SupervisorEvent, SupervisorSnapshot,
+    SupervisorStateView,
 };
 
 mod common;
@@ -36,7 +36,6 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
     let snapshot = handle.snapshot();
 
     assert_eq!(snapshot.state, SupervisorStateView::Running);
-    assert_eq!(snapshot.last_exit, None);
     assert_eq!(child_ids(&snapshot), vec!["alpha", "beta"]);
     for entry in &snapshot.children {
         assert_eq!(entry.membership, ChildMembershipView::Active);
@@ -61,8 +60,7 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
     assert_eq!(child_ids(&updated), vec!["alpha", "beta", "gamma"]);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -141,8 +139,7 @@ async fn snapshot_shows_restart_state_and_last_exit() {
     ));
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -208,8 +205,7 @@ async fn snapshot_shows_removing_membership_during_child_removal() {
     assert!(child(&removed, "removable").is_none());
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -264,8 +260,7 @@ async fn root_snapshot_includes_nested_supervisor_tree() {
     assert!(child(nested, "leaf").is_some());
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -287,12 +282,10 @@ async fn stopped_snapshot_remains_available_after_shutdown() {
     .await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 
     let snapshot = handle.snapshot();
     assert_eq!(snapshot.state, SupervisorStateView::Stopped);
-    assert_eq!(snapshot.last_exit, Some(SupervisorExit::Shutdown));
     assert_eq!(
         child(&snapshot, "worker")
             .expect("worker child should remain visible")
@@ -302,7 +295,7 @@ async fn stopped_snapshot_remains_available_after_shutdown() {
 }
 
 #[tokio::test]
-async fn stopped_snapshot_reports_natural_completion() {
+async fn completed_children_leave_the_supervisor_idle_until_shutdown() {
     let supervisor = SupervisorBuilder::new()
         .child(
             ChildSpec::new("temporary", |_ctx| async move { Ok(()) }).restart(Restart::Temporary),
@@ -311,15 +304,15 @@ async fn stopped_snapshot_reports_natural_completion() {
         .expect("valid supervisor");
 
     let handle = supervisor.spawn();
-    let exit = timeout(common::EVENT_TIMEOUT, handle.wait())
-        .await
-        .expect("supervisor should exit")
-        .expect("supervisor should complete cleanly");
-    assert_eq!(exit, SupervisorExit::Completed);
-
-    let snapshot = handle.snapshot();
-    assert_eq!(snapshot.state, SupervisorStateView::Stopped);
-    assert_eq!(snapshot.last_exit, Some(SupervisorExit::Completed));
+    let mut snapshots = handle.subscribe_snapshots();
+    let snapshot = wait_for_snapshot(&mut snapshots, |snapshot| {
+        snapshot
+            .children
+            .iter()
+            .all(|child| child.state == ChildStateView::Stopped)
+    })
+    .await;
+    assert_eq!(snapshot.state, SupervisorStateView::Running);
     assert!(matches!(
         child(&snapshot, "temporary")
             .expect("temporary child should remain visible")
@@ -327,6 +320,10 @@ async fn stopped_snapshot_reports_natural_completion() {
             .as_ref(),
         Some(ExitStatusView::Completed)
     ));
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
+    assert_eq!(handle.snapshot().state, SupervisorStateView::Stopped);
 }
 
 #[tokio::test]
@@ -373,7 +370,6 @@ async fn events_observe_already_published_snapshot_state() {
         {
             let snapshot = handle.snapshot();
             assert_eq!(snapshot.state, SupervisorStateView::Stopped);
-            assert_eq!(snapshot.last_exit, Some(SupervisorExit::Shutdown));
             assert_eq!(
                 child(&snapshot, "worker")
                     .expect("worker child should remain visible")
@@ -384,8 +380,7 @@ async fn events_observe_already_published_snapshot_state() {
         }
     }
 
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 fn child<'a>(snapshot: &'a SupervisorSnapshot, id: &str) -> Option<&'a ChildSnapshot> {

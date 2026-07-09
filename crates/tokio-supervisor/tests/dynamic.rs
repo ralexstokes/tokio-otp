@@ -6,28 +6,21 @@ use tokio::{
 };
 use tokio_supervisor::{
     ChildSpec, ControlError, ExitStatusView, Restart, ShutdownMode, ShutdownPolicy,
-    SupervisorBuildError, SupervisorBuilder, SupervisorEvent, SupervisorExit,
+    SupervisorBuilder, SupervisorEvent,
 };
 
 mod common;
 
 #[test]
-fn allow_empty_builds_without_children() {
-    let err = SupervisorBuilder::new()
-        .build()
-        .expect_err("empty supervisors remain rejected by default");
-    assert_eq!(err, SupervisorBuildError::EmptyChildren);
-
+fn empty_supervisors_are_valid() {
     SupervisorBuilder::new()
-        .allow_empty()
         .build()
-        .expect("allow_empty accepts zero children");
+        .expect("empty supervisors are valid");
 }
 
 #[tokio::test]
-async fn allow_empty_supervisor_starts_empty_and_accepts_children() {
+async fn empty_supervisor_starts_empty_and_accepts_children() {
     let supervisor = SupervisorBuilder::new()
-        .allow_empty()
         .build()
         .expect("empty supervisor builds");
     let handle = supervisor.spawn();
@@ -55,26 +48,24 @@ async fn allow_empty_supervisor_starts_empty_and_accepts_children() {
                 saw_exited = true;
             }
             SupervisorEvent::SupervisorStopped => {
-                panic!("allow_empty supervisor stopped instead of idling");
+                panic!("empty supervisor stopped instead of idling");
             }
             _ => {}
         }
     }
 
-    let exit = handle
+    handle
         .shutdown_and_wait()
         .await
         .expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Completed);
 }
 
 #[tokio::test]
-async fn allow_empty_remove_last_child_and_readd_same_id() {
+async fn remove_last_child_and_readd_same_id() {
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
     let initial_starts_tx = starts_tx.clone();
 
     let supervisor = SupervisorBuilder::new()
-        .allow_empty()
         .child(ChildSpec::new("dynamic", move |ctx| {
             let starts_tx = initial_starts_tx.clone();
             async move {
@@ -116,27 +107,25 @@ async fn allow_empty_remove_last_child_and_readd_same_id() {
                 break;
             }
             SupervisorEvent::SupervisorStopped => {
-                panic!("allow_empty supervisor stopped after re-added child exited");
+                panic!("supervisor stopped after re-added child exited");
             }
             _ => {}
         }
     }
 
-    let exit = handle
+    handle
         .shutdown_and_wait()
         .await
         .expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Completed);
 }
 
 #[tokio::test]
-async fn allow_empty_transient_success_idles_until_shutdown() {
+async fn transient_success_idles_until_shutdown() {
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
     let release_for_child = release.clone();
 
     let supervisor = SupervisorBuilder::new()
-        .allow_empty()
         .child(
             ChildSpec::new("transient", move |_ctx| {
                 let started_tx = started_tx.clone();
@@ -164,7 +153,7 @@ async fn allow_empty_transient_success_idles_until_shutdown() {
                 break;
             }
             SupervisorEvent::SupervisorStopped => {
-                panic!("allow_empty supervisor stopped on transient completion");
+                panic!("supervisor stopped on transient completion");
             }
             _ => {}
         }
@@ -175,21 +164,19 @@ async fn allow_empty_transient_success_idles_until_shutdown() {
         .await
         .expect("supervisor should still accept children after transient completion");
 
-    let exit = handle
+    handle
         .shutdown_and_wait()
         .await
         .expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Completed);
 }
 
 #[tokio::test]
-async fn allow_empty_terminal_failure_is_reported_on_shutdown() {
+async fn terminal_failure_remains_visible_while_idle() {
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
     let release_for_child = release.clone();
 
     let supervisor = SupervisorBuilder::new()
-        .allow_empty()
         .child(
             ChildSpec::new("fails", move |_ctx| {
                 let started_tx = started_tx.clone();
@@ -217,22 +204,31 @@ async fn allow_empty_terminal_failure_is_reported_on_shutdown() {
                 break;
             }
             SupervisorEvent::SupervisorStopped => {
-                panic!("allow_empty supervisor stopped on terminal failure");
+                panic!("supervisor stopped on terminal failure");
             }
             _ => {}
         }
     }
+
+    assert!(matches!(
+        handle
+            .snapshot()
+            .child("fails")
+            .expect("failed child remains visible")
+            .last_exit
+            .as_ref(),
+        Some(ExitStatusView::Failed(message)) if message.contains("terminal failure")
+    ));
 
     handle
         .add_child(ChildSpec::new("probe", |_ctx| async move { Ok(()) }))
         .await
         .expect("supervisor should still accept children after terminal failure");
 
-    let exit = handle
+    handle
         .shutdown_and_wait()
         .await
         .expect("shutdown should succeed");
-    assert_eq!(exit, SupervisorExit::Failed);
 }
 
 #[tokio::test]
@@ -266,8 +262,7 @@ async fn add_child_starts_it_immediately() {
     assert_eq!(common::recv_event(&mut dynamic_rx).await, 0);
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -321,8 +316,7 @@ async fn remove_child_stops_it_without_restarting() {
     common::assert_no_event(&mut starts_rx).await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -350,12 +344,11 @@ async fn duplicate_add_and_unknown_remove_are_rejected() {
     assert_eq!(missing, ControlError::UnknownChildId("missing".to_owned()));
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
-async fn removing_the_last_active_child_is_rejected() {
+async fn removing_the_last_active_child_leaves_an_idle_supervisor() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("only", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
@@ -366,15 +359,14 @@ async fn removing_the_last_active_child_is_rejected() {
 
     let handle = supervisor.spawn();
 
-    let err = handle
+    handle
         .remove_child("only")
         .await
-        .expect_err("last child removal should be rejected");
-    assert_eq!(err, ControlError::LastChildRemovalUnsupported);
+        .expect("last child removal should succeed");
+    assert!(handle.snapshot().children.is_empty());
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -436,8 +428,7 @@ async fn concurrent_removal_requests_are_serialized() {
     assert_eq!(err, ControlError::UnknownChildId("removable".to_owned()));
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -490,35 +481,35 @@ async fn removal_returns_supervisor_stopping_when_shutdown_intervenes() {
         .expect_err("removal should abort once supervisor shutdown begins");
     assert_eq!(err, ControlError::SupervisorStopping);
 
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
-async fn control_plane_is_unavailable_after_supervisor_exit() {
+async fn control_plane_remains_available_after_all_children_exit() {
     let handle = SupervisorBuilder::new()
         .child(ChildSpec::new("done", |_ctx| async move { Ok(()) }).restart(Restart::Temporary))
         .build()
         .expect("valid supervisor")
         .spawn();
 
-    let exit = handle
-        .wait()
+    let mut snapshots = handle.subscribe_snapshots();
+    snapshots
+        .wait_for(|snapshot| {
+            snapshot
+                .child("done")
+                .is_some_and(|child| child.state == tokio_supervisor::ChildStateView::Stopped)
+        })
         .await
-        .expect("supervisor should complete cleanly");
-    assert!(matches!(exit, SupervisorExit::Completed));
+        .expect("completion snapshot remains available");
 
-    let add_err = handle
+    handle
         .add_child(ChildSpec::new("late", |_ctx| async move { Ok(()) }))
         .await
-        .expect_err("control plane should be closed after exit");
-    assert_eq!(add_err, ControlError::Unavailable);
+        .expect("control plane should remain available while idle");
+    assert!(handle.snapshot().child("late").is_some());
 
-    let remove_err = handle
-        .remove_child("done")
-        .await
-        .expect_err("control plane should be closed after exit");
-    assert_eq!(remove_err, ControlError::Unavailable);
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -594,8 +585,7 @@ async fn try_add_child_returns_busy_when_control_queue_is_full() {
         .expect("queued add should succeed once capacity frees");
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -667,8 +657,7 @@ async fn remove_child_completes_promptly_during_restart_backoff() {
     common::assert_no_event(&mut starts_rx).await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 #[tokio::test]
@@ -738,6 +727,5 @@ async fn removed_child_does_not_restart_recycled_slot_after_backoff() {
     common::assert_no_event(&mut replacement_rx).await;
 
     handle.shutdown();
-    let exit = handle.wait().await.expect("shutdown should succeed");
-    assert!(matches!(exit, SupervisorExit::Shutdown));
+    handle.wait().await.expect("shutdown should succeed");
 }

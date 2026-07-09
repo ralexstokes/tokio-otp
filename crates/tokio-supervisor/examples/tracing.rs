@@ -52,8 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sleep(Duration::from_millis(300)).await;
     handle.shutdown();
 
-    let exit = handle.wait().await?;
-    assert_eq!(exit, SupervisorExit::Shutdown);
+    handle.wait().await?;
 
     Ok(())
 }

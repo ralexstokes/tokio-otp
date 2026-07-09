@@ -7,11 +7,6 @@ pub enum SupervisorBuildError {
     /// Two or more children share the same id string.
     #[error("duplicate child id: {0}")]
     DuplicateChildId(String),
-    /// The builder has no children and
-    /// [`SupervisorBuilder::allow_empty`](crate::SupervisorBuilder::allow_empty)
-    /// was not enabled.
-    #[error("supervisor requires at least one child")]
-    EmptyChildren,
     /// A configuration value (channel capacity, restart intensity, etc.) is
     /// invalid.
     #[error("invalid supervisor configuration: {0}")]
@@ -56,10 +51,6 @@ pub enum ControlError {
     /// The child spec contains invalid configuration.
     #[error("invalid child configuration: {0}")]
     InvalidConfig(&'static str),
-    /// Cannot remove the last active child because the supervisor was not
-    /// built with [`allow_empty`](crate::SupervisorBuilder::allow_empty).
-    #[error("cannot remove the last active child")]
-    LastChildRemovalUnsupported,
     /// The supervisor is in the process of shutting down and is no longer
     /// accepting commands.
     #[error("supervisor is stopping")]
@@ -90,33 +81,4 @@ pub enum RestartMonitorError {
     /// The supervisor stopped before the awaited restart happened.
     #[error("supervisor stopped")]
     SupervisorStopped,
-}
-
-/// The final exit reason of a supervisor.
-///
-/// Returned by [`SupervisorHandle::wait`](crate::SupervisorHandle::wait) on
-/// success.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum SupervisorExit {
-    /// The supervisor was explicitly shut down via
-    /// [`SupervisorHandle::shutdown`](crate::SupervisorHandle::shutdown).
-    Shutdown,
-    /// All children exited cleanly with no failures.
-    Completed,
-    /// At least one child exited with a failure and was not restarted (e.g. a
-    /// [`Temporary`](crate::Restart::Temporary) child that returned an error).
-    /// Natural completion is based on each child's latest terminal status, so
-    /// failures from superseded generations do not poison a later clean exit.
-    Failed,
-}
-
-impl std::fmt::Display for SupervisorExit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Shutdown => f.write_str("shutdown"),
-            Self::Completed => f.write_str("completed"),
-            Self::Failed => f.write_str("failed"),
-        }
-    }
 }

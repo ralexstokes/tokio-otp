@@ -17,7 +17,8 @@ use tokio_actor::{
 };
 use tokio_otp::{RuntimeBuildError, SupervisedActors};
 use tokio_supervisor::{
-    BackoffPolicy, Restart, RestartIntensity, Strategy, SupervisorBuilder, SupervisorExit,
+    BackoffPolicy, ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy,
+    SupervisorBuilder,
 };
 
 fn oneshot_slot<T>(tx: oneshot::Sender<T>) -> Arc<Mutex<Option<oneshot::Sender<T>>>> {
@@ -270,13 +271,30 @@ async fn send_to_cleanly_exiting_transient_returns_actor_terminated_promptly() {
         Err(SendError::ActorTerminated { actor_id }) if actor_id == "worker"
     ));
 
-    assert_eq!(
-        timeout(Duration::from_secs(1), handle.wait())
-            .await
-            .expect("supervisor completed")
-            .expect("supervisor exit result"),
-        SupervisorExit::Completed
-    );
+    let mut snapshots = handle.subscribe_snapshots();
+    let completed = timeout(
+        Duration::from_secs(1),
+        snapshots.wait_for(|snapshot| {
+            snapshot
+                .child("worker")
+                .is_some_and(|child| child.state == ChildStateView::Stopped)
+        }),
+    )
+    .await
+    .expect("actor should complete")
+    .expect("snapshot stream should remain open")
+    .clone();
+    assert!(matches!(
+        completed
+            .child("worker")
+            .expect("worker remains visible")
+            .last_exit
+            .as_ref(),
+        Some(ExitStatusView::Completed)
+    ));
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
 
 enum RpcMsg {

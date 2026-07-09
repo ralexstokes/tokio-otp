@@ -55,8 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let exit = handle.shutdown_and_wait().await?;
-    println!("supervisor exited with {exit:?}");
+    handle.shutdown_and_wait().await?;
+    println!("supervisor stopped");
     Ok(())
 }
 ```
@@ -84,7 +84,7 @@ beat (generation 0)
 beat (generation 0)
 beat (generation 0)
 heartbeat asked to stop
-supervisor exited with Shutdown
+supervisor stopped
 ```
 
 So far the child never fails, so the supervisor has nothing interesting to do.

@@ -7,7 +7,7 @@ use tokio_actor::{
 };
 use tokio_supervisor::{
     ChildSpec, ControlError, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
-    ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorExit, SupervisorHandle,
+    ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,
     SupervisorSnapshot,
 };
 
@@ -172,7 +172,7 @@ impl RuntimeHandle {
     }
 
     /// Requests a graceful shutdown and waits for the supervisor to stop.
-    pub async fn shutdown_and_wait(&self) -> Result<SupervisorExit, SupervisorError> {
+    pub async fn shutdown_and_wait(&self) -> Result<(), SupervisorError> {
         self.supervisor.shutdown_and_wait().await
     }
 
@@ -297,8 +297,8 @@ impl RuntimeHandle {
         self.supervisor.try_remove_child_at(path, id).await
     }
 
-    /// Waits for the supervisor to exit and returns its exit reason.
-    pub async fn wait(&self) -> Result<SupervisorExit, SupervisorError> {
+    /// Waits for the supervisor to stop.
+    pub async fn wait(&self) -> Result<(), SupervisorError> {
         self.supervisor.wait().await
     }
 
