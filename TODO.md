@@ -98,13 +98,3 @@ or are discouraged even in OTP).
   ("no fill within 500ms of entering `PendingFill` → transition to
   `Cancelling`"), which are painful precisely because timers are missing.
   If timers land, this becomes thin sugar; sequence it after them.
-
-## 3. Topology derive polish
-
-One nit accepted during the `#[derive(Topology)]` review:
-
-- Deriving on a struct with a non-actor field points the E0277 at
-  `#[derive(Topology)]` rather than at the offending field type. Tightening
-  the span in the generated bounds would make the error read better; the
-  trybuild snapshot (`tests/ui/topology/non_actor_field.stderr`) will
-  capture the improvement when it lands.

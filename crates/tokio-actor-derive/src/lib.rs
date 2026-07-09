@@ -5,8 +5,8 @@
 //! code refers to `tokio_actor` paths.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, parse_macro_input};
+use quote::{format_ident, quote, quote_spanned};
+use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 
 /// Derives a static actor topology from a named-field struct.
 ///
@@ -192,12 +192,37 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         .iter()
         .map(|ident| format_ident!("{ident}_slot"))
         .collect();
+    // Uses of a field type behind the `Actor` bound are spanned at that field
+    // type, so a non-actor field reports E0277 there rather than at the
+    // derive attribute. User-code spans opt the refs fields into dead-code
+    // lints, hence the explicit allow: an unread ref is normal for leaf
+    // actors and not actionable, since the macro mints one per field.
+    let ref_tys: Vec<_> = field_types
+        .iter()
+        .map(|ty| {
+            quote_spanned! {ty.span()=>
+                ::tokio_actor::ActorRef<<#ty as ::tokio_actor::Actor>::Msg>
+            }
+        })
+        .collect();
+    let slot_calls: Vec<_> = field_types
+        .iter()
+        .zip(&slot_idents)
+        .zip(&field_idents)
+        .zip(&field_names)
+        .map(|(((ty, slot), ident), name)| {
+            quote_spanned! {ty.span()=>
+                let (#slot, #ident) =
+                    builder.slot::<<#ty as ::tokio_actor::Actor>::Msg>(#name);
+            }
+        })
+        .collect();
 
     Ok(quote! {
         #vis struct #refs {
             #(
-                #field_vis #field_idents:
-                    ::tokio_actor::ActorRef<<#field_types as ::tokio_actor::Actor>::Msg>,
+                #[allow(dead_code)]
+                #field_vis #field_idents: #ref_tys,
             )*
         }
 
@@ -212,10 +237,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                 mut builder: ::tokio_actor::GraphBuilder,
                 wire: impl FnOnce(&#refs) -> #topology,
             ) -> ::core::result::Result<::tokio_actor::Graph, ::tokio_actor::GraphBuildError> {
-                #(
-                    let (#slot_idents, #field_idents) =
-                        builder.slot::<<#field_types as ::tokio_actor::Actor>::Msg>(#field_names);
-                )*
+                #(#slot_calls)*
 
                 let refs = #refs {
                     #(#field_idents,)*
