@@ -95,8 +95,7 @@ impl Runtime {
         }
     }
 
-    /// Returns the underlying [`Supervisor`], for example for handle-less
-    /// foreground driving via [`Supervisor::run`] or nesting via
+    /// Returns the underlying [`Supervisor`], for example for nesting via
     /// [`Supervisor::into_child_spec`].
     ///
     /// On a runtime built with
@@ -105,10 +104,6 @@ impl Runtime {
     /// [`RuntimeHandle::actor_ref`] support is lost. Keep the full runtime and
     /// use [`spawn`](Self::spawn) if you need dynamic actor support.
     ///
-    /// This differs from `spawn().wait().await`: [`Supervisor::run`] drives the
-    /// tree on the current task, and dropping the future tears the tree down.
-    /// [`spawn`](Self::spawn) runs it as a background task that
-    /// [`RuntimeHandle::wait`] merely observes.
     pub fn into_supervisor(self) -> Supervisor {
         self.supervisor
     }
@@ -211,12 +206,6 @@ impl RuntimeHandle {
         Ok(actor_ref)
     }
 
-    /// Like [`Self::add_child`], but returns immediately if the control
-    /// channel is full.
-    pub async fn try_add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
-        self.supervisor.try_add_child(child).await
-    }
-
     /// Adds a child to a nested supervisor identified by `path`.
     pub async fn add_child_at<I, S>(&self, path: I, child: ChildSpec) -> Result<(), ControlError>
     where
@@ -224,20 +213,6 @@ impl RuntimeHandle {
         S: AsRef<str>,
     {
         self.supervisor.add_child_at(path, child).await
-    }
-
-    /// Like [`Self::add_child_at`], but returns immediately if the target
-    /// control channel is full.
-    pub async fn try_add_child_at<I, S>(
-        &self,
-        path: I,
-        child: ChildSpec,
-    ) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.supervisor.try_add_child_at(path, child).await
     }
 
     /// Removes a child from the supervisor.
@@ -264,12 +239,6 @@ impl RuntimeHandle {
         }
     }
 
-    /// Like [`Self::remove_child`], but returns immediately if the control
-    /// channel is full.
-    pub async fn try_remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
-        self.supervisor.try_remove_child(id).await
-    }
-
     /// Removes a child from a nested supervisor identified by `path`.
     pub async fn remove_child_at<I, S>(
         &self,
@@ -283,20 +252,6 @@ impl RuntimeHandle {
         self.supervisor.remove_child_at(path, id).await
     }
 
-    /// Like [`Self::remove_child_at`], but returns immediately if the target
-    /// control channel is full.
-    pub async fn try_remove_child_at<I, S>(
-        &self,
-        path: I,
-        id: impl Into<String>,
-    ) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.supervisor.try_remove_child_at(path, id).await
-    }
-
     /// Waits for the supervisor to stop.
     pub async fn wait(&self) -> Result<(), SupervisorError> {
         self.supervisor.wait().await
@@ -308,11 +263,6 @@ impl RuntimeHandle {
         id: impl Into<String>,
     ) -> Result<RestartMonitor, RestartMonitorError> {
         self.supervisor.monitor_restart(id)
-    }
-
-    /// Resolves when every currently registered child reports running.
-    pub async fn wait_until_running(&self) -> Result<(), SupervisorError> {
-        self.supervisor.wait_until_running().await
     }
 
     /// Returns a new receiver for supervisor lifecycle events.

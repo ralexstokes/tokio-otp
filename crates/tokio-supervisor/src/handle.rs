@@ -14,9 +14,7 @@ use crate::{
     error::{ControlError, RestartMonitorError, SupervisorError},
     event::SupervisorEvent,
     monitor::RestartMonitor,
-    snapshot::{
-        ChildMembershipView, ChildSnapshot, ChildStateView, SupervisorSnapshot, SupervisorStateView,
-    },
+    snapshot::{ChildMembershipView, SupervisorSnapshot},
 };
 
 type SupervisorJoinHandle = JoinHandle<Result<(), SupervisorError>>;
@@ -34,18 +32,8 @@ impl ControlEndpoint {
             .await
     }
 
-    async fn try_add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
-        self.try_send(|reply| SupervisorCommand::AddChild { child, reply })
-            .await
-    }
-
     async fn remove_child(&self, id: String) -> Result<(), ControlError> {
         self.send(|reply| SupervisorCommand::RemoveChild { id, reply })
-            .await
-    }
-
-    async fn try_remove_child(&self, id: String) -> Result<(), ControlError> {
-        self.try_send(|reply| SupervisorCommand::RemoveChild { id, reply })
             .await
     }
 
@@ -58,20 +46,6 @@ impl ControlEndpoint {
             .send(command(reply_tx))
             .await
             .map_err(|_| ControlError::Unavailable)?;
-        reply_rx.await.map_err(|_| ControlError::Unavailable)?
-    }
-
-    async fn try_send(
-        &self,
-        command: impl FnOnce(oneshot::Sender<Result<(), ControlError>>) -> SupervisorCommand,
-    ) -> Result<(), ControlError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.command_tx
-            .try_send(command(reply_tx))
-            .map_err(|err| match err {
-                mpsc::error::TrySendError::Full(_) => ControlError::Busy,
-                mpsc::error::TrySendError::Closed(_) => ControlError::Unavailable,
-            })?;
         reply_rx.await.map_err(|_| ControlError::Unavailable)?
     }
 }
@@ -195,8 +169,8 @@ pub(crate) struct SupervisorHandleInit {
 /// - **Shutdown**: [`shutdown`](Self::shutdown) /
 ///   [`shutdown_and_wait`](Self::shutdown_and_wait).
 /// - **Dynamic children**: [`add_child`](Self::add_child) /
-///   [`remove_child`](Self::remove_child) (and `_at` / `try_` variants for
-///   nested supervisors and back-pressure control).
+///   [`remove_child`](Self::remove_child) (and `_at` variants for nested
+///   supervisors).
 /// - **Observability**: [`subscribe`](Self::subscribe) for events,
 ///   [`snapshot`](Self::snapshot) / [`subscribe_snapshots`](Self::subscribe_snapshots)
 ///   for state.
@@ -253,18 +227,9 @@ impl SupervisorHandle {
 
     /// Adds a new child to the supervisor at runtime.
     ///
-    /// Waits if the control channel is full. This variant cannot return
-    /// [`ControlError::Busy`]; use [`try_add_child`](Self::try_add_child) if
-    /// you need non-blocking back-pressure semantics.
+    /// Waits if the control channel is full.
     pub async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
         self.control_endpoint().add_child(child).await
-    }
-
-    /// Like [`add_child`](Self::add_child), but returns
-    /// [`ControlError::Busy`] immediately if the control channel is full
-    /// instead of waiting.
-    pub async fn try_add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
-        self.control_endpoint().try_add_child(child).await
     }
 
     /// Adds a child to a nested supervisor identified by `path`.
@@ -284,25 +249,6 @@ impl SupervisorHandle {
         }
     }
 
-    /// Like [`add_child_at`](Self::add_child_at), but returns
-    /// [`ControlError::Busy`] if the target supervisor's control channel is
-    /// full.
-    pub async fn try_add_child_at<I, S>(
-        &self,
-        path: I,
-        child: ChildSpec,
-    ) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        if let Some(endpoint) = self.endpoint_for_relative_path(path)? {
-            endpoint.try_add_child(child).await
-        } else {
-            self.try_add_child(child).await
-        }
-    }
-
     /// Removes a child by id from this supervisor.
     ///
     /// The child is stopped according to its [`ShutdownPolicy`](crate::ShutdownPolicy)
@@ -310,12 +256,6 @@ impl SupervisorHandle {
     /// continues idling until shutdown or until another child is added.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         self.control_endpoint().remove_child(id.into()).await
-    }
-
-    /// Like [`remove_child`](Self::remove_child), but returns
-    /// [`ControlError::Busy`] if the control channel is full.
-    pub async fn try_remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
-        self.control_endpoint().try_remove_child(id.into()).await
     }
 
     /// Removes a child from a nested supervisor identified by `path`.
@@ -334,25 +274,6 @@ impl SupervisorHandle {
             endpoint.remove_child(id.into()).await
         } else {
             self.remove_child(id).await
-        }
-    }
-
-    /// Like [`remove_child_at`](Self::remove_child_at), but returns
-    /// [`ControlError::Busy`] if the target supervisor's control channel is
-    /// full.
-    pub async fn try_remove_child_at<I, S>(
-        &self,
-        path: I,
-        id: impl Into<String>,
-    ) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        if let Some(endpoint) = self.endpoint_for_relative_path(path)? {
-            endpoint.try_remove_child(id.into()).await
-        } else {
-            self.try_remove_child(id).await
         }
     }
 
@@ -430,27 +351,6 @@ impl SupervisorHandle {
         ))
     }
 
-    /// Resolves when every currently registered child reports running.
-    pub async fn wait_until_running(&self) -> Result<(), SupervisorError> {
-        let mut snapshots = self.subscribe_snapshots();
-
-        loop {
-            let snapshot = snapshots.borrow().clone();
-            if all_children_running(&snapshot) {
-                return Ok(());
-            }
-            if snapshot.state == SupervisorStateView::Stopped {
-                return Err(SupervisorError::Internal(
-                    "supervisor stopped before all children were running".to_owned(),
-                ));
-            }
-
-            snapshots.changed().await.map_err(|_| {
-                SupervisorError::Internal("supervisor snapshot channel closed".to_owned())
-            })?;
-        }
-    }
-
     /// Returns a new receiver for supervisor lifecycle events.
     ///
     /// The receiver is backed by a bounded broadcast channel. If the receiver
@@ -477,6 +377,36 @@ impl SupervisorHandle {
 
     /// Returns a watch receiver that is updated each time the supervisor's
     /// snapshot changes. Useful for polling or `wait_for`-style patterns.
+    ///
+    /// # Waiting until all children are running
+    ///
+    /// ```no_run
+    /// use tokio_supervisor::{ChildSpec, ChildStateView, SupervisorBuilder};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let supervisor = SupervisorBuilder::new()
+    ///     .child(ChildSpec::new("worker", |ctx| async move {
+    ///         ctx.shutdown_token().cancelled().await;
+    ///         Ok(())
+    ///     }))
+    ///     .build()?;
+    ///
+    /// let handle = supervisor.spawn();
+    /// handle
+    ///     .subscribe_snapshots()
+    ///     .wait_for(|snapshot| {
+    ///         snapshot
+    ///             .children
+    ///             .iter()
+    ///             .all(|child| child.state == ChildStateView::Running)
+    ///     })
+    ///     .await?;
+    /// # handle.shutdown();
+    /// # handle.wait().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn subscribe_snapshots(&self) -> watch::Receiver<SupervisorSnapshot> {
         self.snapshots_rx.clone()
     }
@@ -521,13 +451,4 @@ where
     path.into_iter()
         .map(|segment| segment.as_ref().to_owned())
         .collect()
-}
-
-fn all_children_running(snapshot: &SupervisorSnapshot) -> bool {
-    snapshot.children.iter().all(child_running)
-}
-
-fn child_running(child: &ChildSnapshot) -> bool {
-    child.state == ChildStateView::Running
-        && child.supervisor.as_deref().is_none_or(all_children_running)
 }

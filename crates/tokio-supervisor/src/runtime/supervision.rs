@@ -379,7 +379,7 @@ impl SupervisorRuntime {
             self.running_children = self.running_children.saturating_sub(1);
         }
 
-        self.send_event(SupervisorEvent::ChildRemoveRequested { id: id.clone() });
+        self.publish_snapshot();
 
         if !active {
             self.finalize_removed_child(key);
@@ -635,6 +635,7 @@ impl SupervisorRuntime {
 
         let id = {
             let entry = &mut self.children[key];
+            entry.runtime.restart_tracker.record_exit(Instant::now());
             entry.runtime.state = RuntimeChildState::Stopped;
             entry.runtime.active_token = None;
             entry.runtime.abort_handle = None;
@@ -687,7 +688,11 @@ impl SupervisorRuntime {
     ) -> Result<(), SupervisorError> {
         let failing_instance = self.children[failing_key].instance;
         let delay = self.schedule_restart(failing_key)?;
-        self.send_event(SupervisorEvent::GroupRestartScheduled { delay });
+        self.send_event(SupervisorEvent::ChildRestartScheduled {
+            id: self.children[failing_key].id.clone(),
+            generation: self.children[failing_key].runtime.generation,
+            delay,
+        });
         if !self.wait_for_restart_delay(delay).await? {
             return Ok(());
         }
@@ -728,7 +733,7 @@ impl SupervisorRuntime {
         let delay = {
             let now = Instant::now();
             let child = &mut self.children[key].runtime;
-            child.restart_tracker.record(now);
+            child.restart_tracker.record_restart(now);
             if child.restart_tracker.exceeded() {
                 None
             } else {
@@ -986,13 +991,11 @@ fn event_child_id(event: &SupervisorEvent) -> Option<&str> {
         | SupervisorEvent::ChildExited { id, .. }
         | SupervisorEvent::ChildRestartScheduled { id, .. }
         | SupervisorEvent::ChildRestarted { id, .. }
-        | SupervisorEvent::ChildRemoveRequested { id }
         | SupervisorEvent::ChildRemoved { id }
         | SupervisorEvent::Nested { id, .. } => Some(id),
         SupervisorEvent::SupervisorStarted
         | SupervisorEvent::SupervisorStopping
         | SupervisorEvent::SupervisorStopped
-        | SupervisorEvent::GroupRestartScheduled { .. }
         | SupervisorEvent::RestartIntensityExceeded => None,
     }
 }

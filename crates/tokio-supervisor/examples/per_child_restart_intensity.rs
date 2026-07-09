@@ -14,6 +14,9 @@ fn example_error(message: &'static str) -> BoxError {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warm_cache_attempts = Arc::new(AtomicUsize::new(0));
 
+    // Intensity uses a sliding timestamp window. Backoff attempts are tracked
+    // separately as consecutive restarts and reset only after an incarnation
+    // runs longer than `within`.
     let warm_cache = ChildSpec::new("warm-cache", move |ctx| {
         let warm_cache_attempts = Arc::clone(&warm_cache_attempts);
         async move {

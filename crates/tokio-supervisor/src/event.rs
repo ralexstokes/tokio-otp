@@ -71,11 +71,6 @@ pub enum SupervisorEvent {
         /// Generation counter for this spawn.
         generation: u64,
     },
-    /// A runtime removal of this child has been requested.
-    ChildRemoveRequested {
-        /// Child identifier.
-        id: String,
-    },
     /// The child has been fully removed from the supervisor.
     ChildRemoved {
         /// Child identifier.
@@ -107,12 +102,6 @@ pub enum SupervisorEvent {
         old_generation: u64,
         /// Generation of the newly spawned replacement.
         new_generation: u64,
-    },
-    /// A [`OneForAll`](crate::Strategy::OneForAll) group restart has been
-    /// scheduled after a backoff delay.
-    GroupRestartScheduled {
-        /// How long the supervisor will wait before restarting all children.
-        delay: Duration,
     },
     /// The restart intensity limit was exceeded. The supervisor will exit with
     /// [`SupervisorError::RestartIntensityExceeded`](crate::SupervisorError::RestartIntensityExceeded).

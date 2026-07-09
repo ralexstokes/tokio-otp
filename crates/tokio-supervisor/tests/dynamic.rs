@@ -299,13 +299,9 @@ async fn remove_child_stops_it_without_restarting() {
         .await
         .expect("child removal should succeed");
 
-    let mut saw_remove_requested = false;
     let mut saw_removed = false;
-    while !saw_remove_requested || !saw_removed {
+    while !saw_removed {
         match common::recv_supervisor_event(&mut events).await {
-            SupervisorEvent::ChildRemoveRequested { id } if id == "removable" => {
-                saw_remove_requested = true;
-            }
             SupervisorEvent::ChildRemoved { id } if id == "removable" => {
                 saw_removed = true;
             }
@@ -507,82 +503,6 @@ async fn control_plane_remains_available_after_all_children_exit() {
         .await
         .expect("control plane should remain available while idle");
     assert!(handle.snapshot().child("late").is_some());
-
-    handle.shutdown();
-    handle.wait().await.expect("shutdown should succeed");
-}
-
-#[tokio::test]
-async fn try_add_child_returns_busy_when_control_queue_is_full() {
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let (cancelled_tx, mut cancelled_rx) = mpsc::unbounded_channel();
-    let release = Arc::new(Notify::new());
-
-    let release_for_child = release.clone();
-    let supervisor = SupervisorBuilder::new()
-        .control_channel_capacity(1)
-        .child(
-            ChildSpec::new("removable", move |ctx| {
-                let started_tx = started_tx.clone();
-                let cancelled_tx = cancelled_tx.clone();
-                let release = release_for_child.clone();
-                async move {
-                    started_tx.send(()).expect("test receiver dropped");
-                    ctx.shutdown_token().cancelled().await;
-                    cancelled_tx.send(()).expect("test receiver dropped");
-                    release.notified().await;
-                    Ok(())
-                }
-            })
-            .restart(Restart::Transient),
-        )
-        .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.shutdown_token().cancelled().await;
-            Ok(())
-        }))
-        .build()
-        .expect("valid supervisor");
-
-    let handle = supervisor.spawn();
-    common::recv_event(&mut started_rx).await;
-
-    let remove_handle = handle.clone();
-    let remove_task = tokio::spawn(async move { remove_handle.remove_child("removable").await });
-
-    common::recv_event(&mut cancelled_rx).await;
-
-    let queued_handle = handle.clone();
-    let mut queued_add = tokio::spawn(async move {
-        queued_handle
-            .add_child(ChildSpec::new("queued", |ctx| async move {
-                ctx.shutdown_token().cancelled().await;
-                Ok(())
-            }))
-            .await
-    });
-
-    timeout(common::QUIET_TIMEOUT, &mut queued_add)
-        .await
-        .expect_err("queued add should remain pending while removal is blocked");
-
-    let err = handle
-        .try_add_child(ChildSpec::new("busy", |ctx| async move {
-            ctx.shutdown_token().cancelled().await;
-            Ok(())
-        }))
-        .await
-        .expect_err("queue-full try_add_child should fail fast");
-    assert_eq!(err, ControlError::Busy);
-
-    release.notify_one();
-    remove_task
-        .await
-        .expect("remove task should join")
-        .expect("child removal should succeed");
-    queued_add
-        .await
-        .expect("queued add task should join")
-        .expect("queued add should succeed once capacity frees");
 
     handle.shutdown();
     handle.wait().await.expect("shutdown should succeed");

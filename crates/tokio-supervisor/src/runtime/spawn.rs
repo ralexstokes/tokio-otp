@@ -46,6 +46,9 @@ impl SupervisorRuntime {
             }
 
             let generation = child.generation;
+            child
+                .restart_tracker
+                .record_spawn(tokio::time::Instant::now());
             let child_token = self.group_token.child_token();
             child.active_token = Some(child_token.clone());
             child.state = RuntimeChildState::Starting;

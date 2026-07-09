@@ -197,14 +197,6 @@ impl SupervisorObservability {
                 strategy = self.strategy_label,
                 "child started"
             ),
-            SupervisorEvent::ChildRemoveRequested { id } => debug!(
-                supervisor_name = %self.supervisor_name,
-                supervisor_path = %self.supervisor_path,
-                child_id = %id,
-                child_path = %self.resolve_child_path(id, child_path),
-                strategy = self.strategy_label,
-                "child removal requested"
-            ),
             SupervisorEvent::ChildRemoved { id } => debug!(
                 supervisor_name = %self.supervisor_name,
                 supervisor_path = %self.supervisor_path,
@@ -288,13 +280,6 @@ impl SupervisorObservability {
                 strategy = self.strategy_label,
                 "child restarted"
             ),
-            SupervisorEvent::GroupRestartScheduled { delay } => debug!(
-                supervisor_name = %self.supervisor_name,
-                supervisor_path = %self.supervisor_path,
-                delay_ms = delay.as_millis() as u64,
-                strategy = self.strategy_label,
-                "group restart scheduled"
-            ),
             SupervisorEvent::RestartIntensityExceeded => warn!(
                 supervisor_name = %self.supervisor_name,
                 supervisor_path = %self.supervisor_path,
@@ -364,10 +349,8 @@ impl SupervisorObservability {
             | SupervisorEvent::SupervisorStopping
             | SupervisorEvent::SupervisorStopped
             | SupervisorEvent::Nested { .. }
-            | SupervisorEvent::ChildRemoveRequested { .. }
             | SupervisorEvent::ChildRemoved { .. }
-            | SupervisorEvent::ChildRestartScheduled { .. }
-            | SupervisorEvent::GroupRestartScheduled { .. } => {}
+            | SupervisorEvent::ChildRestartScheduled { .. } => {}
         }
     }
 
@@ -426,12 +409,10 @@ fn event_kind(event: &SupervisorEvent) -> &'static str {
         SupervisorEvent::SupervisorStopped => "supervisor_stopped",
         SupervisorEvent::Nested { .. } => "nested",
         SupervisorEvent::ChildStarted { .. } => "child_started",
-        SupervisorEvent::ChildRemoveRequested { .. } => "child_remove_requested",
         SupervisorEvent::ChildRemoved { .. } => "child_removed",
         SupervisorEvent::ChildExited { .. } => "child_exited",
         SupervisorEvent::ChildRestartScheduled { .. } => "child_restart_scheduled",
         SupervisorEvent::ChildRestarted { .. } => "child_restarted",
-        SupervisorEvent::GroupRestartScheduled { .. } => "group_restart_scheduled",
         SupervisorEvent::RestartIntensityExceeded => "restart_intensity_exceeded",
     }
 }
@@ -511,18 +492,6 @@ mod tests {
         assert_tracing_output(
             || {
                 root.emit_event(
-                    &SupervisorEvent::ChildRemoveRequested {
-                        id: "worker".to_owned(),
-                    },
-                    0,
-                    None,
-                )
-            },
-            &["child removal requested", r#""child_path":"root.worker""#],
-        );
-        assert_tracing_output(
-            || {
-                root.emit_event(
                     &SupervisorEvent::ChildRemoved {
                         id: "worker".to_owned(),
                     },
@@ -577,18 +546,6 @@ mod tests {
                 )
             },
             &["child restarted", r#""child_path":"root.worker""#],
-        );
-        assert_tracing_output(
-            || {
-                root.emit_event(
-                    &SupervisorEvent::GroupRestartScheduled {
-                        delay: Duration::from_millis(20),
-                    },
-                    0,
-                    None,
-                )
-            },
-            &["group restart scheduled", r#""supervisor_path":"root""#],
         );
         assert_tracing_output(
             || root.emit_event(&SupervisorEvent::RestartIntensityExceeded, 0, None),

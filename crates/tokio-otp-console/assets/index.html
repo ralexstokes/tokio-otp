@@ -405,9 +405,7 @@
     }
     if (ev.ChildRestarted) return "Child '" + ev.ChildRestarted.id + "' restarted (gen " + ev.ChildRestarted.old_generation + " -> " + ev.ChildRestarted.new_generation + ")";
     if (ev.ChildRestartScheduled) return "Restart scheduled for '" + ev.ChildRestartScheduled.id + "' in " + ev.ChildRestartScheduled.delay.secs + "s";
-    if (ev.ChildRemoveRequested) return "Remove requested for '" + ev.ChildRemoveRequested.id + "'";
     if (ev.ChildRemoved) return "Child '" + ev.ChildRemoved.id + "' removed";
-    if (ev.GroupRestartScheduled) return "Group restart scheduled in " + ev.GroupRestartScheduled.delay.secs + "s";
     if (ev.Nested) return "[" + ev.Nested.id + " gen:" + ev.Nested.generation + "] " + describeEvent(ev.Nested.event);
     return JSON.stringify(ev);
   }

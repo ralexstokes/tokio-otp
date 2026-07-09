@@ -500,7 +500,7 @@ async fn group_restart_uses_the_failing_child_restart_intensity() {
 }
 
 #[tokio::test]
-async fn group_restart_scheduled_precedes_child_restart_events() {
+async fn triggering_child_restart_scheduled_precedes_child_restart_events() {
     let trigger_attempts = Arc::new(AtomicUsize::new(0));
 
     let trigger = ChildSpec::new("trigger", move |ctx| {
@@ -547,9 +547,13 @@ async fn group_restart_scheduled_precedes_child_restart_events() {
             {
                 sequence.push("trigger_exited");
             }
-            SupervisorEvent::GroupRestartScheduled { delay } => {
+            SupervisorEvent::ChildRestartScheduled {
+                id,
+                generation,
+                delay,
+            } if id == "trigger" && generation == 0 => {
                 assert_eq!(delay, Duration::from_millis(40));
-                sequence.push("group_restart_scheduled");
+                sequence.push("trigger_restart_scheduled");
             }
             SupervisorEvent::ChildStarted { id, generation }
                 if id == "trigger" && generation == 1 =>
@@ -579,10 +583,10 @@ async fn group_restart_scheduled_precedes_child_restart_events() {
         }
     }
 
-    let group_scheduled = sequence
+    let trigger_scheduled = sequence
         .iter()
-        .position(|event| *event == "group_restart_scheduled")
-        .expect("group restart should be scheduled");
+        .position(|event| *event == "trigger_restart_scheduled")
+        .expect("triggering child restart should be scheduled");
     let trigger_exited = sequence
         .iter()
         .position(|event| *event == "trigger_exited")
@@ -605,12 +609,12 @@ async fn group_restart_scheduled_precedes_child_restart_events() {
         .expect("peer restart should be observed");
 
     assert!(
-        trigger_exited < group_scheduled,
-        "failing child exit must precede group restart scheduling: {sequence:?}"
+        trigger_exited < trigger_scheduled,
+        "failing child exit must precede restart scheduling: {sequence:?}"
     );
     assert!(
-        group_scheduled < trigger_restarted && group_scheduled < peer_restarted,
-        "group restart must be scheduled before any child restart completes: {sequence:?}"
+        trigger_scheduled < trigger_restarted && trigger_scheduled < peer_restarted,
+        "trigger restart must be scheduled before any child restart completes: {sequence:?}"
     );
     assert!(
         trigger_started < trigger_restarted,
@@ -658,7 +662,7 @@ async fn removing_failed_child_abandons_pending_group_restart() {
     loop {
         if matches!(
             common::recv_supervisor_event(&mut events).await,
-            SupervisorEvent::GroupRestartScheduled { .. }
+            SupervisorEvent::ChildRestartScheduled { ref id, .. } if id == "trigger"
         ) {
             break;
         }
@@ -744,14 +748,14 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
 
     release_trigger_failure.notify_one();
 
-    let mut group_restart_scheduled = 0usize;
+    let mut trigger_restart_scheduled = 0usize;
     let mut saw_trigger_restart = false;
     let mut saw_peer_restart = false;
 
     while !(saw_trigger_restart && saw_peer_restart) {
         match common::recv_supervisor_event(&mut events).await {
-            SupervisorEvent::GroupRestartScheduled { .. } => {
-                group_restart_scheduled += 1;
+            SupervisorEvent::ChildRestartScheduled { id, .. } if id == "trigger" => {
+                trigger_restart_scheduled += 1;
             }
             SupervisorEvent::ChildRestarted {
                 id,
@@ -772,7 +776,7 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
     }
 
     assert_eq!(
-        group_restart_scheduled, 1,
+        trigger_restart_scheduled, 1,
         "drained failures should not schedule an additional group restart"
     );
 

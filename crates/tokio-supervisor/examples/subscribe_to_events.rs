@@ -58,9 +58,6 @@ fn print_event(event: &SupervisorEvent, depth: usize) {
         SupervisorEvent::ChildStarted { id, generation } => {
             println!("{indent}child started: {id} generation={generation}");
         }
-        SupervisorEvent::ChildRemoveRequested { id } => {
-            println!("{indent}child removal requested: {id}");
-        }
         SupervisorEvent::ChildRemoved { id } => {
             println!("{indent}child removed: {id}");
         }
@@ -97,9 +94,6 @@ fn print_event(event: &SupervisorEvent, depth: usize) {
             new_generation,
         } => {
             println!("{indent}child restarted: {id} {old_generation}->{new_generation}");
-        }
-        SupervisorEvent::GroupRestartScheduled { delay } => {
-            println!("{indent}group restart scheduled: delay={delay:?}");
         }
         SupervisorEvent::RestartIntensityExceeded => {
             println!("{indent}restart intensity exceeded");

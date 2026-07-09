@@ -12,6 +12,7 @@ use tokio::{
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildSpec, Restart, RestartIntensity, SupervisorBuilder, SupervisorError,
+    SupervisorEvent,
 };
 
 mod common;
@@ -31,8 +32,9 @@ async fn repeated_failures_can_exceed_restart_intensity() {
         .build()
         .expect("valid supervisor");
 
-    let err = supervisor
-        .run()
+    let handle = supervisor.spawn();
+    let err = handle
+        .wait()
         .await
         .expect_err("supervisor should fail once restart intensity is exceeded");
 
@@ -55,8 +57,9 @@ async fn configured_backoff_delays_restart_attempts() {
         .expect("valid supervisor");
 
     let started = Instant::now();
-    let err = supervisor
-        .run()
+    let handle = supervisor.spawn();
+    let err = handle
+        .wait()
         .await
         .expect_err("supervisor should eventually fail once restart intensity is exceeded");
 
@@ -87,8 +90,9 @@ async fn jittered_exponential_backoff_delays_restart_attempts() {
         .expect("valid supervisor");
 
     let started = Instant::now();
-    let err = supervisor
-        .run()
+    let handle = supervisor.spawn();
+    let err = handle
+        .wait()
         .await
         .expect_err("supervisor should eventually fail once restart intensity is exceeded");
 
@@ -152,6 +156,81 @@ async fn exponential_backoff_delays_restart_attempts_by_expected_steps() {
 }
 
 #[tokio::test]
+async fn backoff_attempts_survive_window_eviction_and_reset_after_a_long_run() {
+    let release = Arc::new(Notify::new());
+    let release_for_child = release.clone();
+
+    let handle = SupervisorBuilder::new()
+        .restart_intensity(RestartIntensity {
+            max_restarts: 5,
+            within: Duration::from_millis(200),
+            backoff: BackoffPolicy::Exponential {
+                base: Duration::from_millis(50),
+                factor: 4,
+                max: Duration::from_secs(2),
+            },
+        })
+        .child(
+            ChildSpec::new("flaky", move |ctx| {
+                let release = release_for_child.clone();
+                async move {
+                    match ctx.generation() {
+                        0 => {
+                            release.notified().await;
+                            Err(common::test_error("boom"))
+                        }
+                        // Fast failures: by the third restart the earlier
+                        // timestamps have aged out of the 200ms window, but
+                        // the consecutive-restart counter must keep growing.
+                        1 | 2 => Err(common::test_error("boom")),
+                        // Outlive the window, then fail: this is the only
+                        // thing that resets the counter.
+                        3 => {
+                            sleep(Duration::from_millis(300)).await;
+                            Err(common::test_error("boom"))
+                        }
+                        _ => {
+                            ctx.shutdown_token().cancelled().await;
+                            Ok(())
+                        }
+                    }
+                }
+            })
+            .restart(Restart::Transient),
+        )
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+
+    let mut events = handle.subscribe();
+    release.notify_one();
+
+    let mut delays = Vec::new();
+    while delays.len() < 4 {
+        if let SupervisorEvent::ChildRestartScheduled { delay, .. } =
+            common::recv_supervisor_event(&mut events).await
+        {
+            delays.push(delay);
+        }
+    }
+
+    assert_eq!(
+        delays,
+        vec![
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+            Duration::from_millis(800),
+            Duration::from_millis(50),
+        ],
+        "backoff must not shrink as intensity timestamps age out, and must \
+         reset after a run outlives the intensity window"
+    );
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
 async fn child_restart_intensity_override_controls_backoff() {
     let supervisor = SupervisorBuilder::new()
         .restart_intensity(RestartIntensity {
@@ -172,8 +251,9 @@ async fn child_restart_intensity_override_controls_backoff() {
         .expect("valid supervisor");
 
     let started = Instant::now();
-    let err = supervisor
-        .run()
+    let handle = supervisor.spawn();
+    let err = handle
+        .wait()
         .await
         .expect_err("supervisor should eventually fail once the child override is exceeded");
 

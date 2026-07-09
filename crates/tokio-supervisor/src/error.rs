@@ -35,10 +35,6 @@ pub enum SupervisorError {
 /// children at runtime).
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ControlError {
-    /// The control channel is full. The caller may retry after the supervisor
-    /// has had time to drain queued commands.
-    #[error("supervisor control plane is busy")]
-    Busy,
     /// A child with this id already exists in the supervisor.
     #[error("duplicate child id: {0}")]
     DuplicateChildId(String),

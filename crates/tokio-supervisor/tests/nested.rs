@@ -183,14 +183,9 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
 
     let mut saw_nested_supervisor_started = false;
     let mut saw_nested_leaf_started = false;
-    let mut saw_remove_requested = false;
     let mut saw_removed = false;
 
-    while !(saw_nested_supervisor_started
-        && saw_nested_leaf_started
-        && saw_remove_requested
-        && saw_removed)
-    {
+    while !(saw_nested_supervisor_started && saw_nested_leaf_started && saw_removed) {
         match common::recv_supervisor_event(&mut events).await {
             SupervisorEvent::Nested {
                 id,
@@ -211,9 +206,6 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
                 && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 } if id == "leaf") =>
             {
                 saw_nested_leaf_started = true;
-            }
-            SupervisorEvent::ChildRemoveRequested { id } if id == "nested" => {
-                saw_remove_requested = true;
             }
             SupervisorEvent::ChildRemoved { id } if id == "nested" => {
                 saw_removed = true;
@@ -307,10 +299,9 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
         .expect("dynamic child inside nested supervisor should be removable");
 
     let mut saw_nested_dynamic_started = false;
-    let mut saw_nested_remove_requested = false;
     let mut saw_nested_removed = false;
 
-    while !(saw_nested_dynamic_started && saw_nested_remove_requested && saw_nested_removed) {
+    while !(saw_nested_dynamic_started && saw_nested_removed) {
         match common::recv_supervisor_event(&mut events).await {
             SupervisorEvent::Nested {
                 id,
@@ -321,16 +312,6 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
                 && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 } if id == "dynamic") =>
             {
                 saw_nested_dynamic_started = true;
-            }
-            SupervisorEvent::Nested {
-                id,
-                generation,
-                event,
-            } if id == "nested"
-                && generation == 0
-                && matches!(*event, SupervisorEvent::ChildRemoveRequested { ref id } if id == "dynamic") =>
-            {
-                saw_nested_remove_requested = true;
             }
             SupervisorEvent::Nested {
                 id,

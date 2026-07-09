@@ -14,12 +14,16 @@ use crate::restart::{BackoffPolicy, RestartIntensity};
 /// `intensity.max_restarts`, [`exceeded`](Self::exceeded) returns `true`.
 ///
 /// Also computes the backoff delay for the next restart attempt based on the
-/// configured [`BackoffPolicy`].
+/// configured [`BackoffPolicy`]. Backoff uses a consecutive-restart counter
+/// that resets after an incarnation runs longer than `intensity.within`; it is
+/// independent of timestamp eviction from the intensity window.
 pub(crate) struct RestartTracker {
     intensity: RestartIntensity,
     times: VecDeque<Instant>,
     rng: JitterRng,
     total_restarts: u64,
+    consecutive_restarts: usize,
+    run_started_at: Option<Instant>,
 }
 
 impl RestartTracker {
@@ -29,10 +33,26 @@ impl RestartTracker {
             times: VecDeque::new(),
             rng: JitterRng::new(),
             total_restarts: 0,
+            consecutive_restarts: 0,
+            run_started_at: None,
         }
     }
 
-    pub(crate) fn record(&mut self, now: Instant) {
+    pub(crate) fn record_spawn(&mut self, now: Instant) {
+        self.run_started_at = Some(now);
+    }
+
+    pub(crate) fn record_exit(&mut self, now: Instant) {
+        if self
+            .run_started_at
+            .take()
+            .is_some_and(|started_at| now.duration_since(started_at) > self.intensity.within)
+        {
+            self.consecutive_restarts = 0;
+        }
+    }
+
+    pub(crate) fn record_restart(&mut self, now: Instant) {
         while let Some(front) = self.times.front() {
             if now.duration_since(*front) > self.intensity.within {
                 self.times.pop_front();
@@ -42,6 +62,7 @@ impl RestartTracker {
         }
         self.times.push_back(now);
         self.total_restarts = self.total_restarts.saturating_add(1);
+        self.consecutive_restarts = self.consecutive_restarts.saturating_add(1);
     }
 
     pub(crate) fn exceeded(&self) -> bool {
@@ -53,9 +74,12 @@ impl RestartTracker {
             BackoffPolicy::None => return Duration::ZERO,
             BackoffPolicy::Fixed(delay) => return delay,
             BackoffPolicy::Exponential { base, factor, max }
-            | BackoffPolicy::JitteredExponential { base, factor, max } => {
-                exponential_backoff(base, factor, max, self.times.len().saturating_sub(1))
-            }
+            | BackoffPolicy::JitteredExponential { base, factor, max } => exponential_backoff(
+                base,
+                factor,
+                max,
+                self.consecutive_restarts.saturating_sub(1),
+            ),
         };
 
         match self.intensity.backoff {
@@ -155,7 +179,16 @@ mod tests {
                 state: 0x1234_5678_9abc_def0,
             },
             total_restarts: 0,
+            consecutive_restarts: 0,
+            run_started_at: None,
         }
+    }
+
+    fn record_short_restart(tracker: &mut RestartTracker, started_at: Instant) {
+        let exited_at = started_at + Duration::from_millis(1);
+        tracker.record_spawn(started_at);
+        tracker.record_exit(exited_at);
+        tracker.record_restart(exited_at);
     }
 
     #[test]
@@ -173,16 +206,17 @@ mod tests {
             max: Duration::from_millis(500),
         });
 
-        tracker.record(Instant::now());
+        let started_at = Instant::now();
+        record_short_restart(&mut tracker, started_at);
         assert_eq!(tracker.backoff(), Duration::from_millis(10));
 
-        tracker.record(Instant::now());
+        record_short_restart(&mut tracker, started_at + Duration::from_millis(2));
         assert_eq!(tracker.backoff(), Duration::from_millis(20));
 
-        tracker.record(Instant::now());
+        record_short_restart(&mut tracker, started_at + Duration::from_millis(4));
         assert_eq!(tracker.backoff(), Duration::from_millis(40));
 
-        tracker.record(Instant::now());
+        record_short_restart(&mut tracker, started_at + Duration::from_millis(6));
         assert_eq!(tracker.backoff(), Duration::from_millis(80));
     }
 
@@ -194,8 +228,9 @@ mod tests {
             max: Duration::from_millis(500),
         });
 
-        for _ in 0..4 {
-            tracker.record(Instant::now());
+        let started_at = Instant::now();
+        for offset in 0..4 {
+            record_short_restart(&mut tracker, started_at + Duration::from_millis(offset * 2));
             assert_eq!(tracker.backoff(), Duration::from_millis(25));
         }
     }
@@ -219,12 +254,49 @@ mod tests {
             factor: 2,
             max: Duration::from_millis(500),
         });
-        tracker.record(Instant::now());
-        tracker.record(Instant::now());
+        let started_at = Instant::now();
+        record_short_restart(&mut tracker, started_at);
+        record_short_restart(&mut tracker, started_at + Duration::from_millis(2));
 
         let delay = tracker.backoff();
 
         assert!(delay >= Duration::from_millis(80));
         assert!(delay <= Duration::from_millis(160));
+    }
+
+    #[test]
+    fn exponential_backoff_does_not_shrink_when_intensity_timestamps_age_out() {
+        let mut tracker = tracker(BackoffPolicy::Exponential {
+            base: Duration::from_millis(10),
+            factor: 2,
+            max: Duration::from_millis(500),
+        });
+        let started_at = Instant::now();
+
+        record_short_restart(&mut tracker, started_at);
+        record_short_restart(&mut tracker, started_at + Duration::from_secs(1));
+        record_short_restart(&mut tracker, started_at + Duration::from_secs(12));
+
+        assert_eq!(tracker.times.len(), 1);
+        assert_eq!(tracker.backoff(), Duration::from_millis(40));
+    }
+
+    #[test]
+    fn exponential_backoff_resets_after_a_run_outlives_intensity_window() {
+        let mut tracker = tracker(BackoffPolicy::Exponential {
+            base: Duration::from_millis(10),
+            factor: 2,
+            max: Duration::from_millis(500),
+        });
+        let started_at = Instant::now();
+
+        record_short_restart(&mut tracker, started_at);
+        record_short_restart(&mut tracker, started_at + Duration::from_secs(1));
+        tracker.record_spawn(started_at + Duration::from_secs(2));
+        let exited_at = started_at + Duration::from_secs(13);
+        tracker.record_exit(exited_at);
+        tracker.record_restart(exited_at);
+
+        assert_eq!(tracker.backoff(), Duration::from_millis(10));
     }
 }

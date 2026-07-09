@@ -10,7 +10,7 @@
 //! | Type | Role |
 //! |------|------|
 //! | [`SupervisorBuilder`] | Constructs and validates a supervisor. |
-//! | [`Supervisor`] | A configured supervisor, ready to [`run`](Supervisor::run) or [`spawn`](Supervisor::spawn). |
+//! | [`Supervisor`] | A configured supervisor, ready to [`spawn`](Supervisor::spawn). |
 //! | [`SupervisorHandle`] | Control and observe a running supervisor. |
 //! | [`ChildSpec`] | Pairs an async factory with restart/shutdown policies. |
 //! | [`ChildContext`] | Per-spawn context given to each child (id, generation, cancellation token). |
@@ -76,8 +76,8 @@
 //! - [`add_child_at`](SupervisorHandle::add_child_at) /
 //!   [`remove_child_at`](SupervisorHandle::remove_child_at) target a nested
 //!   supervisor by path.
-//! - `try_` variants return [`ControlError::Busy`] immediately instead of
-//!   waiting when the control channel is full.
+//!
+//! Control operations wait when the control channel is full.
 //!
 //! Supervisors may start empty or have their last child removed. They idle at
 //! zero children and continue accepting control commands until shutdown.

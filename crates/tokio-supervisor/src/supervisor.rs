@@ -24,13 +24,11 @@ use crate::{
     strategy::Strategy,
 };
 
-/// A configured supervisor, ready to be run or spawned.
+/// A configured supervisor, ready to be spawned.
 ///
 /// Construct one via [`SupervisorBuilder`](crate::SupervisorBuilder). Then
 /// either:
 ///
-/// - Call [`run`](Self::run) to drive the supervisor on the current task
-///   (blocks until exit).
 /// - Call [`spawn`](Self::spawn) to run it as a background Tokio task and get
 ///   a [`SupervisorHandle`](crate::SupervisorHandle).
 /// - Call [`into_child_spec`](Self::into_child_spec) to nest this supervisor
@@ -56,30 +54,6 @@ pub(crate) struct SupervisorConfig {
 impl Supervisor {
     pub(crate) fn new(config: SupervisorConfig) -> Self {
         Self { config }
-    }
-
-    /// Runs the supervisor on the current task until a fatal error occurs.
-    ///
-    /// No [`SupervisorHandle`](crate::SupervisorHandle) is created, so there is
-    /// no explicit graceful-shutdown control surface. Dropping the returned
-    /// future tears the tree down. For most use cases, prefer
-    /// [`spawn`](Self::spawn) and [`SupervisorHandle::wait`](crate::SupervisorHandle::wait).
-    pub async fn run(self) -> Result<(), SupervisorError> {
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (events_tx, _) = broadcast::channel(self.config.event_channel_capacity);
-        // Handle-less runs intentionally start with a closed control channel.
-        // There is no `SupervisorHandle`, so no caller can send commands.
-        let (_command_tx, command_rx) = mpsc::channel(self.config.control_channel_capacity);
-        let (snapshots_tx, _) = watch::channel(initial_snapshot(&self.config));
-        self.run_with_channels(
-            shutdown_rx,
-            events_tx,
-            snapshots_tx,
-            command_rx,
-            Arc::new(NestedControlRegistry::default()),
-            Vec::new(),
-        )
-        .await
     }
 
     /// Spawns the supervisor as a background Tokio task and returns a handle

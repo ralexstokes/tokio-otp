@@ -176,7 +176,13 @@ async fn runtime_spawn_wait_drives_to_completion_with_control_surface() {
     let control = handle.clone();
 
     control
-        .wait_until_running()
+        .subscribe_snapshots()
+        .wait_for(|snapshot| {
+            snapshot
+                .children
+                .iter()
+                .all(|child| child.state == ChildStateView::Running)
+        })
         .await
         .expect("runtime reported running");
     let _events = control.subscribe();
@@ -277,7 +283,7 @@ async fn runtime_builder_wires_graph_into_supervised_runtime() {
 }
 
 #[tokio::test]
-async fn wait_until_running_resolves_after_spawn_with_multiple_children() {
+async fn snapshot_wait_reports_all_children_running_after_spawn() {
     let mut builder = GraphBuilder::new();
     builder.actor("one", Drain::<()>::new());
     builder.actor("two", Drain::<()>::new());
@@ -289,10 +295,18 @@ async fn wait_until_running_resolves_after_spawn_with_multiple_children() {
         .expect("runtime builds");
     let handle = runtime.spawn();
 
-    timeout(Duration::from_secs(1), handle.wait_until_running())
+    let mut snapshots = handle.subscribe_snapshots();
+    let all_running = snapshots.wait_for(|snapshot| {
+        snapshot.children.len() == 2
+            && snapshot
+                .children
+                .iter()
+                .all(|child| child.state == ChildStateView::Running)
+    });
+    timeout(Duration::from_secs(1), all_running)
         .await
         .expect("runtime reported running")
-        .expect("runtime running result");
+        .expect("snapshot channel stays open");
     assert_eq!(handle.snapshot().children.len(), 2);
 
     handle
