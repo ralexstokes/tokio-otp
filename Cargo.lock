@@ -1280,6 +1280,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "tokio-actor",
 ]
 
 [[package]]

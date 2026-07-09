@@ -26,7 +26,48 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 /// constructed, so actors can capture each other's refs even when the graph
 /// is cyclic — no forward references or string lookups required:
 ///
-/// ```ignore
+/// ```
+/// # use tokio_actor::{ActorContext, ActorRef, ActorResult, MessageHandler};
+/// # struct FrontendMsg;
+/// # struct ParserMsg;
+/// # struct SinkMsg;
+/// #
+/// # #[derive(Clone)]
+/// # struct Frontend {
+/// #     parser: ActorRef<ParserMsg>,
+/// # }
+/// # impl MessageHandler for Frontend {
+/// #     type Msg = FrontendMsg;
+/// #     async fn handle(
+/// #         &mut self,
+/// #         _: FrontendMsg,
+/// #         _: &ActorContext<FrontendMsg>,
+/// #     ) -> ActorResult {
+/// #         Ok(())
+/// #     }
+/// # }
+/// #
+/// # #[derive(Clone)]
+/// # struct Parser {
+/// #     frontend: ActorRef<FrontendMsg>,
+/// #     sink: ActorRef<SinkMsg>,
+/// # }
+/// # impl MessageHandler for Parser {
+/// #     type Msg = ParserMsg;
+/// #     async fn handle(&mut self, _: ParserMsg, _: &ActorContext<ParserMsg>) -> ActorResult {
+/// #         Ok(())
+/// #     }
+/// # }
+/// #
+/// # #[derive(Clone)]
+/// # struct Sink;
+/// # impl MessageHandler for Sink {
+/// #     type Msg = SinkMsg;
+/// #     async fn handle(&mut self, _: SinkMsg, _: &ActorContext<SinkMsg>) -> ActorResult {
+/// #         Ok(())
+/// #     }
+/// # }
+/// #
 /// #[derive(tokio_actor::Topology)]
 /// struct Pipeline {
 ///     frontend: Frontend,
@@ -34,11 +75,20 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 ///     sink: Sink,
 /// }
 ///
+/// # fn main() -> Result<(), tokio_actor::GraphBuildError> {
 /// let graph = Pipeline::graph(|refs| Pipeline {
-///     frontend: Frontend::new(refs.parser.clone()),
-///     parser: Parser::new(refs.frontend.clone(), refs.sink.clone()),
-///     sink: Sink::new(),
+///     frontend: Frontend {
+///         parser: refs.parser.clone(),
+///     },
+///     parser: Parser {
+///         frontend: refs.frontend.clone(),
+///         sink: refs.sink.clone(),
+///     },
+///     sink: Sink,
 /// })?;
+/// # let _ = graph;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Actor ids

@@ -12,3 +12,8 @@ proc-macro = true
 proc-macro2.workspace = true
 quote.workspace = true
 syn = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+# Dev-dependency cycle back to the crate that re-exports this macro; cargo
+# permits it, and it lets the doctest below compile against real actor types.
+tokio-actor.workspace = true

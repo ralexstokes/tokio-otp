@@ -101,13 +101,8 @@ or are discouraged even in OTP).
 
 ## 3. Topology derive polish
 
-Two nits accepted during the `#[derive(Topology)]` review:
+One nit accepted during the `#[derive(Topology)]` review:
 
-- The derive macro's own rustdoc example is ` ```ignore `; the compiling
-  `no_run` version lives in `tokio-actor`'s crate-level docs. A
-  dev-dependency from `tokio-actor-derive` back to `tokio-actor` (cargo
-  permits the cycle for dev-deps) would let the macro's own page carry a
-  real doctest.
 - Deriving on a struct with a non-actor field points the E0277 at
   `#[derive(Topology)]` rather than at the offending field type. Tightening
   the span in the generated bounds would make the error read better; the
