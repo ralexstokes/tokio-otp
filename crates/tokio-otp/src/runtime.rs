@@ -126,6 +126,10 @@ impl std::fmt::Debug for Runtime {
 }
 
 /// Cheaply cloneable runtime control surface.
+///
+/// By delegation to the underlying [`SupervisorHandle`], dropping the last
+/// handle clone requests graceful shutdown. Other clones keep the runtime
+/// alive, so fire-and-forget operation requires keeping a handle alive.
 #[derive(Clone)]
 pub struct RuntimeHandle {
     supervisor: SupervisorHandle,

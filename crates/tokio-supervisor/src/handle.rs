@@ -202,9 +202,12 @@ pub(crate) struct SupervisorHandleInit {
 ///   for state.
 /// - **Completion**: [`wait`](Self::wait) to await the supervisor's exit.
 ///
-/// Dropping all clones of the handle does **not** shut down the supervisor.
-/// Call [`shutdown`](Self::shutdown) explicitly. [`wait`](Self::wait) does not
-/// resolve until the supervisor has drained and joined its child tasks.
+/// Dropping the last handle clone requests graceful shutdown, equivalent to
+/// calling [`shutdown`](Self::shutdown). Other clones keep the supervision
+/// tree alive, so dropping a handle while another clone remains does not shut
+/// it down. For fire-and-forget operation, keep a handle alive.
+/// [`wait`](Self::wait) does not resolve until the supervisor has drained and
+/// joined its child tasks.
 #[derive(Clone)]
 pub struct SupervisorHandle {
     shutdown_tx: watch::Sender<bool>,

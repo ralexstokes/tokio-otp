@@ -74,6 +74,44 @@ async fn shutdown_is_idempotent_across_handle_clones() {
 }
 
 #[tokio::test]
+async fn dropping_last_handle_clone_requests_graceful_shutdown() {
+    let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
+
+    let supervisor = SupervisorBuilder::new()
+        .child(ChildSpec::new("worker", move |ctx| {
+            let lifecycle_tx = lifecycle_tx.clone();
+            async move {
+                lifecycle_tx.send("started").expect("test receiver dropped");
+                ctx.shutdown_token().cancelled().await;
+                lifecycle_tx
+                    .send("cancelled")
+                    .expect("test receiver dropped");
+                Ok(())
+            }
+        }))
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+    let last_handle = handle.clone();
+
+    assert_eq!(common::recv_event(&mut lifecycle_rx).await, "started");
+
+    drop(handle);
+    common::assert_no_event(&mut lifecycle_rx).await;
+
+    drop(last_handle);
+    assert_eq!(common::recv_event(&mut lifecycle_rx).await, "cancelled");
+
+    loop {
+        if common::recv_supervisor_event(&mut events).await == SupervisorEvent::SupervisorStopped {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
 async fn cooperative_child_observes_cancellation_before_shutdown_finishes() {
     let saw_cancel = Arc::new(AtomicBool::new(false));
 
