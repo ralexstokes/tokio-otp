@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let attempt = warm_cache_attempts.fetch_add(1, Ordering::SeqCst);
             println!(
                 "warm-cache started in generation {} (attempt {})",
-                ctx.generation,
+                ctx.generation(),
                 attempt + 1
             );
 
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(example_error("cache priming failed"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             println!("warm-cache observed shutdown");
             Ok(())
         }
@@ -43,8 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let metrics = ChildSpec::new("metrics", |ctx| async move {
-        println!("metrics started in generation {}", ctx.generation);
-        ctx.token.cancelled().await;
+        println!("metrics started in generation {}", ctx.generation());
+        ctx.shutdown_token().cancelled().await;
         println!("metrics observed shutdown");
         Ok(())
     });

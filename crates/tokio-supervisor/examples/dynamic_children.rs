@@ -5,8 +5,8 @@ use tokio_supervisor::prelude::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("api", |ctx| async move {
-            println!("api started in generation {}", ctx.generation);
-            ctx.token.cancelled().await;
+            println!("api started in generation {}", ctx.generation());
+            ctx.shutdown_token().cancelled().await;
             println!("api shutting down");
             Ok(())
         }))
@@ -19,11 +19,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     handle
         .add_child(ChildSpec::new("cache-warmer", |ctx| async move {
-            println!("cache-warmer started in generation {}", ctx.generation);
+            println!("cache-warmer started in generation {}", ctx.generation());
 
             loop {
                 tokio::select! {
-                    _ = ctx.token.cancelled() => {
+                    _ = ctx.shutdown_token().cancelled() => {
                         println!("cache-warmer received removal/shutdown");
                         return Ok(());
                     }
@@ -47,8 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let nested = SupervisorBuilder::new()
         .child(ChildSpec::new("seed", |ctx| async move {
-            println!("nested seed started in generation {}", ctx.generation);
-            ctx.token.cancelled().await;
+            println!("nested seed started in generation {}", ctx.generation());
+            ctx.shutdown_token().cancelled().await;
             println!("nested seed shutting down");
             Ok(())
         }))
@@ -63,11 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_child_at(
             ["nested"],
             ChildSpec::new("nested-cache", |ctx| async move {
-                println!("nested-cache started in generation {}", ctx.generation);
+                println!("nested-cache started in generation {}", ctx.generation());
 
                 loop {
                     tokio::select! {
-                        _ = ctx.token.cancelled() => {
+                        _ = ctx.shutdown_token().cancelled() => {
                             println!("nested-cache received removal/shutdown");
                             return Ok(());
                         }

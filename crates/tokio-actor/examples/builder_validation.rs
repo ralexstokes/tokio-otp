@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use tokio_actor::{Actor, ActorContext, ActorResult, BuildError, GraphBuilder};
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuildError, GraphBuilder};
 
 struct Idle<M>(PhantomData<fn(M)>);
 
@@ -25,7 +25,7 @@ impl<M: Send + 'static> Actor for Idle<M> {
     }
 }
 
-fn report(label: &str, result: Result<tokio_actor::Graph, BuildError>) {
+fn report(label: &str, result: Result<tokio_actor::Graph, GraphBuildError>) {
     match result {
         Ok(_) => panic!("{label} unexpectedly built"),
         Err(error) => println!("{label}: {error}"),

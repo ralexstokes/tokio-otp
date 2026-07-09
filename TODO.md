@@ -49,8 +49,9 @@ extension traits, but `tokio_otp::prelude` does not re-export them — so
 `ctx.spawn_blocking`.~~
 
 Done by defining `tokio_otp::prelude` as the union of the sub-crate preludes
-minus `BuildError` and the duplicate `tokio_supervisor::BoxError`, enforced by
-`crates/tokio-otp/tests/prelude.rs`.
+minus the duplicate `tokio_supervisor::BoxError`, enforced by
+`crates/tokio-otp/tests/prelude.rs`. The renamed build errors were added by
+item 7.
 
 ## 4. ~~Foreground `Runtime::run` loses the control surface~~ — done
 
@@ -96,29 +97,41 @@ Done by changing `RuntimeHandle::actor_ref` to return `DynamicActorError`:
 `Unsupported` when no registry is configured, `Lookup(LookupError)` for real
 lookup failures.
 
-## 7. Naming and diagnostics polish
+## 7. ~~Naming and diagnostics polish~~ — done
 
-- `ChildContext` exposes a public `ctx.token` field while `ActorContext` uses
+- ~~`ChildContext` exposes a public `ctx.token` field while `ActorContext` uses
   `ctx.shutdown_token()`; pick one convention across crates, and fold the
   `ChildContext::supervisor_token` / `SupervisorToken` naming into the same
-  pass.
-- Builder diagnostics: registering a duplicate id with a different message
+  pass.~~
+- ~~Builder diagnostics: registering a duplicate id with a different message
   type reports `MessageTypeMismatch` rather than `DuplicateActorId`, and
   `build()` reports an empty graph name before any accumulated registration
-  errors.
-- Three distinct `BuildError` types (`tokio-actor`, `tokio-supervisor`,
+  errors.~~ Superseded by `specs/feat-topology-upgrade.md`, which makes those
+  errors unrepresentable.
+- ~~Three distinct `BuildError` types (`tokio-actor`, `tokio-supervisor`,
   `tokio-otp`) and two identical `BoxError` aliases exist across the crates.
-  Workable, but a naming/unification pass is cheap while unpublished.
+  Workable, but a naming/unification pass is cheap while unpublished.~~
 
-## 8. Docs front-door polish
+Done by making `ChildContext` accessor-based
+(`shutdown_token()`/`supervisor_token()`) and renaming the build errors to
+`GraphBuildError`/`SupervisorBuildError`/`RuntimeBuildError` (all now in the
+preludes). Builder-diagnostics bullet superseded by
+`specs/feat-topology-upgrade.md`, which makes those errors unrepresentable.
 
-- The `tokio-otp` crate-level doc example is ` ```ignore ` and references an
+## 8. ~~Docs front-door polish~~ — done
+
+- ~~The `tokio-otp` crate-level doc example is ` ```ignore ` and references an
   undefined `graph` variable — the one example on the front door is the only
   untested one (doctests run in CI everywhere else). Make it a compiling
-  `no_run` example.
-- The book's rustdoc-style links (e.g. `getting-started.md`) all point at the
+  `no_run` example.~~
+- ~~The book's rustdoc-style links (e.g. `getting-started.md`) all point at the
   GitHub tree root as placeholders. Publish rustdoc alongside the mdBook and
-  link to it.
+  link to it.~~
+
+Done by noting that the crate-level example was already a passing `no_run`
+doctest, and that rustdoc was already published at
+`https://stokes.io/tokio-otp/api/`; this change repointed the book's
+placeholder links.
 
 ## 9. Future actor ergonomics
 

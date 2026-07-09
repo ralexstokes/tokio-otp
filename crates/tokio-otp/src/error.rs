@@ -4,7 +4,7 @@ use tokio_supervisor::ControlError;
 
 /// Errors returned while adapting actor graphs into supervisor children.
 #[derive(Debug, Error)]
-pub enum BuildError {
+pub enum RuntimeBuildError {
     /// No actor graph was provided to the runtime builder.
     #[error("no actor graph was provided; call `RuntimeBuilder::graph` before `build`")]
     MissingGraph,
@@ -16,7 +16,7 @@ pub enum BuildError {
     Registry(#[from] RegistryError),
     /// The supplied supervisor configuration was invalid.
     #[error(transparent)]
-    Supervisor(#[from] tokio_supervisor::BuildError),
+    Supervisor(#[from] tokio_supervisor::SupervisorBuildError),
     /// An override referenced an actor id that does not exist in the graph.
     #[error("unknown actor `{actor_id}`")]
     UnknownActor { actor_id: String },

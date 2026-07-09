@@ -15,7 +15,7 @@ use tokio::{
 use tokio_actor::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, Reply, SendError,
 };
-use tokio_otp::{BuildError, SupervisedActors};
+use tokio_otp::{RuntimeBuildError, SupervisedActors};
 use tokio_supervisor::{
     BackoffPolicy, Restart, RestartIntensity, Strategy, SupervisorBuilder, SupervisorExit,
 };
@@ -405,6 +405,6 @@ fn supervised_actors_reject_unknown_actor_overrides() {
 
     assert!(matches!(
         result,
-        Err(BuildError::UnknownActor { actor_id }) if actor_id == "missing"
+        Err(RuntimeBuildError::UnknownActor { actor_id }) if actor_id == "missing"
     ));
 }

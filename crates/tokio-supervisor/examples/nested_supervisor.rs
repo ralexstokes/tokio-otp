@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ChildSpec::new("nested-worker", move |ctx| {
             let nested_attempts = Arc::clone(&nested_attempts);
             async move {
-                println!("nested-worker started in generation {}", ctx.generation);
+                println!("nested-worker started in generation {}", ctx.generation());
 
                 if nested_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     sleep(Duration::from_millis(100)).await;
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(example_error("simulated nested failure"));
                 }
 
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 println!("nested-worker observed shutdown");
                 Ok(())
             }
@@ -38,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nested_supervisor = SupervisorBuilder::new().child(nested_worker).build()?;
 
     let metrics = ChildSpec::new("metrics", |ctx| async move {
-        println!("metrics started in generation {}", ctx.generation);
-        ctx.token.cancelled().await;
+        println!("metrics started in generation {}", ctx.generation());
+        ctx.shutdown_token().cancelled().await;
         println!("metrics observed shutdown");
         Ok(())
     })

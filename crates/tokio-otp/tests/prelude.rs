@@ -10,9 +10,9 @@ mod coverage_probe {
             Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
             BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
             BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError,
-            DrainPolicy, Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
-            RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
-            SpawnBlockingError, TryRecvError,
+            DrainPolicy, Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle,
+            LookupError, MessageHandler, RebindPolicy, RegistryError, Reply, RunnableActor,
+            RunnableActorFactory, SendError, SpawnBlockingError, TryRecvError,
         };
     }
 
@@ -21,16 +21,17 @@ mod coverage_probe {
             BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
             ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart,
             RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy,
-            Strategy, Supervisor, SupervisorBuilder, SupervisorError, SupervisorEvent,
-            SupervisorEventReceiverExt as _, SupervisorExit, SupervisorHandle, SupervisorSnapshot,
-            SupervisorSnapshotReceiverExt as _, SupervisorStateView, SupervisorToken,
+            Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
+            SupervisorEvent, SupervisorEventReceiverExt as _, SupervisorExit, SupervisorHandle,
+            SupervisorSnapshot, SupervisorSnapshotReceiverExt as _, SupervisorStateView,
+            SupervisorToken,
         };
     }
 
     mod otp {
         use tokio_otp::prelude::{
-            DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuilder, RuntimeHandle,
-            SupervisedActors, SupervisedGraph,
+            DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuildError, RuntimeBuilder,
+            RuntimeHandle, SupervisedActors, SupervisedGraph,
         };
     }
 }

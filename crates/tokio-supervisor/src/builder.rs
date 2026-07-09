@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     child::ChildSpec,
-    error::BuildError,
+    error::SupervisorBuildError,
     restart::RestartIntensity,
     strategy::Strategy,
     supervisor::{Supervisor, SupervisorConfig},
@@ -22,7 +22,7 @@ use crate::{
 /// let supervisor = SupervisorBuilder::new()
 ///     .strategy(Strategy::OneForOne)
 ///     .child(ChildSpec::new("worker", |ctx| async move {
-///         ctx.token.cancelled().await;
+///         ctx.shutdown_token().cancelled().await;
 ///         Ok(())
 ///     }))
 ///     .build()
@@ -117,24 +117,24 @@ impl SupervisorBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError`] if:
+    /// Returns [`SupervisorBuildError`] if:
     /// - No children were added and [`allow_empty`](Self::allow_empty) was not enabled.
     /// - Two children share the same id.
     /// - Any channel capacity is zero.
     /// - Any restart intensity or backoff configuration is invalid.
-    pub fn build(self) -> Result<Supervisor, BuildError> {
+    pub fn build(self) -> Result<Supervisor, SupervisorBuildError> {
         if self.children.is_empty() && !self.allow_empty {
-            return Err(BuildError::EmptyChildren);
+            return Err(SupervisorBuildError::EmptyChildren);
         }
 
         self.restart_intensity.validate()?;
         if self.control_channel_capacity == 0 {
-            return Err(BuildError::InvalidConfig(
+            return Err(SupervisorBuildError::InvalidConfig(
                 "control channel capacity must be non-zero",
             ));
         }
         if self.event_channel_capacity == 0 {
-            return Err(BuildError::InvalidConfig(
+            return Err(SupervisorBuildError::InvalidConfig(
                 "event channel capacity must be non-zero",
             ));
         }
@@ -142,13 +142,17 @@ impl SupervisorBuilder {
         let mut ids = HashSet::new();
         for child in &self.children {
             if child.id().is_empty() {
-                return Err(BuildError::InvalidConfig("child id must not be empty"));
+                return Err(SupervisorBuildError::InvalidConfig(
+                    "child id must not be empty",
+                ));
             }
             if let Some(restart_intensity) = child.restart_intensity_override() {
                 restart_intensity.validate()?;
             }
             if !ids.insert(child.id()) {
-                return Err(BuildError::DuplicateChildId(child.id().to_owned()));
+                return Err(SupervisorBuildError::DuplicateChildId(
+                    child.id().to_owned(),
+                ));
             }
         }
 

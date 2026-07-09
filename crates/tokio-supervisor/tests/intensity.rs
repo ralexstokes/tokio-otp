@@ -119,12 +119,12 @@ async fn exponential_backoff_delays_restart_attempts_by_expected_steps() {
                 let starts_tx = starts_tx.clone();
                 async move {
                     starts_tx
-                        .send((ctx.generation, Instant::now()))
+                        .send((ctx.generation(), Instant::now()))
                         .expect("test receiver dropped");
-                    if ctx.generation < 2 {
+                    if ctx.generation() < 2 {
                         Err(common::test_error("boom"))
                     } else {
-                        ctx.token.cancelled().await;
+                        ctx.shutdown_token().cancelled().await;
                         Ok(())
                     }
                 }
@@ -198,13 +198,13 @@ async fn restart_intensity_is_tracked_per_child_for_one_for_one() {
         let alpha_tx = alpha_tx.clone();
         async move {
             alpha_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if alpha_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("alpha boom"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -214,12 +214,14 @@ async fn restart_intensity_is_tracked_per_child_for_one_for_one() {
         let beta_attempts = beta_attempts.clone();
         let beta_tx = beta_tx.clone();
         async move {
-            beta_tx.send(ctx.generation).expect("test receiver dropped");
+            beta_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
             if beta_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("beta boom"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -260,7 +262,7 @@ async fn child_restart_intensity_override_is_enforced() {
                 let starts_tx = starts_tx.clone();
                 async move {
                     starts_tx
-                        .send(ctx.generation)
+                        .send(ctx.generation())
                         .expect("test receiver dropped");
                     Err(common::test_error("boom"))
                 }
@@ -305,16 +307,16 @@ async fn restart_budget_recovers_after_failures_age_out_of_window() {
                 let starts_tx = starts_tx.clone();
                 async move {
                     starts_tx
-                        .send(ctx.generation)
+                        .send(ctx.generation())
                         .expect("test receiver dropped");
-                    match ctx.generation {
+                    match ctx.generation() {
                         0 => Err(common::test_error("first boom")),
                         1 => {
                             release_second_failure.notified().await;
                             Err(common::test_error("second boom"))
                         }
                         _ => {
-                            ctx.token.cancelled().await;
+                            ctx.shutdown_token().cancelled().await;
                             Ok(())
                         }
                     }
@@ -353,14 +355,14 @@ async fn restart_intensity_is_tracked_per_failing_child_for_one_for_all() {
         let alpha_tx = alpha_tx.clone();
         async move {
             alpha_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
-            if ctx.generation == 0 {
+            if ctx.generation() == 0 {
                 release_alpha.notified().await;
                 return Err(common::test_error("alpha boom"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -371,13 +373,15 @@ async fn restart_intensity_is_tracked_per_failing_child_for_one_for_all() {
         let release_beta = release_beta_for_child.clone();
         let beta_tx = beta_tx.clone();
         async move {
-            beta_tx.send(ctx.generation).expect("test receiver dropped");
-            if ctx.generation == 1 {
+            beta_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
+            if ctx.generation() == 1 {
                 release_beta.notified().await;
                 return Err(common::test_error("beta boom"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })

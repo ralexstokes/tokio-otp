@@ -14,9 +14,9 @@ async fn prelude_supports_handle_event_and_snapshot_helpers() {
             let started_tx = started_tx.clone();
             async move {
                 started_tx
-                    .send(ctx.generation)
+                    .send(ctx.generation())
                     .expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -84,7 +84,7 @@ async fn prelude_snapshot_helpers_walk_nested_children() {
             let leaf_started_tx = leaf_started_tx.clone();
             async move {
                 leaf_started_tx.send(()).expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -94,7 +94,7 @@ async fn prelude_snapshot_helpers_walk_nested_children() {
     let handle = SupervisorBuilder::new()
         .child(
             ChildSpec::new("anchor", |ctx| async move {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             })
             .shutdown(ShutdownPolicy::cooperative(Duration::from_millis(25))),

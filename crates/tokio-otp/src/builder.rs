@@ -1,7 +1,7 @@
 use tokio_actor::{ActorRegistry, Graph, RunnableActorFactory};
 use tokio_supervisor::{Restart, RestartIntensity, ShutdownPolicy, Strategy, SupervisorBuilder};
 
-use crate::{error::BuildError, runtime::Runtime, supervised_actors::SupervisedActors};
+use crate::{error::RuntimeBuildError, runtime::Runtime, supervised_actors::SupervisedActors};
 
 /// One-stop builder for the common supervised-actor setup.
 ///
@@ -134,10 +134,10 @@ impl RuntimeBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::MissingGraph`] if no graph was provided and
+    /// Returns [`RuntimeBuildError::MissingGraph`] if no graph was provided and
     /// [`dynamic`](Self::dynamic) was not enabled, or any error from
     /// decomposing the graph and building the supervisor.
-    pub fn build(self) -> Result<Runtime, BuildError> {
+    pub fn build(self) -> Result<Runtime, RuntimeBuildError> {
         let mut supervisor = SupervisorBuilder::new().strategy(self.strategy);
         if self.dynamic {
             supervisor = supervisor.allow_empty();
@@ -161,7 +161,7 @@ impl RuntimeBuilder {
                     RunnableActorFactory::new(),
                 ))
             }
-            None => Err(BuildError::MissingGraph),
+            None => Err(RuntimeBuildError::MissingGraph),
         }
     }
 }

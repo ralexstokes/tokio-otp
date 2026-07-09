@@ -22,11 +22,11 @@ mod common;
 async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("alpha", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .child(ChildSpec::new("beta", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -47,7 +47,7 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
 
     handle
         .add_child(ChildSpec::new("gamma", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .await
@@ -75,13 +75,13 @@ async fn snapshot_shows_restart_state_and_last_exit() {
         let starts_tx = starts_tx.clone();
         async move {
             starts_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("boom"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -158,7 +158,7 @@ async fn snapshot_shows_removing_membership_during_child_removal() {
         let release = release_for_child.clone();
         async move {
             started_tx.send(()).expect("test receiver dropped");
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             cancelled_tx.send(()).expect("test receiver dropped");
             release.notified().await;
             Ok(())
@@ -168,7 +168,7 @@ async fn snapshot_shows_removing_membership_during_child_removal() {
     let supervisor = SupervisorBuilder::new()
         .child(removable)
         .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -221,7 +221,7 @@ async fn root_snapshot_includes_nested_supervisor_tree() {
             let leaf_started_tx = leaf_started_tx.clone();
             async move {
                 leaf_started_tx.send(()).expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -230,7 +230,7 @@ async fn root_snapshot_includes_nested_supervisor_tree() {
 
     let outer = SupervisorBuilder::new()
         .child(ChildSpec::new("anchor", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .child(nested.into_child_spec("nested"))
@@ -272,7 +272,7 @@ async fn root_snapshot_includes_nested_supervisor_tree() {
 async fn stopped_snapshot_remains_available_after_shutdown() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -333,7 +333,7 @@ async fn stopped_snapshot_reports_natural_completion() {
 async fn events_observe_already_published_snapshot_state() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()

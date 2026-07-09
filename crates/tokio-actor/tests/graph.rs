@@ -15,9 +15,9 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, BlockingOptions, BlockingTaskFailure, BuildError,
-    CallError, DrainPolicy, Graph, GraphBuilder, GraphError, LookupError, MessageHandler, Reply,
-    SendError, TryRecvError,
+    Actor, ActorContext, ActorRef, ActorResult, BlockingOptions, BlockingTaskFailure, CallError,
+    DrainPolicy, Graph, GraphBuildError, GraphBuilder, GraphError, LookupError, MessageHandler,
+    Reply, SendError, TryRecvError,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -861,7 +861,7 @@ fn build_rejects_invalid_graph_definitions() {
     mismatch.actor("worker", Drain::<String>::new());
     assert!(matches!(
         mismatch.build(),
-        Err(BuildError::MessageTypeMismatch { actor_id, registered, requested })
+        Err(GraphBuildError::MessageTypeMismatch { actor_id, registered, requested })
             if actor_id == "worker" && registered.contains("u32") && requested.contains("String")
     ));
 
@@ -869,7 +869,7 @@ fn build_rejects_invalid_graph_definitions() {
     missing.declare::<u32>("ghost");
     assert!(matches!(
         missing.build(),
-        Err(BuildError::MissingActor { actor_id }) if actor_id == "ghost"
+        Err(GraphBuildError::MissingActor { actor_id }) if actor_id == "ghost"
     ));
 
     let mut duplicate = GraphBuilder::new();
@@ -877,18 +877,20 @@ fn build_rejects_invalid_graph_definitions() {
     duplicate.actor("worker", Drain::<u32>::new());
     assert!(matches!(
         duplicate.build(),
-        Err(BuildError::DuplicateActorId { actor_id }) if actor_id == "worker"
+        Err(GraphBuildError::DuplicateActorId { actor_id }) if actor_id == "worker"
     ));
 
     let empty = GraphBuilder::new();
-    assert!(matches!(empty.build(), Err(BuildError::EmptyGraph)));
+    assert!(matches!(empty.build(), Err(GraphBuildError::EmptyGraph)));
 
     let mut empty_name = GraphBuilder::new();
     empty_name.name("");
     empty_name.actor("worker", Drain::<()>::new());
     assert!(matches!(
         empty_name.build(),
-        Err(BuildError::InvalidConfig("graph name must not be empty"))
+        Err(GraphBuildError::InvalidConfig(
+            "graph name must not be empty"
+        ))
     ));
 
     let mut zero_capacity = GraphBuilder::new();
@@ -896,7 +898,7 @@ fn build_rejects_invalid_graph_definitions() {
     zero_capacity.actor("worker", Drain::<()>::new());
     assert!(matches!(
         zero_capacity.build(),
-        Err(BuildError::InvalidConfig(
+        Err(GraphBuildError::InvalidConfig(
             "mailbox capacity must be non-zero"
         ))
     ));

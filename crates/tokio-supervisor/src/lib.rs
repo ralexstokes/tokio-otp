@@ -143,7 +143,7 @@
 //!
 //! let supervisor = SupervisorBuilder::new()
 //!     .child(ChildSpec::new("worker", |ctx| async move {
-//!         ctx.token.cancelled().await;
+//!         ctx.shutdown_token().cancelled().await;
 //!         Ok(())
 //!     }))
 //!     .build()?;
@@ -197,7 +197,9 @@ mod supervisor;
 pub use builder::SupervisorBuilder;
 pub use child::{BoxError, ChildResult, ChildSpec};
 pub use context::{ChildContext, SupervisorToken};
-pub use error::{BuildError, ControlError, RestartMonitorError, SupervisorError, SupervisorExit};
+pub use error::{
+    ControlError, RestartMonitorError, SupervisorBuildError, SupervisorError, SupervisorExit,
+};
 pub use event::{EventPathSegment, ExitStatusView, SupervisorEvent};
 pub use handle::SupervisorHandle;
 pub use monitor::RestartMonitor;

@@ -363,8 +363,10 @@ impl<M: Send + 'static> ActorContext<M> {
     ///
     /// A returned [`TryRecvError::Empty`] means no message is immediately
     /// available; it does not prove the mailbox is fully drained while senders
-    /// hold permits. For typical actors, prefer [`MessageHandler`] with
-    /// [`DrainPolicy::Drain`] so the framework owns the drain loop.
+    /// hold permits. For typical actors, prefer
+    /// [`MessageHandler`](crate::MessageHandler) with
+    /// [`DrainPolicy::Drain`](crate::DrainPolicy) so the framework owns the
+    /// drain loop.
     pub fn try_recv(&mut self) -> Result<M, TryRecvError> {
         let message = self.mailbox.try_recv();
         if message.is_ok() {

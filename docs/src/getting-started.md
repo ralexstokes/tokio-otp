@@ -39,12 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ticker = tokio::time::interval(Duration::from_millis(500));
             loop {
                 tokio::select! {
-                    _ = ctx.token.cancelled() => {
+                    _ = ctx.shutdown_token().cancelled() => {
                         println!("heartbeat asked to stop");
                         return Ok(());
                     }
                     _ = ticker.tick() => {
-                        println!("beat (generation {})", ctx.generation);
+                        println!("beat (generation {})", ctx.generation());
                     }
                 }
             }
@@ -90,6 +90,6 @@ supervisor exited with Shutdown
 So far the child never fails, so the supervisor has nothing interesting to do.
 Let's fix that.
 
-[`ChildSpec`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`ChildContext`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`SupervisorHandle`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
+[`ChildSpec`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ChildSpec.html
+[`ChildContext`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ChildContext.html
+[`SupervisorHandle`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.SupervisorHandle.html

@@ -101,7 +101,7 @@ async fn spawn_shutdown_flow(children: usize) {
         builder = builder.child(ChildSpec::new(
             format!("worker-{index}"),
             |ctx| async move {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             },
         ));
@@ -134,7 +134,7 @@ async fn one_for_one_restart_flow() {
                 return Err(bench_error("restart me"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -145,7 +145,7 @@ async fn one_for_one_restart_flow() {
         .child(flaky);
     for index in 0..3 {
         builder = builder.child(ChildSpec::new(format!("peer-{index}"), |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }));
     }
@@ -177,7 +177,7 @@ async fn one_for_all_restart_flow() {
                 return Err(bench_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -189,7 +189,7 @@ async fn one_for_all_restart_flow() {
     for index in 0..3 {
         builder = builder.child(
             ChildSpec::new(format!("peer-{index}"), |ctx| async move {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             })
             .restart(Restart::Permanent),
@@ -212,7 +212,7 @@ async fn one_for_all_restart_flow() {
 async fn dynamic_add_remove_flow() {
     let handle = SupervisorBuilder::new()
         .child(ChildSpec::new("seed", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -224,7 +224,7 @@ async fn dynamic_add_remove_flow() {
 
     handle
         .add_child(ChildSpec::new("dynamic", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .await

@@ -27,13 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let starts_tx = starts_tx.clone();
             async move {
                 starts_tx
-                    .send(("fetch", ctx.generation))
+                    .send(("fetch", ctx.generation()))
                     .expect("example receiver dropped");
-                println!("fetch started in generation {}", ctx.generation);
+                println!("fetch started in generation {}", ctx.generation());
 
                 loop {
                     tokio::select! {
-                        _ = ctx.token.cancelled() => return Ok(()),
+                        _ = ctx.shutdown_token().cancelled() => return Ok(()),
                         _ = sleep(Duration::from_millis(50)) => {}
                     }
                 }
@@ -50,19 +50,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let decode_attempts = Arc::clone(&decode_attempts);
             async move {
                 starts_tx
-                    .send(("decode", ctx.generation))
+                    .send(("decode", ctx.generation()))
                     .expect("example receiver dropped");
-                println!("decode started in generation {}", ctx.generation);
+                println!("decode started in generation {}", ctx.generation());
 
                 if decode_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     sleep(Duration::from_millis(100)).await;
-                    println!("decode failed in generation {}", ctx.generation);
+                    println!("decode failed in generation {}", ctx.generation());
                     return Err(example_error("corrupt frame"));
                 }
 
                 loop {
                     tokio::select! {
-                        _ = ctx.token.cancelled() => return Ok(()),
+                        _ = ctx.shutdown_token().cancelled() => return Ok(()),
                         _ = sleep(Duration::from_millis(50)) => {}
                     }
                 }
@@ -77,13 +77,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let starts_tx = starts_tx.clone();
             async move {
                 starts_tx
-                    .send(("sink", ctx.generation))
+                    .send(("sink", ctx.generation()))
                     .expect("example receiver dropped");
-                println!("sink started in generation {}", ctx.generation);
+                println!("sink started in generation {}", ctx.generation());
 
                 loop {
                     tokio::select! {
-                        _ = ctx.token.cancelled() => return Ok(()),
+                        _ = ctx.shutdown_token().cancelled() => return Ok(()),
                         _ = sleep(Duration::from_millis(50)) => {}
                     }
                 }

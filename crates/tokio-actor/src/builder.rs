@@ -9,7 +9,7 @@ use crate::{
     actor::Actor,
     binding::{BindingCore, BindingLifecycle},
     context::ActorRef,
-    error::BuildError,
+    error::GraphBuildError,
     graph::{ErasedRunner, Graph, GraphActor, GraphInner, TypedRunner},
     observability::{GraphObservability, anonymous_graph_name},
 };
@@ -23,7 +23,7 @@ pub struct GraphBuilder {
     name: Option<String>,
     slots: Vec<Slot>,
     index: HashMap<Arc<str>, usize>,
-    errors: Vec<BuildError>,
+    errors: Vec<GraphBuildError>,
     mailbox_capacity: usize,
     max_blocking_tasks_per_actor: Option<usize>,
     actor_shutdown_timeout: Duration,
@@ -133,14 +133,14 @@ impl GraphBuilder {
     pub fn actor<A: Actor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
         if actor_id.is_empty() {
             self.errors
-                .push(BuildError::InvalidConfig("actor id must not be empty"));
+                .push(GraphBuildError::InvalidConfig("actor id must not be empty"));
             return ActorRef::detached(actor_id.into());
         }
 
         if let Some(&index) = self.index.get(actor_id) {
             let slot = &self.slots[index];
             if slot.message_type == TypeId::of::<A::Msg>() && slot.runner.is_some() {
-                self.errors.push(BuildError::DuplicateActorId {
+                self.errors.push(GraphBuildError::DuplicateActorId {
                     actor_id: actor_id.to_string(),
                 });
                 return ActorRef::detached(actor_id.into());
@@ -164,10 +164,12 @@ impl GraphBuilder {
     }
 
     /// Validates the graph and returns an immutable [`Graph`].
-    pub fn build(mut self) -> Result<Graph, BuildError> {
+    pub fn build(mut self) -> Result<Graph, GraphBuildError> {
         let graph_name = match self.name {
             Some(name) if name.is_empty() => {
-                return Err(BuildError::InvalidConfig("graph name must not be empty"));
+                return Err(GraphBuildError::InvalidConfig(
+                    "graph name must not be empty",
+                ));
             }
             Some(name) => Arc::from(name),
             None => anonymous_graph_name(),
@@ -177,10 +179,10 @@ impl GraphBuilder {
             return Err(self.errors.remove(0));
         }
         if self.slots.is_empty() {
-            return Err(BuildError::EmptyGraph);
+            return Err(GraphBuildError::EmptyGraph);
         }
         if self.mailbox_capacity == 0 {
-            return Err(BuildError::InvalidConfig(
+            return Err(GraphBuildError::InvalidConfig(
                 "mailbox capacity must be non-zero",
             ));
         }
@@ -190,7 +192,7 @@ impl GraphBuilder {
 
         for slot in self.slots {
             let Some(runner) = slot.runner else {
-                return Err(BuildError::MissingActor {
+                return Err(GraphBuildError::MissingActor {
                     actor_id: slot.actor_id.to_string(),
                 });
             };
@@ -225,7 +227,7 @@ impl GraphBuilder {
     fn slot_ref<M: Send + 'static>(&mut self, actor_id: &str) -> ActorRef<M> {
         if actor_id.is_empty() {
             self.errors
-                .push(BuildError::InvalidConfig("actor id must not be empty"));
+                .push(GraphBuildError::InvalidConfig("actor id must not be empty"));
             return ActorRef::detached(actor_id.into());
         }
 
@@ -237,7 +239,7 @@ impl GraphBuilder {
                 };
                 return ActorRef::from_core(&core, None);
             }
-            self.errors.push(BuildError::MessageTypeMismatch {
+            self.errors.push(GraphBuildError::MessageTypeMismatch {
                 actor_id: actor_id.to_string(),
                 registered: slot.message_type_name,
                 requested: type_name::<M>(),

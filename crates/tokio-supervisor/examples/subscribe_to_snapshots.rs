@@ -6,7 +6,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nested = SupervisorBuilder::new()
         .child(ChildSpec::new("leaf", |ctx| async move {
             println!("leaf started");
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             println!("leaf stopping");
             Ok(())
         }))
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |ctx| async move {
             println!("worker started");
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             println!("worker stopping");
             Ok(())
         }))

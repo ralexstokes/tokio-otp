@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             loop {
                 tokio::select! {
-                    _ = ctx.token.cancelled() => {
+                    _ = ctx.shutdown_token().cancelled() => {
                         println!("http-server received cancellation");
                         return Ok(());
                     }

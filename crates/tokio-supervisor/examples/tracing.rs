@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return Err(std::io::Error::other("fail once").into());
                     }
 
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     Ok(())
                 }
             })
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("anchor", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .child(nested.into_child_spec("nested"))

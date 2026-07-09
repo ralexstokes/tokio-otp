@@ -8,6 +8,8 @@ use crate::{
 
 /// A type-erased, thread-safe error type used as the `Err` half of
 /// [`ChildResult`].
+///
+/// This is identical to and interchangeable with `tokio_actor::BoxError`.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// The result type returned by every supervised child function.

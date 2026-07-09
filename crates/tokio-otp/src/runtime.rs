@@ -372,7 +372,7 @@ pub(crate) fn actor_child_spec(
         let actor = guard.actor.clone();
         async move {
             actor
-                .run_until(ctx.token.cancelled())
+                .run_until(ctx.shutdown_token().cancelled())
                 .await
                 .map_err(Into::into)
         }

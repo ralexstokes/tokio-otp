@@ -165,4 +165,4 @@ Defaults are conservative: mailbox capacity is 64 messages, blocking tasks
 are capped at 16 per actor, and shutdown waits up to 5 seconds for blocking
 tasks before detaching them.
 
-[`ActorRef`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-actor
+[`ActorRef`]: https://stokes.io/tokio-otp/api/tokio_actor/struct.ActorRef.html

@@ -26,7 +26,7 @@ async fn external_shutdown_stops_all_children() {
             let started_tx = started_tx.clone();
             async move {
                 started_tx.send(()).expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 exits.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -53,7 +53,7 @@ async fn external_shutdown_stops_all_children() {
 async fn shutdown_is_idempotent_across_handle_clones() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -82,7 +82,7 @@ async fn cooperative_child_observes_cancellation_before_shutdown_finishes() {
         .child(ChildSpec::new("worker", move |ctx| {
             let saw_cancel = saw_cancel_for_child.clone();
             async move {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 saw_cancel.store(true, Ordering::SeqCst);
                 Ok(())
             }
@@ -275,7 +275,7 @@ async fn cooperative_remove_child_times_out_with_stuck_child_name() {
             }),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -412,7 +412,7 @@ async fn shutdown_preempts_delayed_restart_in_cooperative_mode() {
             ChildSpec::new("keeper", move |ctx| {
                 let saw_cancel = saw_cancel_for_keeper.clone();
                 async move {
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     saw_cancel.store(true, Ordering::SeqCst);
                     Ok(())
                 }

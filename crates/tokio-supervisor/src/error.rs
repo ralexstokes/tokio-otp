@@ -3,7 +3,7 @@ use thiserror::Error;
 /// Errors returned when building a [`Supervisor`](crate::Supervisor) from a
 /// [`SupervisorBuilder`](crate::SupervisorBuilder).
 #[derive(Debug, Error, Eq, PartialEq)]
-pub enum BuildError {
+pub enum SupervisorBuildError {
     /// Two or more children share the same id string.
     #[error("duplicate child id: {0}")]
     DuplicateChildId(String),

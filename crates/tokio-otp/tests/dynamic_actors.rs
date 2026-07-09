@@ -2,7 +2,9 @@ use std::{future::pending, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, LookupError, SendError};
-use tokio_otp::{BuildError, DynamicActorError, DynamicActorOptions, Runtime, SupervisedActors};
+use tokio_otp::{
+    DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuildError, SupervisedActors,
+};
 use tokio_supervisor::{
     ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder, SupervisorExit,
 };
@@ -18,7 +20,7 @@ fn build_runtime(graph: tokio_actor::Graph) -> Runtime {
 fn runtime_builder_without_graph_still_requires_dynamic_mode() {
     assert!(matches!(
         Runtime::builder().build(),
-        Err(BuildError::MissingGraph)
+        Err(RuntimeBuildError::MissingGraph)
     ));
 }
 
@@ -424,7 +426,7 @@ async fn timed_out_remove_actor_deregisters_runtime_added_actor() {
 async fn manual_runtime_reports_dynamic_support_as_unavailable() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("seed", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()

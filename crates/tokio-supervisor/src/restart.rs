@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::error::BuildError;
+use crate::error::SupervisorBuildError;
 
 /// Controls whether a child is restarted after it exits.
 ///
@@ -64,7 +64,7 @@ pub enum BackoffPolicy {
 }
 
 impl BackoffPolicy {
-    fn validate(self) -> Result<(), BuildError> {
+    fn validate(self) -> Result<(), SupervisorBuildError> {
         match self {
             Self::None => Ok(()),
             Self::Fixed(delay) => {
@@ -74,7 +74,7 @@ impl BackoffPolicy {
             | Self::JitteredExponential { base, factor, max } => {
                 require_non_zero_duration(base, "exponential backoff base must be non-zero")?;
                 if factor == 0 {
-                    return Err(BuildError::InvalidConfig(
+                    return Err(SupervisorBuildError::InvalidConfig(
                         "exponential backoff factor must be non-zero",
                     ));
                 }
@@ -126,15 +126,18 @@ impl RestartIntensity {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<(), BuildError> {
+    pub(crate) fn validate(&self) -> Result<(), SupervisorBuildError> {
         require_non_zero_duration(self.within, "restart intensity window must be non-zero")?;
         self.backoff.validate()
     }
 }
 
-fn require_non_zero_duration(duration: Duration, message: &'static str) -> Result<(), BuildError> {
+fn require_non_zero_duration(
+    duration: Duration,
+    message: &'static str,
+) -> Result<(), SupervisorBuildError> {
     if duration.is_zero() {
-        return Err(BuildError::InvalidConfig(message));
+        return Err(SupervisorBuildError::InvalidConfig(message));
     }
 
     Ok(())

@@ -20,13 +20,13 @@ async fn transient_child_panic_causes_restart() {
                 let starts_tx = starts_tx.clone();
                 async move {
                     starts_tx
-                        .send(ctx.generation)
+                        .send(ctx.generation())
                         .expect("test receiver dropped");
                     if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                         panic!("boom");
                     }
 
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     Ok(())
                 }
             })
@@ -53,14 +53,14 @@ async fn transient_factory_panic_causes_restart() {
         .child(
             ChildSpec::new("panic-worker", move |ctx| {
                 starts_tx
-                    .send(ctx.generation)
+                    .send(ctx.generation())
                     .expect("test receiver dropped");
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("factory boom");
                 }
 
                 async move {
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     Ok(())
                 }
             })
@@ -89,13 +89,13 @@ async fn one_for_all_panic_restarts_the_whole_group() {
         let panic_tx = panic_tx.clone();
         async move {
             panic_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 panic!("boom");
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -104,8 +104,10 @@ async fn one_for_all_panic_restarts_the_whole_group() {
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
         async move {
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
-            ctx.token.cancelled().await;
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -136,14 +138,14 @@ async fn one_for_all_factory_panic_restarts_the_whole_group() {
 
     let panic_child = ChildSpec::new("panic-worker", move |ctx| {
         panic_tx
-            .send(ctx.generation)
+            .send(ctx.generation())
             .expect("test receiver dropped");
         if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             panic!("factory boom");
         }
 
         async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -152,8 +154,10 @@ async fn one_for_all_factory_panic_restarts_the_whole_group() {
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
         async move {
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
-            ctx.token.cancelled().await;
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })

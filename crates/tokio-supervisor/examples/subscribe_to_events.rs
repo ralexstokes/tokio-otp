@@ -6,7 +6,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |ctx| async move {
             println!("worker started");
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             println!("worker shutting down");
             Ok(())
         }))

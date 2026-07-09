@@ -56,12 +56,12 @@ impl SupervisorRuntime {
             entry.nested_snapshot_state = Some(snapshot_state.clone());
 
             let child_id = entry.id.clone();
-            let ctx = ChildContext {
-                id: child_id.clone(),
+            let ctx = ChildContext::new(
+                child_id.clone(),
                 generation,
-                token: child_token,
-                supervisor_token: SupervisorToken::new(self.group_token.clone()),
-            };
+                child_token,
+                SupervisorToken::new(self.group_token.clone()),
+            );
             let factory = child.spec.factory.clone();
 
             (

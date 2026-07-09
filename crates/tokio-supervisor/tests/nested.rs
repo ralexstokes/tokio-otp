@@ -43,7 +43,7 @@ async fn nested_supervisor_failure_is_visible_to_parent_restart_policy() {
                     if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                         Err(common::test_error("nested failure"))
                     } else {
-                        ctx.token.cancelled().await;
+                        ctx.shutdown_token().cancelled().await;
                         Ok(())
                     }
                 }
@@ -81,7 +81,7 @@ async fn parent_shutdown_propagates_into_nested_supervisor() {
             let cancellations = nested_cancellations.clone();
             async move {
                 started_tx.send(()).expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 cancellations.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -116,7 +116,7 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
             let cancellations = nested_cancellations.clone();
             async move {
                 started_tx.send(()).expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 cancellations.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
@@ -126,7 +126,7 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
 
     let outer = SupervisorBuilder::new()
         .child(ChildSpec::new("anchor", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -205,7 +205,7 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
             let seed_tx = seed_tx.clone();
             async move {
                 seed_tx.send(()).expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -214,7 +214,7 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
 
     let outer = SupervisorBuilder::new()
         .child(ChildSpec::new("anchor", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -256,7 +256,7 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
                 let dynamic_cancellations = dynamic_cancellations_for_child.clone();
                 async move {
                     dynamic_tx.send(()).expect("test receiver dropped");
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     dynamic_cancellations.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 }
@@ -447,7 +447,7 @@ async fn removing_nested_supervisor_unregisters_its_control_endpoint() {
             let started_tx = started_tx.clone();
             async move {
                 started_tx.send(()).expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -456,7 +456,7 @@ async fn removing_nested_supervisor_unregisters_its_control_endpoint() {
 
     let handle = SupervisorBuilder::new()
         .child(ChildSpec::new("anchor", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()

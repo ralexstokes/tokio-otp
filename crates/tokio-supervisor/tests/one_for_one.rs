@@ -27,13 +27,13 @@ async fn failed_transient_child_restarts_and_sibling_keeps_running() {
         let flaky_tx = flaky_tx.clone();
         async move {
             flaky_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if flaky_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("boom"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -45,11 +45,11 @@ async fn failed_transient_child_restarts_and_sibling_keeps_running() {
         let sibling_tx = sibling_tx.clone();
         async move {
             sibling_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             loop {
                 tokio::select! {
-                    _ = ctx.token.cancelled() => return Ok(()),
+                    _ = ctx.shutdown_token().cancelled() => return Ok(()),
                     _ = sleep(Duration::from_millis(10)) => {
                         sibling_ticks_for_child.fetch_add(1, Ordering::SeqCst);
                     }
@@ -94,13 +94,13 @@ async fn permanent_child_restarts_after_completion() {
         let starts_tx = starts_tx.clone();
         async move {
             starts_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Ok(());
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -130,7 +130,7 @@ async fn temporary_child_does_not_restart() {
                 let starts_tx = starts_tx.clone();
                 async move {
                     starts_tx
-                        .send(ctx.generation)
+                        .send(ctx.generation())
                         .expect("test receiver dropped");
                     Err(common::test_error("no restart"))
                 }
@@ -169,13 +169,13 @@ async fn child_restart_intensity_is_isolated_per_child() {
         let child_a_tx = child_a_tx.clone();
         async move {
             child_a_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if child_a_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("boom-a"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -187,13 +187,13 @@ async fn child_restart_intensity_is_isolated_per_child() {
         let child_b_tx = child_b_tx.clone();
         async move {
             child_b_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if child_b_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("boom-b"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -239,7 +239,7 @@ async fn restart_events_follow_exit_schedule_start_restart_order() {
                     if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                         Err(common::test_error("boom"))
                     } else {
-                        ctx.token.cancelled().await;
+                        ctx.shutdown_token().cancelled().await;
                         Ok(())
                     }
                 }

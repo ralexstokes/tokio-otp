@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use tokio_supervisor::{BackoffPolicy, BuildError, ChildSpec, RestartIntensity, SupervisorBuilder};
+use tokio_supervisor::{
+    BackoffPolicy, ChildSpec, RestartIntensity, SupervisorBuildError, SupervisorBuilder,
+};
 
 #[test]
 fn empty_children_are_rejected() {
@@ -8,7 +10,7 @@ fn empty_children_are_rejected() {
         .build()
         .expect_err("building without any children must fail");
 
-    assert!(matches!(err, BuildError::EmptyChildren));
+    assert!(matches!(err, SupervisorBuildError::EmptyChildren));
 }
 
 #[test]
@@ -19,7 +21,7 @@ fn duplicate_child_ids_are_rejected() {
         .build()
         .expect_err("duplicate child ids must be rejected");
 
-    assert!(matches!(err, BuildError::DuplicateChildId(id) if id == "dup"));
+    assert!(matches!(err, SupervisorBuildError::DuplicateChildId(id) if id == "dup"));
 }
 
 #[test]
@@ -34,7 +36,7 @@ fn invalid_restart_intensity_is_rejected() {
         .build()
         .expect_err("zero-width restart windows should be rejected");
 
-    assert!(matches!(err, BuildError::InvalidConfig(_)));
+    assert!(matches!(err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]
@@ -53,7 +55,7 @@ fn invalid_jittered_restart_intensity_is_rejected() {
         .build()
         .expect_err("invalid jittered exponential backoff should be rejected");
 
-    assert!(matches!(err, BuildError::InvalidConfig(_)));
+    assert!(matches!(err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]
@@ -68,7 +70,7 @@ fn invalid_fixed_backoff_delay_is_rejected() {
         .build()
         .expect_err("zero fixed backoff delay should be rejected");
 
-    assert!(matches!(err, BuildError::InvalidConfig(_)));
+    assert!(matches!(err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]
@@ -87,7 +89,7 @@ fn invalid_exponential_restart_factor_is_rejected() {
         .build()
         .expect_err("zero exponential factor should be rejected");
 
-    assert!(matches!(err, BuildError::InvalidConfig(_)));
+    assert!(matches!(err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]
@@ -106,7 +108,7 @@ fn invalid_exponential_restart_max_is_rejected() {
         .build()
         .expect_err("zero exponential max should be rejected");
 
-    assert!(matches!(err, BuildError::InvalidConfig(_)));
+    assert!(matches!(err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]
@@ -122,7 +124,7 @@ fn invalid_child_restart_intensity_is_rejected() {
         .build()
         .expect_err("zero-width child restart windows should be rejected");
 
-    assert!(matches!(err, BuildError::InvalidConfig(_)));
+    assert!(matches!(err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]
@@ -132,7 +134,7 @@ fn empty_child_id_is_rejected() {
         .build()
         .expect_err("empty child id must be rejected");
 
-    assert!(matches!(err, BuildError::InvalidConfig(_)));
+    assert!(matches!(err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]
@@ -142,14 +144,17 @@ fn zero_channel_capacities_are_rejected() {
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
         .build()
         .expect_err("zero control channel capacity must be rejected");
-    assert!(matches!(control_err, BuildError::InvalidConfig(_)));
+    assert!(matches!(
+        control_err,
+        SupervisorBuildError::InvalidConfig(_)
+    ));
 
     let event_err = SupervisorBuilder::new()
         .event_channel_capacity(0)
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
         .build()
         .expect_err("zero event channel capacity must be rejected");
-    assert!(matches!(event_err, BuildError::InvalidConfig(_)));
+    assert!(matches!(event_err, SupervisorBuildError::InvalidConfig(_)));
 }
 
 #[test]

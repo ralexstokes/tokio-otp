@@ -16,10 +16,10 @@ usable à la carte:
 
 | Crate | Role |
 |-------|------|
-| [`tokio-otp`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp) | The front door: run each actor of a graph as its own supervised child, with one integrated `Runtime`. Re-exports the crates below via its prelude. |
-| [`tokio-supervisor`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor) | Structured supervision of async tasks: restart policies, restart intensity limits, graceful shutdown, and supervision trees. |
-| [`tokio-actor`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and blocking-task integration. |
-| [`tokio-otp-console`](https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp-console) | A live web console for watching a running supervision tree. |
+| [`tokio-otp`](https://stokes.io/tokio-otp/api/tokio_otp/index.html) | The front door: run each actor of a graph as its own supervised child, with one integrated `Runtime`. Re-exports the crates below via its prelude. |
+| [`tokio-supervisor`](https://stokes.io/tokio-otp/api/tokio_supervisor/index.html) | Structured supervision of async tasks: restart policies, restart intensity limits, graceful shutdown, and supervision trees. |
+| [`tokio-actor`](https://stokes.io/tokio-otp/api/tokio_actor/index.html) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and blocking-task integration. |
+| [`tokio-otp-console`](https://stokes.io/tokio-otp/api/tokio_otp_console/index.html) | A live web console for watching a running supervision tree. |
 
 The lower-level crates are deliberately independent:
 
@@ -71,6 +71,6 @@ binary crate and run it, or explore the closely related examples that ship in
 each crate's `examples/` directory (listed in [Where to go
 next](next-steps.md)).
 
-[`SupervisorBuilder`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`ChildSpec`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`ActorContext`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-actor
+[`SupervisorBuilder`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.SupervisorBuilder.html
+[`ChildSpec`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ChildSpec.html
+[`ActorContext`]: https://stokes.io/tokio-otp/api/tokio_actor/struct.ActorContext.html

@@ -176,7 +176,7 @@ impl Supervisor {
     }
 
     async fn run_as_child(self, ctx: ChildContext) -> ChildResult {
-        let child_id = ctx.id.clone();
+        let child_id = ctx.id().to_owned();
         let control_scope = current_nested_control_scope().unwrap_or_else(|| {
             NestedControlScope::new(
                 Arc::new(NestedControlRegistry::default()),
@@ -208,7 +208,7 @@ impl Supervisor {
                 changed = snapshots_rx.changed() => {
                     forward_nested_snapshot_change(&snapshots_rx, changed);
                 }
-                _ = ctx.token.cancelled(), if !shutdown_requested => {
+                _ = ctx.shutdown_token().cancelled(), if !shutdown_requested => {
                     shutdown_requested = true;
                     handle.shutdown();
                 }

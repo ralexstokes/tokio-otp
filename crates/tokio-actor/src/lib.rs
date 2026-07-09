@@ -156,8 +156,8 @@ pub mod prelude {
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
-        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, BuildError, CallError,
-        DrainPolicy, Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
+        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
+        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
         RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
         SpawnBlockingError, TryRecvError,
     };
@@ -172,7 +172,7 @@ pub use blocking::{
 };
 pub use builder::GraphBuilder;
 pub use context::{ActorContext, ActorRef, Reply};
-pub use error::{BuildError, CallError, GraphError, LookupError, SendError};
+pub use error::{CallError, GraphBuildError, GraphError, LookupError, SendError};
 pub use graph::{Graph, GraphHandle};
 pub use handler::{DrainPolicy, MessageHandler};
 pub use registry::{ActorRegistry, RegistryError};

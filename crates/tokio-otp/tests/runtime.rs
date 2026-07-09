@@ -4,7 +4,7 @@ use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, LookupError, SendError,
 };
-use tokio_otp::{BuildError, DynamicActorError, Runtime, SupervisedActors};
+use tokio_otp::{DynamicActorError, Runtime, RuntimeBuildError, SupervisedActors};
 use tokio_supervisor::{
     Restart, RestartIntensity, Strategy, SupervisorBuilder, SupervisorExit, SupervisorStateView,
 };
@@ -371,7 +371,7 @@ async fn send_fails_after_restart_intensity_is_exhausted() {
 fn runtime_builder_requires_a_graph() {
     assert!(matches!(
         Runtime::builder().build(),
-        Err(BuildError::MissingGraph)
+        Err(RuntimeBuildError::MissingGraph)
     ));
 }
 

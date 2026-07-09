@@ -101,7 +101,7 @@ async fn monitor_restart_allows_coalesced_generations() {
                 return Err(common::test_error("coalesced crash"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -142,7 +142,7 @@ async fn monitor_restart_errors_when_child_is_removed() {
     let handle = SupervisorBuilder::new()
         .allow_empty()
         .child(ChildSpec::new("worker", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -251,7 +251,7 @@ async fn monitor_restart_errors_synchronously_during_removal_window() {
 async fn monitor_restart_unknown_child_errors_immediately() {
     let handle = SupervisorBuilder::new()
         .child(ChildSpec::new("worker", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -274,12 +274,12 @@ fn fail_on_generations(
     ChildSpec::new(id, move |ctx| {
         let trigger_failure = trigger_failure.clone();
         async move {
-            if ctx.generation < generations_to_fail {
+            if ctx.generation() < generations_to_fail {
                 trigger_failure.notified().await;
                 return Err(common::test_error("boom"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })

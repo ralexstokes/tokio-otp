@@ -4,7 +4,7 @@ use crate::actor::BoxError;
 
 /// Errors returned while validating a graph during build.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
-pub enum BuildError {
+pub enum GraphBuildError {
     /// The graph was built without any actors.
     #[error("graph must contain at least one actor")]
     EmptyGraph,

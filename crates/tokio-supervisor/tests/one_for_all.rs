@@ -25,13 +25,13 @@ async fn restartable_child_failure_restarts_the_whole_group() {
         let trigger_tx = trigger_tx.clone();
         async move {
             trigger_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -40,8 +40,10 @@ async fn restartable_child_failure_restarts_the_whole_group() {
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
         async move {
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
-            ctx.token.cancelled().await;
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -76,13 +78,13 @@ async fn control_plane_remains_available_after_group_restart() {
         let trigger_tx = trigger_tx.clone();
         async move {
             trigger_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -91,8 +93,10 @@ async fn control_plane_remains_available_after_group_restart() {
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
         async move {
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
-            ctx.token.cancelled().await;
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -115,9 +119,9 @@ async fn control_plane_remains_available_after_group_restart() {
             let dynamic_tx = dynamic_tx.clone();
             async move {
                 dynamic_tx
-                    .send(ctx.generation)
+                    .send(ctx.generation())
                     .expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -144,7 +148,7 @@ async fn completed_temporary_child_is_not_respawned_during_group_restart() {
         let temporary_tx = temporary_tx.clone();
         async move {
             temporary_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             Ok(())
         }
@@ -158,14 +162,14 @@ async fn completed_temporary_child_is_not_respawned_during_group_restart() {
         let trigger_tx = trigger_tx.clone();
         async move {
             trigger_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 release_failure.notified().await;
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -174,8 +178,10 @@ async fn completed_temporary_child_is_not_respawned_during_group_restart() {
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
         async move {
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
-            ctx.token.cancelled().await;
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -219,13 +225,13 @@ async fn one_for_all_does_not_overlap_old_and_new_generations() {
         let trigger_tx = trigger_tx.clone();
         async move {
             trigger_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -237,10 +243,10 @@ async fn one_for_all_does_not_overlap_old_and_new_generations() {
         async move {
             let active = live_instances.fetch_add(1, Ordering::SeqCst) + 1;
             peer_tx
-                .send((ctx.generation, active))
+                .send((ctx.generation(), active))
                 .expect("test receiver dropped");
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             live_instances.fetch_sub(1, Ordering::SeqCst);
             Ok(())
         }
@@ -285,7 +291,7 @@ async fn one_for_all_restarts_after_aborting_stubborn_cooperative_then_abort_pee
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -301,7 +307,9 @@ async fn one_for_all_restarts_after_aborting_stubborn_cooperative_then_abort_pee
         let peer_tx = peer_tx.clone();
         async move {
             let _guard = peer_live_flag.guard();
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
             std::future::pending::<()>().await;
             Ok(())
         }
@@ -353,7 +361,7 @@ async fn drained_old_generation_failure_does_not_poison_later_completed_exit() {
         let trigger_tx = trigger_tx.clone();
         async move {
             trigger_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 release_failure.notified().await;
@@ -372,9 +380,11 @@ async fn drained_old_generation_failure_does_not_poison_later_completed_exit() {
         let peer_attempts = peer_attempts.clone();
         let peer_tx = peer_tx.clone();
         async move {
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
             if peer_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 return Err(common::test_error("drained old generation"));
             }
 
@@ -421,13 +431,13 @@ async fn group_restart_uses_the_failing_child_restart_intensity() {
         let trigger_tx = trigger_tx.clone();
         async move {
             trigger_tx
-                .send(ctx.generation)
+                .send(ctx.generation())
                 .expect("test receiver dropped");
             if trigger_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -441,8 +451,10 @@ async fn group_restart_uses_the_failing_child_restart_intensity() {
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
         async move {
-            peer_tx.send(ctx.generation).expect("test receiver dropped");
-            ctx.token.cancelled().await;
+            peer_tx
+                .send(ctx.generation())
+                .expect("test receiver dropped");
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -486,14 +498,14 @@ async fn group_restart_scheduled_precedes_child_restart_events() {
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
     .restart(Restart::Transient);
 
     let peer = ChildSpec::new("peer", |ctx| async move {
-        ctx.token.cancelled().await;
+        ctx.shutdown_token().cancelled().await;
         Ok(())
     })
     .restart(Restart::Permanent);
@@ -613,7 +625,7 @@ async fn removing_failed_child_abandons_pending_group_restart() {
     .restart(Restart::Transient);
 
     let peer = ChildSpec::new("peer", |ctx| async move {
-        ctx.token.cancelled().await;
+        ctx.shutdown_token().cancelled().await;
         Ok(())
     })
     .restart(Restart::Permanent);
@@ -650,9 +662,9 @@ async fn removing_failed_child_abandons_pending_group_restart() {
             let replacement_tx = replacement_tx.clone();
             async move {
                 replacement_tx
-                    .send(ctx.generation)
+                    .send(ctx.generation())
                     .expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -684,7 +696,7 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
                 return Err(common::test_error("restart group"));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })
@@ -694,13 +706,13 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
         let peer_attempts = peer_attempts.clone();
         async move {
             if peer_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 return Err(common::test_error(
                     "peer failed while group restart drained",
                 ));
             }
 
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }
     })

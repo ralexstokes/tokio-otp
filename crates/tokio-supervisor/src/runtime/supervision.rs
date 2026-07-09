@@ -1016,15 +1016,17 @@ fn classify_join_error(err: JoinError) -> ExitStatus {
     }
 }
 
-fn map_build_error_to_control(id: &str, err: crate::error::BuildError) -> ControlError {
+fn map_build_error_to_control(id: &str, err: crate::error::SupervisorBuildError) -> ControlError {
     match err {
-        crate::error::BuildError::DuplicateChildId(_) => {
+        crate::error::SupervisorBuildError::DuplicateChildId(_) => {
             ControlError::DuplicateChildId(id.to_owned())
         }
-        crate::error::BuildError::EmptyChildren => {
+        crate::error::SupervisorBuildError::EmptyChildren => {
             ControlError::InvalidConfig("supervisor requires at least one child")
         }
-        crate::error::BuildError::InvalidConfig(message) => ControlError::InvalidConfig(message),
+        crate::error::SupervisorBuildError::InvalidConfig(message) => {
+            ControlError::InvalidConfig(message)
+        }
     }
 }
 

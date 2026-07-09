@@ -5,8 +5,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_supervisor::{
-    BuildError, ChildSpec, ControlError, ExitStatusView, Restart, ShutdownMode, ShutdownPolicy,
-    SupervisorBuilder, SupervisorEvent, SupervisorExit,
+    ChildSpec, ControlError, ExitStatusView, Restart, ShutdownMode, ShutdownPolicy,
+    SupervisorBuildError, SupervisorBuilder, SupervisorEvent, SupervisorExit,
 };
 
 mod common;
@@ -16,7 +16,7 @@ fn allow_empty_builds_without_children() {
     let err = SupervisorBuilder::new()
         .build()
         .expect_err("empty supervisors remain rejected by default");
-    assert_eq!(err, BuildError::EmptyChildren);
+    assert_eq!(err, SupervisorBuildError::EmptyChildren);
 
     SupervisorBuilder::new()
         .allow_empty()
@@ -79,9 +79,9 @@ async fn allow_empty_remove_last_child_and_readd_same_id() {
             let starts_tx = initial_starts_tx.clone();
             async move {
                 starts_tx
-                    .send(ctx.generation)
+                    .send(ctx.generation())
                     .expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -241,7 +241,7 @@ async fn add_child_starts_it_immediately() {
 
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("seed", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -254,9 +254,9 @@ async fn add_child_starts_it_immediately() {
             let dynamic_tx = dynamic_tx.clone();
             async move {
                 dynamic_tx
-                    .send(ctx.generation)
+                    .send(ctx.generation())
                     .expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))
@@ -279,16 +279,16 @@ async fn remove_child_stops_it_without_restarting() {
                 let starts_tx = starts_tx.clone();
                 async move {
                     starts_tx
-                        .send(ctx.generation)
+                        .send(ctx.generation())
                         .expect("test receiver dropped");
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     Err(common::test_error("do not restart on remove"))
                 }
             })
             .restart(Restart::Transient),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -329,7 +329,7 @@ async fn remove_child_stops_it_without_restarting() {
 async fn duplicate_add_and_unknown_remove_are_rejected() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("seed", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -358,7 +358,7 @@ async fn duplicate_add_and_unknown_remove_are_rejected() {
 async fn removing_the_last_active_child_is_rejected() {
     let supervisor = SupervisorBuilder::new()
         .child(ChildSpec::new("only", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -392,7 +392,7 @@ async fn concurrent_removal_requests_are_serialized() {
                 let release = release_for_child.clone();
                 async move {
                     started_tx.send(()).expect("test receiver dropped");
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     cancelled_tx.send(()).expect("test receiver dropped");
                     release.notified().await;
                     Ok(())
@@ -401,7 +401,7 @@ async fn concurrent_removal_requests_are_serialized() {
             .restart(Restart::Transient),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -456,7 +456,7 @@ async fn removal_returns_supervisor_stopping_when_shutdown_intervenes() {
                 let cancelled_tx = cancelled_tx.clone();
                 async move {
                     started_tx.send(()).expect("test receiver dropped");
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     cancelled_tx.send(()).expect("test receiver dropped");
                     std::future::pending::<()>().await;
                     Ok(())
@@ -467,7 +467,7 @@ async fn removal_returns_supervisor_stopping_when_shutdown_intervenes() {
         )
         .child(
             ChildSpec::new("keeper", |ctx| async move {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             })
             .shutdown(fast_shutdown),
@@ -537,7 +537,7 @@ async fn try_add_child_returns_busy_when_control_queue_is_full() {
                 let release = release_for_child.clone();
                 async move {
                     started_tx.send(()).expect("test receiver dropped");
-                    ctx.token.cancelled().await;
+                    ctx.shutdown_token().cancelled().await;
                     cancelled_tx.send(()).expect("test receiver dropped");
                     release.notified().await;
                     Ok(())
@@ -546,7 +546,7 @@ async fn try_add_child_returns_busy_when_control_queue_is_full() {
             .restart(Restart::Transient),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -564,7 +564,7 @@ async fn try_add_child_returns_busy_when_control_queue_is_full() {
     let mut queued_add = tokio::spawn(async move {
         queued_handle
             .add_child(ChildSpec::new("queued", |ctx| async move {
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }))
             .await
@@ -576,7 +576,7 @@ async fn try_add_child_returns_busy_when_control_queue_is_full() {
 
     let err = handle
         .try_add_child(ChildSpec::new("busy", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .await
@@ -613,7 +613,7 @@ async fn remove_child_completes_promptly_during_restart_backoff() {
                 let starts_tx = starts_tx.clone();
                 async move {
                     starts_tx
-                        .send(ctx.generation)
+                        .send(ctx.generation())
                         .expect("test receiver dropped");
                     Err(common::test_error("restart me later"))
                 }
@@ -621,7 +621,7 @@ async fn remove_child_completes_promptly_during_restart_backoff() {
             .restart(Restart::Transient),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -688,7 +688,7 @@ async fn removed_child_does_not_restart_recycled_slot_after_backoff() {
                 let removable_tx = removable_tx.clone();
                 async move {
                     removable_tx
-                        .send(ctx.generation)
+                        .send(ctx.generation())
                         .expect("test receiver dropped");
                     Err(common::test_error("restart me later"))
                 }
@@ -696,7 +696,7 @@ async fn removed_child_does_not_restart_recycled_slot_after_backoff() {
             .restart(Restart::Transient),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
-            ctx.token.cancelled().await;
+            ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .build()
@@ -724,9 +724,9 @@ async fn removed_child_does_not_restart_recycled_slot_after_backoff() {
             let replacement_tx = replacement_tx.clone();
             async move {
                 replacement_tx
-                    .send(ctx.generation)
+                    .send(ctx.generation())
                     .expect("test receiver dropped");
-                ctx.token.cancelled().await;
+                ctx.shutdown_token().cancelled().await;
                 Ok(())
             }
         }))

@@ -17,7 +17,7 @@ use tokio_supervisor::{
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A press that jams shortly after starting.
     let press = ChildSpec::new("press", |ctx| async move {
-        println!("press starting (generation {})", ctx.generation);
+        println!("press starting (generation {})", ctx.generation());
         tokio::time::sleep(Duration::from_millis(200)).await;
         Err("paper jam".into())
     })
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A front desk that runs until asked to stop.
     let front_desk = ChildSpec::new("front-desk", |ctx| async move {
-        ctx.token.cancelled().await;
+        ctx.shutdown_token().cancelled().await;
         Ok(())
     })
     .restart(Restart::Permanent);
@@ -162,10 +162,10 @@ can start empty, return to zero children, and wait for the next `add_child`.
 We will use a higher-level version of this API in the [Dynamic
 actors](dynamic-actors.md) chapter.
 
-[`ChildSpec`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`Restart`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`RestartIntensity`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`BackoffPolicy`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`Strategy`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`ShutdownPolicy`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
-[`Supervisor::into_child_spec`]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-supervisor
+[`ChildSpec`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ChildSpec.html
+[`Restart`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.Restart.html
+[`RestartIntensity`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.RestartIntensity.html
+[`BackoffPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.BackoffPolicy.html
+[`Strategy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.Strategy.html
+[`ShutdownPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ShutdownPolicy.html
+[`Supervisor::into_child_spec`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.Supervisor.html#method.into_child_spec

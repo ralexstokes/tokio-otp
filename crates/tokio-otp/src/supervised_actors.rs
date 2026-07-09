@@ -6,7 +6,7 @@ use tokio_supervisor::{
 };
 
 use crate::{
-    error::BuildError,
+    error::RuntimeBuildError,
     runtime::{Runtime, actor_child_spec},
 };
 
@@ -28,7 +28,7 @@ pub struct SupervisedActors {
 
 impl SupervisedActors {
     /// Decomposes a graph into per-actor supervised children.
-    pub fn new(graph: Graph) -> Result<Self, BuildError> {
+    pub fn new(graph: Graph) -> Result<Self, RuntimeBuildError> {
         let actor_set = graph.into_actor_set()?;
 
         Ok(Self {
@@ -82,13 +82,16 @@ impl SupervisedActors {
     }
 
     /// Builds reusable child specs.
-    pub fn build(self) -> Result<Vec<ChildSpec>, BuildError> {
+    pub fn build(self) -> Result<Vec<ChildSpec>, RuntimeBuildError> {
         self.validate_overrides()?;
         Ok(self.actor_children())
     }
 
     /// Adds the actor children to a supervisor builder and returns the built supervisor.
-    pub fn build_supervisor(self, builder: SupervisorBuilder) -> Result<Supervisor, BuildError> {
+    pub fn build_supervisor(
+        self,
+        builder: SupervisorBuilder,
+    ) -> Result<Supervisor, RuntimeBuildError> {
         let children = self.build()?;
         let builder = children
             .into_iter()
@@ -99,7 +102,7 @@ impl SupervisedActors {
 
     /// Adds the actor children to a supervisor builder and packages the result
     /// into a [`Runtime`].
-    pub fn build_runtime(self, builder: SupervisorBuilder) -> Result<Runtime, BuildError> {
+    pub fn build_runtime(self, builder: SupervisorBuilder) -> Result<Runtime, RuntimeBuildError> {
         self.validate_overrides()?;
 
         let registry = ActorRegistry::new();
@@ -118,10 +121,10 @@ impl SupervisedActors {
         Ok(Runtime::with_dynamic(supervisor, registry, actor_factory))
     }
 
-    fn validate_overrides(&self) -> Result<(), BuildError> {
+    fn validate_overrides(&self) -> Result<(), RuntimeBuildError> {
         for actor_id in self.overrides.keys() {
             if self.actor_set.actor(actor_id).is_none() {
-                return Err(BuildError::UnknownActor {
+                return Err(RuntimeBuildError::UnknownActor {
                     actor_id: actor_id.clone(),
                 });
             }

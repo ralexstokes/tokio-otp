@@ -89,30 +89,30 @@ mod supervised_graph;
 /// `tokio-supervisor` preludes, except the conflicts documented below, plus
 /// this crate's runtime types.
 pub mod prelude {
-    // Exclusions: BuildError exists in all three crates and stays out until
-    // the error unification pass; tokio_supervisor::BoxError duplicates the
-    // tokio_actor alias exported here; console types are feature-gated and
-    // experimental, so they remain available only at the crate root.
+    // Exclusions: tokio_supervisor::BoxError is the same type as the
+    // tokio_actor alias exported here, so omitting the duplicate is permanent
+    // and harmless; console types are feature-gated and experimental, so they
+    // remain available only at the crate root.
     pub use tokio_actor::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
         BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
         BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
-        Graph, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler, RebindPolicy,
-        RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError, SpawnBlockingError,
-        TryRecvError,
+        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
+        RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
+        SpawnBlockingError, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
         ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart, RestartIntensity,
         RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy, Strategy, Supervisor,
-        SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorExit, SupervisorHandle,
-        SupervisorSnapshot, SupervisorStateView, SupervisorToken,
+        SupervisorBuildError, SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorExit,
+        SupervisorHandle, SupervisorSnapshot, SupervisorStateView, SupervisorToken,
         prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
     };
 
     pub use crate::{
-        DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuilder, RuntimeHandle,
-        SupervisedActors, SupervisedGraph,
+        DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuildError, RuntimeBuilder,
+        RuntimeHandle, SupervisedActors, SupervisedGraph,
     };
 }
 
@@ -120,7 +120,7 @@ pub mod prelude {
 pub use tokio_otp_console::{Console, ConsoleBuilder, ConsoleHandle};
 
 pub use builder::RuntimeBuilder;
-pub use error::{BuildError, DynamicActorError};
+pub use error::{DynamicActorError, RuntimeBuildError};
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
 pub use supervised_actors::SupervisedActors;
 pub use supervised_graph::SupervisedGraph;
