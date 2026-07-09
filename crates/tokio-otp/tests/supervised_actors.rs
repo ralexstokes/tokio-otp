@@ -80,7 +80,7 @@ async fn supervised_actors_restart_only_the_failed_actor() {
     let (failed_tx, failed_rx) = oneshot::channel();
 
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.declare::<String>("worker");
+    let (worker_slot, worker_ref) = builder.slot::<String>("worker");
     let frontend_ref = builder.actor(
         "frontend",
         Frontend {
@@ -88,8 +88,8 @@ async fn supervised_actors_restart_only_the_failed_actor() {
             starts: Arc::clone(&frontend_starts),
         },
     );
-    builder.actor(
-        "worker",
+    builder.define(
+        worker_slot,
         Worker {
             observed: observed_tx,
             starts: Arc::clone(&worker_starts),

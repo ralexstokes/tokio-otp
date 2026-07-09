@@ -14,20 +14,8 @@ pub enum GraphBuildError {
         /// Actor id registered twice.
         actor_id: String,
     },
-    /// An actor id was referenced with two different message types.
-    #[error(
-        "actor `{actor_id}` is used with message type `{requested}` but was first referenced with `{registered}`"
-    )]
-    MessageTypeMismatch {
-        /// Actor id with conflicting message types.
-        actor_id: String,
-        /// Message type recorded when the actor was first referenced.
-        registered: &'static str,
-        /// Message type of the conflicting reference.
-        requested: &'static str,
-    },
-    /// An actor id was declared but no implementation was registered.
-    #[error("actor `{actor_id}` was declared but never registered")]
+    /// An actor slot was opened but no implementation was registered.
+    #[error("actor `{actor_id}` slot was opened but never filled")]
     MissingActor {
         /// Actor id without an implementation.
         actor_id: String,

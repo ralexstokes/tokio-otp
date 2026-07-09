@@ -119,7 +119,7 @@
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut builder = GraphBuilder::new();
 //! builder.name("example");
-//! let counter = builder.actor("counter", Counter { total: 0 });
+//! let counter = builder.add(Counter { total: 0 });
 //! let graph = builder.build().expect("valid graph");
 //!
 //! let handle = graph.spawn()?;
@@ -133,10 +133,103 @@
 //! # }
 //! ```
 //!
+//! # Static topologies
+//!
+//! For cyclic actor graphs, derive [`Topology`] on a named-field struct whose
+//! fields are the actors. The wiring closure receives typed refs for every
+//! field before any actor is constructed.
+//!
+//! ```no_run
+//! use tokio_actor::{ActorContext, ActorRef, ActorResult, MessageHandler, Topology};
+//!
+//! enum FrontendMsg {
+//!     Feed(String),
+//!     Ack,
+//! }
+//!
+//! struct ParserMsg(String);
+//! struct SinkMsg(String);
+//!
+//! #[derive(Clone)]
+//! struct Frontend {
+//!     parser: ActorRef<ParserMsg>,
+//! }
+//!
+//! impl MessageHandler for Frontend {
+//!     type Msg = FrontendMsg;
+//!
+//!     async fn handle(
+//!         &mut self,
+//!         message: FrontendMsg,
+//!         _ctx: &ActorContext<FrontendMsg>,
+//!     ) -> ActorResult {
+//!         match message {
+//!             FrontendMsg::Feed(line) => self.parser.send(ParserMsg(line)).await?,
+//!             FrontendMsg::Ack => {}
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[derive(Clone)]
+//! struct Parser {
+//!     frontend: ActorRef<FrontendMsg>,
+//!     sink: ActorRef<SinkMsg>,
+//! }
+//!
+//! impl MessageHandler for Parser {
+//!     type Msg = ParserMsg;
+//!
+//!     async fn handle(
+//!         &mut self,
+//!         message: ParserMsg,
+//!         _ctx: &ActorContext<ParserMsg>,
+//!     ) -> ActorResult {
+//!         self.sink.send(SinkMsg(message.0)).await?;
+//!         self.frontend.send(FrontendMsg::Ack).await?;
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[derive(Clone)]
+//! struct Sink;
+//!
+//! impl MessageHandler for Sink {
+//!     type Msg = SinkMsg;
+//!
+//!     async fn handle(&mut self, _message: SinkMsg, _ctx: &ActorContext<SinkMsg>) -> ActorResult {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[derive(Topology)]
+//! struct Pipeline {
+//!     frontend: Frontend,
+//!     parser: Parser,
+//!     sink: Sink,
+//! }
+//!
+//! # fn build() -> Result<(), Box<dyn std::error::Error>> {
+//! let graph = Pipeline::graph(|refs| Pipeline {
+//!     frontend: Frontend {
+//!         parser: refs.parser.clone(),
+//!     },
+//!     parser: Parser {
+//!         frontend: refs.frontend.clone(),
+//!         sink: refs.sink.clone(),
+//!     },
+//!     sink: Sink,
+//! })?;
+//! # let _ = graph;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Cargo features
 //!
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
+//! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Enables `metrics` crate integration for counters, gauges, and histograms. |
 
 mod actor;
@@ -153,9 +246,11 @@ mod registry;
 
 pub mod prelude {
     // Keep this list mirrored by tokio_otp::prelude; its prelude test guards drift.
+    #[cfg(feature = "derive")]
+    pub use crate::Topology;
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
+        ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
         BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
         Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
         RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
@@ -170,10 +265,12 @@ pub use blocking::{
     BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions, BlockingTaskError,
     BlockingTaskFailure, BlockingTaskId, SpawnBlockingError,
 };
-pub use builder::GraphBuilder;
+pub use builder::{ActorSlot, GraphBuilder};
 pub use context::{ActorContext, ActorRef, Reply};
 pub use error::{CallError, GraphBuildError, GraphError, LookupError, SendError};
 pub use graph::{Graph, GraphHandle};
 pub use handler::{DrainPolicy, MessageHandler};
 pub use registry::{ActorRegistry, RegistryError};
 pub use tokio::sync::mpsc::error::TryRecvError;
+#[cfg(feature = "derive")]
+pub use tokio_actor_derive::Topology;

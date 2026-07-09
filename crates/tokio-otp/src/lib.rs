@@ -22,7 +22,7 @@
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut graph = GraphBuilder::new();
-//! let echo = graph.actor("echo", Echo);
+//! let echo = graph.add(Echo);
 //!
 //! let runtime = Runtime::builder()
 //!     .graph(graph.build()?)
@@ -95,11 +95,11 @@ pub mod prelude {
     // remain available only at the crate root.
     pub use tokio_actor::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
+        ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
         BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
         Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, MessageHandler,
         RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
-        SpawnBlockingError, TryRecvError,
+        SpawnBlockingError, Topology, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -124,4 +124,4 @@ pub use error::{DynamicActorError, RuntimeBuildError};
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
 pub use supervised_actors::SupervisedActors;
 pub use supervised_graph::SupervisedGraph;
-pub use tokio_actor::{DrainPolicy, MessageHandler};
+pub use tokio_actor::{DrainPolicy, MessageHandler, Topology};

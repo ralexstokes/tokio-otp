@@ -29,12 +29,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
     builder.name("backpressure");
     builder.mailbox_capacity(1);
-    let worker = builder.actor(
-        "worker",
-        ParkBeforeRecv {
-            release: release.clone(),
-        },
-    );
+    let worker = builder.add(ParkBeforeRecv {
+        release: release.clone(),
+    });
     let graph = builder.build()?;
 
     let handle = graph.spawn()?;

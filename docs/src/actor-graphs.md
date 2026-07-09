@@ -1,14 +1,19 @@
 # Actor Graphs
 
 `tokio-actor` models a group of async actors with typed mailboxes. Each actor
-declares one message type, and the graph builder mints restart-stable
-`ActorRef<M>` handles that can be stored in other actors' state.
+declares one message type, and a topology mints restart-stable `ActorRef<M>`
+handles that can be stored in other actors' state.
 
 There are no string-addressed sends and no byte envelope type. If the front
 desk sends orders to the press, the front desk owns an `ActorRef<Order>`.
 
+The usual static graph is a struct whose fields are the actors. Deriving
+`Topology` gives that struct a `graph` method; its wiring closure receives a
+refs struct with one typed `ActorRef` per field, so cycles and forward
+references do not require string lookup.
+
 ```rust,no_run
-use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, MessageHandler, Reply};
+use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, MessageHandler, Reply, Topology};
 
 struct Order(String);
 struct Parcel(String);
@@ -72,17 +77,29 @@ impl MessageHandler for Shipping {
     }
 }
 
+#[derive(Topology)]
+struct PrintShop {
+    front_desk: FrontDesk,
+    press: Press,
+    shipping: Shipping,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = GraphBuilder::new();
     builder.name("print-shop");
 
-    let shipping = builder.declare::<ShippingMsg>("shipping");
-    let press = builder.declare::<Order>("press");
-    let orders = builder.actor("front-desk", FrontDesk { press: press.clone() });
-    builder.actor("press", Press { shipping: shipping.clone() });
-    builder.actor("shipping", Shipping::default());
-    let graph = builder.build()?;
+    let graph = PrintShop::graph_with(builder, |refs| PrintShop {
+        front_desk: FrontDesk {
+            press: refs.press.clone(),
+        },
+        press: Press {
+            shipping: refs.shipping.clone(),
+        },
+        shipping: Shipping::default(),
+    })?;
+    let orders = graph.actor_ref::<Order>("front_desk")?;
+    let shipping = graph.actor_ref::<ShippingMsg>("shipping")?;
 
     let handle = graph.spawn()?;
 
@@ -101,17 +118,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 your own task or `select!` loop. `tokio-otp` uses that lower-level API for
 supervised graph children.
 
-## Builder-Time Wiring
+## Struct Topologies
 
-`GraphBuilder::actor(id, actor)` registers an actor and returns its typed
-`ActorRef<A::Msg>`. `GraphBuilder::declare::<M>(id)` creates a ref before the
-actor is registered, which solves cycles and forward references.
+`#[derive(Topology)]` supports named-field structs whose fields implement
+`Actor`. Field names become actor ids verbatim, so supervisor child ids,
+runtime lookups, tracing fields, and metric labels stay human-readable without
+participating in type checking. The generated `graph_with` accepts a
+preconfigured `GraphBuilder` for graph name, mailbox capacity, and shutdown
+timeouts; the generated `graph` uses `GraphBuilder::new()`.
 
-The builder validates:
+The derive keeps topology shape in the type system:
+
+- a field whose type is not an actor is a compile error
+- wiring a ref with the wrong message type is a compile error
+- filling the same field twice is impossible because the generated code owns
+  one actor value per field
+- a topology with no actors is a compile error
+
+## Dynamic and Advanced Builder Wiring
+
+Use `GraphBuilder` directly when actors are dynamic, generated in a loop, or
+need explicit observability names:
+
+- `builder.add(actor)` registers an actor under its unqualified type name,
+  suffixing repeats as `Worker-2`, `Worker-3`, and so on
+- `builder.actor(id, actor)` registers an actor under an explicit id
+- `builder.slot::<M>(id)` plus `builder.define(slot, actor)` opens and fills a
+  token-protected slot for hand-written cyclic wiring
+
+The direct builder still validates runtime configuration facts:
 
 - duplicate actor ids
-- message type mismatches for a declared id
-- declared actors that were never registered
+- slots that were opened but never filled
 - empty graph names, empty actor ids, and zero mailbox capacity
 
 ## Runtime Handles

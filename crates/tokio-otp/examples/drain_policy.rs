@@ -45,14 +45,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (handled_tx, mut handled_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let worker = builder.actor(
-        "worker",
-        Worker {
-            started: started_tx,
-            release: release.clone(),
-            handled: handled_tx,
-        },
-    );
+    let worker = builder.add(Worker {
+        started: started_tx,
+        release: release.clone(),
+        handled: handled_tx,
+    });
     let graph = builder.build()?;
 
     let handle = graph.spawn()?;

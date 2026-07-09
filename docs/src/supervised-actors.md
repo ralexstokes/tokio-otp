@@ -50,9 +50,9 @@ impl MessageHandler for Press {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = GraphBuilder::new();
-    let press_ref = builder.declare::<String>("press");
+    let (press_slot, press_ref) = builder.slot::<String>("press");
     let orders = builder.actor("front-desk", FrontDesk { press: press_ref });
-    builder.actor("press", Press { runs: Arc::new(AtomicUsize::new(0)), run: 0 });
+    builder.define(press_slot, Press { runs: Arc::new(AtomicUsize::new(0)), run: 0 });
     let graph = builder.build()?;
 
     let runtime = Runtime::builder()

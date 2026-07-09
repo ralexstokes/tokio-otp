@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let frontend = builder.actor("frontend", Observe::<String>::new(observed_tx));
+    let frontend = builder.add(Observe::<String>::new(observed_tx));
     let graph = builder.build()?;
 
     let handle = graph.spawn()?;

@@ -1,7 +1,11 @@
 use std::{
     any::{Any, TypeId, type_name},
     collections::HashMap,
-    sync::{Arc, OnceLock, atomic::AtomicU8},
+    marker::PhantomData,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -14,12 +18,37 @@ use crate::{
     observability::{GraphObservability, anonymous_graph_name},
 };
 
+static NEXT_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Unfilled position for one actor in a graph builder.
+///
+/// Slots are created by [`GraphBuilder::slot`] and consumed by
+/// [`GraphBuilder::define`]. The token is intentionally neither [`Clone`] nor
+/// [`Copy`], so a slot can only be filled once in ordinary Rust code.
+pub struct ActorSlot<M> {
+    builder_id: u64,
+    index: Option<usize>,
+    _message: PhantomData<fn(M)>,
+}
+
+impl<M> ActorSlot<M> {
+    fn new(builder_id: u64, index: Option<usize>) -> Self {
+        Self {
+            builder_id,
+            index,
+            _message: PhantomData,
+        }
+    }
+}
+
 /// Builder for constructing a validated actor graph.
 ///
 /// Registration methods mint restart-stable, typed [`ActorRef`]s immediately,
-/// so refs can be captured by other actors' state, including cyclically via
-/// [`declare`](Self::declare).
+/// so refs can be captured by other actors' state. Cyclic graphs use
+/// [`slot`](Self::slot) to create refs first and [`define`](Self::define) to
+/// fill the slots once actor values have been wired.
 pub struct GraphBuilder {
+    builder_id: u64,
     name: Option<String>,
     slots: Vec<Slot>,
     index: HashMap<Arc<str>, usize>,
@@ -56,6 +85,7 @@ impl GraphBuilder {
     /// 64 messages per actor.
     pub fn new() -> Self {
         Self {
+            builder_id: NEXT_BUILDER_ID.fetch_add(1, Ordering::Relaxed),
             name: None,
             slots: Vec::new(),
             index: HashMap::new(),
@@ -121,46 +151,79 @@ impl GraphBuilder {
         self
     }
 
-    /// Mints a typed ref for an actor that will be registered later.
+    /// Opens a named slot and returns its fill token plus a restart-stable ref.
     ///
-    /// This enables cyclic wiring: declare an actor, hand its ref to another
-    /// actor's state, then register the declared actor.
-    pub fn declare<M: Send + 'static>(&mut self, actor_id: &str) -> ActorRef<M> {
-        self.slot_ref::<M>(actor_id)
+    /// This enables cyclic wiring: create all refs first, hand them to actor
+    /// constructors, then consume each [`ActorSlot`] with [`define`](Self::define).
+    /// The name is fixed when the slot is opened because it is used as the
+    /// actor id in observability and runtime lookups.
+    pub fn slot<M: Send + 'static>(&mut self, actor_id: &str) -> (ActorSlot<M>, ActorRef<M>) {
+        match self.push_slot::<M>(actor_id) {
+            Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
+            None => (
+                ActorSlot::new(self.builder_id, None),
+                ActorRef::detached(actor_id.into()),
+            ),
+        }
+    }
+
+    /// Fills a previously opened actor slot.
+    ///
+    /// The slot token's message type must match the actor's message type, so a
+    /// mismatched actor is rejected by the compiler. Consuming the token makes
+    /// double fills unrepresentable in ordinary Rust code.
+    pub fn define<A: Actor>(&mut self, slot: ActorSlot<A::Msg>, actor: A) {
+        if slot.builder_id != self.builder_id {
+            self.errors.push(GraphBuildError::InvalidConfig(
+                "actor slot belongs to a different graph builder",
+            ));
+            return;
+        }
+
+        let Some(index) = slot.index else {
+            return;
+        };
+        let Some(slot) = self.slots.get_mut(index) else {
+            self.errors
+                .push(GraphBuildError::InvalidConfig("actor slot is detached"));
+            return;
+        };
+
+        debug_assert_eq!(slot.message_type, TypeId::of::<A::Msg>());
+        let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
+            unreachable!("message type enforced by ActorSlot")
+        };
+        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
     }
 
     /// Registers an actor and returns its typed, restart-stable ref.
     pub fn actor<A: Actor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
-        if actor_id.is_empty() {
-            self.errors
-                .push(GraphBuildError::InvalidConfig("actor id must not be empty"));
+        let Some((index, actor_ref)) = self.push_slot::<A::Msg>(actor_id) else {
             return ActorRef::detached(actor_id.into());
-        }
-
-        if let Some(&index) = self.index.get(actor_id) {
-            let slot = &self.slots[index];
-            if slot.message_type == TypeId::of::<A::Msg>() && slot.runner.is_some() {
-                self.errors.push(GraphBuildError::DuplicateActorId {
-                    actor_id: actor_id.to_string(),
-                });
-                return ActorRef::detached(actor_id.into());
-            }
-        }
-
-        let actor_ref = self.slot_ref::<A::Msg>(actor_id);
-        let Some(&index) = self.index.get(actor_id) else {
-            return actor_ref;
         };
         let slot = &mut self.slots[index];
-        if slot.message_type != TypeId::of::<A::Msg>() {
-            return actor_ref;
-        }
-
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
             unreachable!("message type id already verified")
         };
         slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
         actor_ref
+    }
+
+    /// Registers an actor under its unqualified type name.
+    ///
+    /// If multiple actors have the same type name, later registrations receive
+    /// `-2`, `-3`, and so on. Renaming the actor type therefore renames tracing
+    /// fields and metric labels; users who need stable observability names
+    /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
+    pub fn add<A: Actor>(&mut self, actor: A) -> ActorRef<A::Msg> {
+        let base = short_type_name(type_name::<A>());
+        let mut actor_id = base.to_owned();
+        let mut suffix = 2;
+        while self.index.contains_key(actor_id.as_str()) {
+            actor_id = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        self.actor(&actor_id, actor)
     }
 
     /// Validates the graph and returns an immutable [`Graph`].
@@ -221,37 +284,27 @@ impl GraphBuilder {
         }))
     }
 
-    /// Returns a typed ref bound to the slot for `actor_id`, creating the slot
-    /// if needed. On a message-type mismatch, records the error and returns a
-    /// detached ref that never binds.
-    fn slot_ref<M: Send + 'static>(&mut self, actor_id: &str) -> ActorRef<M> {
+    /// Creates a named slot and returns its index plus typed ref.
+    fn push_slot<M: Send + 'static>(&mut self, actor_id: &str) -> Option<(usize, ActorRef<M>)> {
         if actor_id.is_empty() {
             self.errors
                 .push(GraphBuildError::InvalidConfig("actor id must not be empty"));
-            return ActorRef::detached(actor_id.into());
+            return None;
         }
 
-        if let Some(&index) = self.index.get(actor_id) {
-            let slot = &self.slots[index];
-            if slot.message_type == TypeId::of::<M>() {
-                let Ok(core) = slot.binding.clone().downcast::<BindingCore<M>>() else {
-                    unreachable!("message type id already verified")
-                };
-                return ActorRef::from_core(&core, None);
-            }
-            self.errors.push(GraphBuildError::MessageTypeMismatch {
+        if self.index.contains_key(actor_id) {
+            self.errors.push(GraphBuildError::DuplicateActorId {
                 actor_id: actor_id.to_string(),
-                registered: slot.message_type_name,
-                requested: type_name::<M>(),
             });
-            return ActorRef::detached(actor_id.into());
+            return None;
         }
 
         let actor_id: Arc<str> = actor_id.into();
         let core = Arc::new(BindingCore::<M>::new(actor_id.clone()));
         let observability = core.observability_slot();
         let actor_ref = ActorRef::from_core(&core, None);
-        self.index.insert(actor_id.clone(), self.slots.len());
+        let index = self.slots.len();
+        self.index.insert(actor_id.clone(), index);
         self.slots.push(Slot {
             actor_id,
             message_type: TypeId::of::<M>(),
@@ -261,6 +314,29 @@ impl GraphBuilder {
             observability,
             runner: None,
         });
-        actor_ref
+        Some((index, actor_ref))
+    }
+}
+
+fn short_type_name(type_name: &str) -> &str {
+    let name = type_name
+        .split_once('<')
+        .map_or(type_name, |(name, _)| name);
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_type_name;
+
+    #[test]
+    fn short_type_name_handles_plain_path_qualified_and_generics() {
+        assert_eq!(short_type_name("Sink"), "Sink");
+        assert_eq!(short_type_name("orders::Gateway"), "Gateway");
+        assert_eq!(short_type_name("orders::Gateway<fix::Fix>"), "Gateway");
+        assert_eq!(
+            short_type_name("orders::Gateway<fix::Fix<wire::Header>, sink::Out>"),
+            "Gateway"
+        );
     }
 }

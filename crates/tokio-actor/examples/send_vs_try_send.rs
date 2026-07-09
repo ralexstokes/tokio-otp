@@ -29,14 +29,12 @@ impl Actor for OneMessageSink {
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let sink_ref = builder.actor(
-        "sink",
-        OneMessageSink {
-            observed: observed_tx,
-        },
-    );
+    let sink_ref = builder.add(OneMessageSink {
+        observed: observed_tx,
+    });
+    let sink_id = sink_ref.id().to_owned();
     let actor_set = builder.build()?.into_actor_set()?;
-    let sink = actor_set.actor("sink").expect("sink exists").clone();
+    let sink = actor_set.actor(&sink_id).expect("sink exists").clone();
     sink.set_rebind_policy(RebindPolicy::Always);
 
     let first_run = tokio::spawn({

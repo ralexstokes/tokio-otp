@@ -1,0 +1,5 @@
+error[E0271]: type mismatch resolving `<Worker as Actor>::Msg == String`
+  --> tests/ui/topology/wrong_type_define.rs:17:13
+   |
+17 |     builder.define(slot, Worker);
+   |             ^^^^^^ expected `String`, found `()`

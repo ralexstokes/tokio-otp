@@ -51,12 +51,9 @@ impl MessageHandler for Worker {
 async fn main() -> Result<(), Box<dyn Error>> {
     let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let worker = builder.actor(
-        "worker",
-        Worker {
-            completed: completed_tx,
-        },
-    );
+    let worker = builder.add(Worker {
+        completed: completed_tx,
+    });
     let graph = builder.build()?;
 
     let handle = graph.spawn()?;

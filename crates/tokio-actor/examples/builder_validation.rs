@@ -45,17 +45,25 @@ fn main() {
     duplicate.actor("worker", Idle::<()>::new());
     report("duplicate actor ids", duplicate.build());
 
-    let mut mismatch = GraphBuilder::new();
-    mismatch.declare::<u32>("worker");
-    mismatch.actor("worker", Idle::<String>::new());
-    report("message type mismatch", mismatch.build());
-
     let mut missing = GraphBuilder::new();
-    missing.declare::<String>("ghost");
-    report("declared but missing actor", missing.build());
+    let (_ghost_slot, _ghost_ref) = missing.slot::<String>("ghost");
+    report("unfilled actor slot", missing.build());
 
     let mut empty_name = GraphBuilder::new();
     empty_name.name("");
     empty_name.actor("worker", Idle::<()>::new());
     report("empty graph name", empty_name.build());
+
+    // Message-type mismatches now fail at compile time:
+    //
+    // let mut builder = GraphBuilder::new();
+    // let (slot, _worker) = builder.slot::<u32>("worker");
+    // builder.define(slot, Idle::<String>::new());
+    //
+    // Reusing a slot token also fails at compile time because `define`
+    // consumes it:
+    //
+    // let (slot, _worker) = builder.slot::<String>("worker");
+    // builder.define(slot, Idle::<String>::new());
+    // builder.define(slot, Idle::<String>::new());
 }

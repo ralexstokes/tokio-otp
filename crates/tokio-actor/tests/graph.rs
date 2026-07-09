@@ -114,9 +114,9 @@ async fn typed_pipeline_end_to_end() {
     let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let worker = builder.declare::<Job>("worker");
+    let (worker_slot, worker) = builder.slot::<Job>("worker");
     let frontend = builder.actor("frontend", Frontend { worker });
-    builder.actor("worker", Worker { seen: seen_tx });
+    builder.define(worker_slot, Worker { seen: seen_tx });
     let graph = builder.build().expect("valid graph");
 
     let (stop, task) = start_graph(&graph);
@@ -802,11 +802,11 @@ impl Actor for Paddle {
 }
 
 #[tokio::test]
-async fn cyclic_wiring_via_declare() {
+async fn cyclic_wiring_via_slot() {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let pong = builder.declare::<Ball>("pong");
+    let (pong_slot, pong) = builder.slot::<Ball>("pong");
     let ping = builder.actor(
         "ping",
         Paddle {
@@ -814,8 +814,8 @@ async fn cyclic_wiring_via_declare() {
             done: done_tx.clone(),
         },
     );
-    builder.actor(
-        "pong",
+    builder.define(
+        pong_slot,
         Paddle {
             other: ping.clone(),
             done: done_tx,
@@ -856,17 +856,8 @@ fn graph_generates_unique_anonymous_names() {
 
 #[test]
 fn build_rejects_invalid_graph_definitions() {
-    let mut mismatch = GraphBuilder::new();
-    mismatch.declare::<u32>("worker");
-    mismatch.actor("worker", Drain::<String>::new());
-    assert!(matches!(
-        mismatch.build(),
-        Err(GraphBuildError::MessageTypeMismatch { actor_id, registered, requested })
-            if actor_id == "worker" && registered.contains("u32") && requested.contains("String")
-    ));
-
     let mut missing = GraphBuilder::new();
-    missing.declare::<u32>("ghost");
+    let (_slot, _ghost) = missing.slot::<u32>("ghost");
     assert!(matches!(
         missing.build(),
         Err(GraphBuildError::MissingActor { actor_id }) if actor_id == "ghost"

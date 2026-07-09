@@ -9,12 +9,15 @@ keywords = ["tokio", "actor", "async", "concurrency"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
+default = ["derive"]
+derive = ["dep:tokio-actor-derive"]
 metrics = ["dep:metrics"]
 
 [dependencies]
 metrics = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-actor-derive = { workspace = true, optional = true }
 tokio-util.workspace = true
 tracing.workspace = true
 
@@ -23,3 +26,4 @@ metrics-exporter-prometheus.workspace = true
 metrics-util.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
+trybuild.workspace = true

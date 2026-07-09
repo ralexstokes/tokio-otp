@@ -396,10 +396,10 @@ async fn actor_set_refs_survive_individual_actor_restarts() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.declare::<Work>("worker");
+    let (worker_slot, worker_ref) = builder.slot::<Work>("worker");
     builder.actor("frontend", Forwarder { worker: worker_ref });
-    builder.actor(
-        "worker",
+    builder.define(
+        worker_slot,
         RestartingWorker {
             runs: Arc::new(AtomicUsize::new(0)),
             observed: observed_tx,

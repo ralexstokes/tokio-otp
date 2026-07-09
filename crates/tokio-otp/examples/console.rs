@@ -55,10 +55,10 @@ impl MessageHandler for Worker {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.declare::<String>("worker");
+    let (worker_slot, worker_ref) = builder.slot::<String>("worker");
     let frontend = builder.actor("frontend", Frontend { worker: worker_ref });
-    builder.actor(
-        "worker",
+    builder.define(
+        worker_slot,
         Worker {
             runs: Arc::new(AtomicUsize::new(0)),
             run: 0,

@@ -38,12 +38,9 @@ impl MessageHandler for Worker {
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let worker = builder.actor(
-        "worker",
-        Worker {
-            observed: observed_tx,
-        },
-    );
+    let worker = builder.add(Worker {
+        observed: observed_tx,
+    });
     let graph = builder.build()?;
 
     let handle = graph.spawn()?;

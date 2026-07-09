@@ -137,8 +137,9 @@ placeholder links.
 
 - Named registry aliases, e.g. `builder.alias("orders", "front-desk")`, for
   friendlier external lookup names.
-- Optional topology metadata for graph visualizers now that links are no
-  longer part of the send API.
+- Optional topology metadata for graph visualizers now that
+  `#[derive(Topology)]` provides a natural hook for recording static shape
+  without making users duplicate their wiring.
 - Codec helpers for byte boundaries, such as serde-based decode/encode
   utilities at application edges.
 - Optional message-size observability hooks for applications that can measure
