@@ -1,0 +1,14 @@
+#api-reference-link {
+    color: var(--icons);
+    display: inline-block;
+    font-size: 0.85em;
+    font-weight: 600;
+    line-height: var(--menu-bar-height);
+    padding: 0 0.5rem;
+    text-decoration: none;
+    transition: color 0.5s;
+}
+
+#api-reference-link:hover {
+    color: var(--icons-hover);
+}

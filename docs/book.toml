@@ -7,3 +7,5 @@ src = "src"
 
 [output.html]
 git-repository-url = "https://github.com/ralexstokes/tokio-otp"
+additional-css = ["api-link.css"]
+additional-js = ["api-link.js"]
