@@ -113,10 +113,12 @@ The [`Strategy`] decides who is affected when a child fails:
 When a child must stop — on supervisor shutdown, removal, or a `OneForAll`
 group restart — its [`ShutdownPolicy`] governs how:
 
-- **`ShutdownPolicy::cooperative(grace)`** — cancel the child's token and
-  wait up to `grace` for a voluntary exit; report a timeout otherwise.
+- **`ShutdownPolicy::cooperative_strict(grace)`** — cancel the child's token
+  and wait up to `grace` for a voluntary exit; abort *and report a timeout
+  error* otherwise.
 - **`ShutdownPolicy::cooperative_then_abort(grace)`** (default, 5 s grace) —
-  same, but fall back to a Tokio `abort()` if the grace period expires.
+  same, but the fallback Tokio `abort()` is expected and not reported as an
+  error.
 - **`ShutdownPolicy::abort()`** — abort immediately.
 
 One caveat inherited from Tokio itself: aborts take effect at `.await` points.

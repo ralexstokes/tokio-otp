@@ -48,9 +48,9 @@
 //!
 //! Each child has a [`ShutdownPolicy`] that controls how it is stopped:
 //!
-//! - **[`Cooperative`](ShutdownMode::Cooperative)** — cancel the child's token
-//!   and wait up to the grace period. If the child does not exit, a timeout
-//!   error is reported after aborting the Tokio task.
+//! - **[`CooperativeStrict`](ShutdownMode::CooperativeStrict)** — cancel the
+//!   child's token and wait up to the grace period. If the child does not
+//!   exit, a timeout error is reported after aborting the Tokio task.
 //! - **[`CooperativeThenAbort`](ShutdownMode::CooperativeThenAbort)** (default,
 //!   5 s grace) — cooperative with a fallback Tokio abort.
 //! - **[`Abort`](ShutdownMode::Abort)** — abort the Tokio task immediately.

@@ -79,7 +79,7 @@ impl SupervisorRuntime {
             let grace = child.runtime.definition.shutdown_policy.grace;
             match child.runtime.definition.shutdown_policy.mode {
                 ShutdownMode::Abort => {}
-                ShutdownMode::Cooperative | ShutdownMode::CooperativeThenAbort => {
+                ShutdownMode::CooperativeStrict | ShutdownMode::CooperativeThenAbort => {
                     max_grace = Some(max_grace.map_or(grace, |current| current.max(grace)));
                 }
             }
@@ -186,7 +186,7 @@ fn cooperative_timeout_names(children: &Slab<ChildEntry>) -> String {
             && child.runtime.state.is_active()
             && matches!(
                 child.runtime.definition.shutdown_policy.mode,
-                ShutdownMode::Cooperative
+                ShutdownMode::CooperativeStrict
             )
     })
 }

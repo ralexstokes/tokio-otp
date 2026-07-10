@@ -206,7 +206,7 @@ async fn cooperative_shutdown_times_out_with_stuck_child_name() {
             })
             .shutdown(ShutdownPolicy {
                 grace: common::SHORT_GRACE,
-                mode: ShutdownMode::Cooperative,
+                mode: ShutdownMode::CooperativeStrict,
             }),
         )
         .build()
@@ -271,7 +271,7 @@ async fn mixed_shutdown_only_reports_pure_cooperative_children() {
             })
             .shutdown(ShutdownPolicy {
                 grace: common::SHORT_GRACE,
-                mode: ShutdownMode::Cooperative,
+                mode: ShutdownMode::CooperativeStrict,
             }),
         )
         .build()
@@ -321,7 +321,7 @@ async fn cooperative_remove_child_times_out_with_stuck_child_name() {
             })
             .shutdown(ShutdownPolicy {
                 grace: common::SHORT_GRACE,
-                mode: ShutdownMode::Cooperative,
+                mode: ShutdownMode::CooperativeStrict,
             }),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
@@ -465,7 +465,7 @@ async fn shutdown_preempts_delayed_restart_in_cooperative_mode() {
             })
             .shutdown(ShutdownPolicy {
                 grace: common::SHORT_GRACE,
-                mode: ShutdownMode::Cooperative,
+                mode: ShutdownMode::CooperativeStrict,
             }),
         )
         .build()

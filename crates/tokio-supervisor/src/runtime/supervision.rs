@@ -511,7 +511,7 @@ impl SupervisorRuntime {
                     .map_err(map_supervisor_error_to_control)?;
                 Ok(())
             }
-            crate::shutdown::ShutdownMode::Cooperative => {
+            crate::shutdown::ShutdownMode::CooperativeStrict => {
                 self.cancel_child(key);
                 self.await_child_removal(key, Instant::now() + grace, true)
                     .await

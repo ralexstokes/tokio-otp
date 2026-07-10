@@ -96,7 +96,9 @@ async fn prelude_snapshot_helpers_walk_nested_children() {
                 ctx.shutdown_token().cancelled().await;
                 Ok(())
             })
-            .shutdown(ShutdownPolicy::cooperative(Duration::from_millis(25))),
+            .shutdown(ShutdownPolicy::cooperative_strict(Duration::from_millis(
+                25,
+            ))),
         )
         .supervisor("nested", nested)
         .build()
@@ -119,8 +121,8 @@ async fn prelude_snapshot_helpers_walk_nested_children() {
 #[test]
 fn prelude_policy_builders_cover_common_configuration() {
     assert_eq!(
-        ShutdownPolicy::cooperative(Duration::from_secs(2)),
-        ShutdownPolicy::new(Duration::from_secs(2), ShutdownMode::Cooperative)
+        ShutdownPolicy::cooperative_strict(Duration::from_secs(2)),
+        ShutdownPolicy::new(Duration::from_secs(2), ShutdownMode::CooperativeStrict)
     );
     assert_eq!(
         ShutdownPolicy::cooperative_then_abort(Duration::from_secs(3)),

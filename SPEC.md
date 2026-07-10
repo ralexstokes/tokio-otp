@@ -117,10 +117,10 @@ Two cross-cutting principles shape the API surface:
   old timestamps aged out.
 - `ShutdownPolicy { grace: Duration, mode: ShutdownMode }`, default
   `CooperativeThenAbort` with 5 s grace; constructors `new(grace, mode)`,
-  `cooperative(grace)`, `cooperative_then_abort(grace)`, `abort()` (zero
-  grace). Modes:
-  - `Cooperative` — cancel the child's token, wait up to `grace`, then abort
-    the task *and report a timeout error*;
+  `cooperative_strict(grace)`, `cooperative_then_abort(grace)`, `abort()`
+  (zero grace). Modes:
+  - `CooperativeStrict` — cancel the child's token, wait up to `grace`, then
+    abort the task *and report a timeout error*;
   - `CooperativeThenAbort` — same, but the fallback abort is not an error;
   - `Abort` — abort the tokio task immediately.
 

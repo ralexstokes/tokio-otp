@@ -3,13 +3,14 @@ use std::time::Duration;
 /// How the supervisor stops a child task during shutdown or removal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShutdownMode {
-    /// Wait for the grace period, then abort the Tokio task and report a timeout
-    /// if the task has not exited.
+    /// Like [`CooperativeThenAbort`](ShutdownMode::CooperativeThenAbort), but
+    /// failing to exit within the grace period is reported as a timeout error
+    /// instead of being aborted silently.
     ///
     /// Abort remains cooperative at Tokio poll boundaries, so a non-yielding
     /// future can outlive the shutdown call briefly. For hard-stop guarantees,
     /// isolate blocking work outside the supervised Tokio task.
-    Cooperative,
+    CooperativeStrict,
     /// Wait for the grace period, then issue a Tokio abort and return promptly.
     ///
     /// Abort remains cooperative at Tokio poll boundaries, so a non-yielding
@@ -44,11 +45,11 @@ impl ShutdownPolicy {
         Self { grace, mode }
     }
 
-    /// Cooperative shutdown: cancel the child and wait up to `grace` for it to
-    /// exit. If the child does not exit within the grace period, the task is
-    /// aborted and a timeout error is reported.
-    pub fn cooperative(grace: Duration) -> Self {
-        Self::new(grace, ShutdownMode::Cooperative)
+    /// Strict cooperative shutdown: cancel the child and wait up to `grace`
+    /// for it to exit. If the child does not exit within the grace period, the
+    /// task is aborted and a timeout error is reported.
+    pub fn cooperative_strict(grace: Duration) -> Self {
+        Self::new(grace, ShutdownMode::CooperativeStrict)
     }
 
     /// Cancel the child and wait up to `grace`; if it has not exited by then,

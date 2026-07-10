@@ -223,7 +223,7 @@ async fn timed_out_removal_terminates_the_typed_ref() {
             "dynamic",
             PendingActor,
             DynamicActorOptions {
-                shutdown: ShutdownPolicy::cooperative(Duration::from_millis(20)),
+                shutdown: ShutdownPolicy::cooperative_strict(Duration::from_millis(20)),
                 ..DynamicActorOptions::default()
             },
         )

@@ -215,7 +215,7 @@ async fn monitor_restart_errors_synchronously_during_removal_window() {
             })
             .shutdown(ShutdownPolicy::new(
                 Duration::from_secs(5),
-                ShutdownMode::Cooperative,
+                ShutdownMode::CooperativeStrict,
             )),
         )
         .build()
