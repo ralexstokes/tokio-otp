@@ -184,6 +184,7 @@
   let snapshot = null;
   let actorStats = [];
   let logEntries = [];
+  const collapsedNodes = new Set();
 
   // --- WebSocket with auto-reconnect ---
   let ws = null;
@@ -262,9 +263,17 @@
     return JSON.stringify(exit);
   }
 
-  function renderChild(child) {
+  function renderChild(child, parentPath) {
+    var path = parentPath + "/" + child.id;
     var det = document.createElement("details");
-    det.open = true;
+    det.open = !collapsedNodes.has(path);
+    det.addEventListener("toggle", function () {
+      if (det.open) {
+        collapsedNodes.delete(path);
+      } else {
+        collapsedNodes.add(path);
+      }
+    });
     var sum = document.createElement("summary");
 
     var idSpan = document.createElement("span");
@@ -327,13 +336,13 @@
     det.appendChild(sum);
 
     if (child.supervisor) {
-      var nested = renderSupervisor(child.supervisor);
+      var nested = renderSupervisor(child.supervisor, path);
       det.appendChild(nested);
     }
     return det;
   }
 
-  function renderSupervisor(sup) {
+  function renderSupervisor(sup, parentPath) {
     var frag = document.createDocumentFragment();
     var info = document.createElement("div");
     info.className = "root-node";
@@ -344,7 +353,7 @@
 
     if (sup.children && sup.children.length > 0) {
       sup.children.forEach(function (c) {
-        frag.appendChild(renderChild(c));
+        frag.appendChild(renderChild(c, parentPath));
       });
     }
     return frag;
@@ -363,7 +372,7 @@
       root.innerHTML = '<div class="empty-state">Waiting for snapshot...</div>';
       return;
     }
-    root.appendChild(renderSupervisor(snapshot));
+    root.appendChild(renderSupervisor(snapshot, ""));
   }
 
   // --- Rendering: Stats ---
