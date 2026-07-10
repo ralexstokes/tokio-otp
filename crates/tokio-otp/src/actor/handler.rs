@@ -107,20 +107,19 @@ pub trait Actor: Clone + Send + Sync + 'static {
 impl<H: Actor> RawActor for H {
     type Msg = H::Msg;
 
-    async fn run(&self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
-        let mut handler = self.clone();
-        handler.on_start(&ctx).await?;
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        self.on_start(&ctx).await?;
 
         loop {
             let message = tokio::select! {
                 biased;
                 _ = ctx.shutdown.cancelled() => {
-                    if handler.drain_policy() == DrainPolicy::Drain {
+                    if self.drain_policy() == DrainPolicy::Drain {
                         ctx.mailbox.close();
                         while let Some(message) = ctx.mailbox.recv().await {
                             ctx.myself.record_received();
                             ctx.observability.emit_message_received(&ctx.id);
-                            handler.handle(message, &ctx).await?;
+                            self.handle(message, &ctx).await?;
                         }
                     }
                     break;
@@ -133,9 +132,9 @@ impl<H: Actor> RawActor for H {
             };
             ctx.myself.record_received();
             ctx.observability.emit_message_received(&ctx.id);
-            handler.handle(message, &ctx).await?;
+            self.handle(message, &ctx).await?;
         }
 
-        handler.on_stop(&ctx).await
+        self.on_stop(&ctx).await
     }
 }

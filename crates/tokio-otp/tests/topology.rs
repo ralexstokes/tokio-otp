@@ -3,7 +3,8 @@ use std::time::Duration;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, ActorRunError, Graph, GraphBuildError,
-    GraphBuilder, RawActor, RebindPolicy, SendError, Topology,
+    GraphBuilder, RawActor, RebindPolicy, SendError, Topology, TopologyEdge, TopologyMetadata,
+    TopologyNode,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -99,10 +100,67 @@ impl Actor for Sink {
 }
 
 #[derive(Topology)]
+#[topology(metadata)]
 struct Pipeline {
+    #[topology(sends_to(parser))]
     frontend: Frontend,
+    #[topology(sends_to(frontend, sink))]
     parser: Parser,
     sink: Sink,
+}
+
+#[test]
+fn derived_topology_describes_nodes_and_edges() {
+    let metadata = Pipeline::topology_metadata();
+
+    assert_eq!(
+        metadata,
+        TopologyMetadata {
+            nodes: vec![
+                TopologyNode {
+                    name: "frontend".to_owned(),
+                    actor_type: std::any::type_name::<Frontend>().to_owned(),
+                    message_type: std::any::type_name::<FrontendMsg>().to_owned(),
+                },
+                TopologyNode {
+                    name: "parser".to_owned(),
+                    actor_type: std::any::type_name::<Parser>().to_owned(),
+                    message_type: std::any::type_name::<ParserMsg>().to_owned(),
+                },
+                TopologyNode {
+                    name: "sink".to_owned(),
+                    actor_type: std::any::type_name::<Sink>().to_owned(),
+                    message_type: std::any::type_name::<SinkMsg>().to_owned(),
+                },
+            ],
+            edges: vec![
+                TopologyEdge {
+                    source: "frontend".to_owned(),
+                    target: "parser".to_owned(),
+                    message_type: std::any::type_name::<ParserMsg>().to_owned(),
+                },
+                TopologyEdge {
+                    source: "parser".to_owned(),
+                    target: "frontend".to_owned(),
+                    message_type: std::any::type_name::<FrontendMsg>().to_owned(),
+                },
+                TopologyEdge {
+                    source: "parser".to_owned(),
+                    target: "sink".to_owned(),
+                    message_type: std::any::type_name::<SinkMsg>().to_owned(),
+                },
+            ],
+        }
+    );
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn topology_metadata_serializes() {
+    let value = serde_json::to_value(Pipeline::topology_metadata()).expect("serialize metadata");
+
+    assert_eq!(value["nodes"][0]["name"], "frontend");
+    assert_eq!(value["edges"][2]["target"], "sink");
 }
 
 #[tokio::test]
@@ -212,7 +270,7 @@ struct Park;
 impl RawActor for Park {
     type Msg = ();
 
-    async fn run(&self, ctx: ActorContext<()>) -> ActorResult {
+    async fn run(&mut self, ctx: ActorContext<()>) -> ActorResult {
         ctx.shutdown_token().cancelled().await;
         Ok(())
     }

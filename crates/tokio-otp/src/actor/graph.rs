@@ -70,7 +70,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             shutdown: actor_shutdown,
             observability,
         };
-        let actor = self.actor.clone();
+        let mut actor = self.actor.clone();
 
         Box::pin(async move {
             let _bound_mailbox = bound_mailbox;

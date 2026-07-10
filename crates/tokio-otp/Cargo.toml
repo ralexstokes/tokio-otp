@@ -13,8 +13,11 @@ default = ["derive"]
 console = ["dep:tokio-otp-console"]
 derive = ["dep:tokio-otp-derive"]
 metrics = ["tokio-supervisor/metrics"]
+serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-otp-console = { workspace = true, optional = true }
@@ -24,7 +27,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["signal", "test-util"] }
 tokio-util.workspace = true
 tracing-subscriber.workspace = true
 trybuild.workspace = true
@@ -32,3 +35,7 @@ trybuild.workspace = true
 [[example]]
 name = "console"
 required-features = ["console"]
+
+[[example]]
+name = "json_edge"
+required-features = ["serde"]

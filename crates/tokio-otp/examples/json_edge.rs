@@ -1,0 +1,43 @@
+//! Feeds newline-delimited JSON from a byte-oriented edge into a typed actor.
+
+use std::io::{BufRead, Cursor};
+
+use serde::Deserialize;
+use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, Runtime, codec};
+
+#[derive(Deserialize)]
+struct Order {
+    item: String,
+    quantity: u64,
+}
+
+#[derive(Clone)]
+struct Printer;
+
+impl Actor for Printer {
+    type Msg = Order;
+
+    async fn handle(&mut self, order: Order, _ctx: &ActorContext<Order>) -> ActorResult {
+        println!("{} x {}", order.quantity, order.item);
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut graph = GraphBuilder::new();
+    let printer = graph.add(Printer);
+    let handle = Runtime::builder().graph(graph.build()?).build()?.spawn();
+
+    // A socket or file framing layer can supply the same byte slices.
+    let input = b"{\"item\":\"labels\",\"quantity\":4}\n{\"item\":\"boxes\",\"quantity\":2}\n";
+    for frame in Cursor::new(input).split(b'\n') {
+        let frame = frame?;
+        if !frame.is_empty() {
+            codec::decode_and_send(&printer, frame).await?;
+        }
+    }
+
+    handle.shutdown_and_wait().await?;
+    Ok(())
+}

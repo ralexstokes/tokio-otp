@@ -30,7 +30,7 @@ impl<M> Clone for Drain<M> {
 impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
-    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<M>) -> ActorResult {
         while ctx.recv().await.is_some() {}
         Ok(())
     }
@@ -44,7 +44,7 @@ struct Observe {
 impl RawActor for Observe {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<String>) -> ActorResult {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("receiver alive");
         }
@@ -63,7 +63,7 @@ struct Forwarder;
 impl RawActor for Forwarder {
     type Msg = ForwardMsg;
 
-    async fn run(&self, mut ctx: ActorContext<ForwardMsg>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<ForwardMsg>) -> ActorResult {
         let mut target = None;
         while let Some(message) = ctx.recv().await {
             match message {
@@ -166,7 +166,7 @@ struct ForwardTo {
 impl RawActor for ForwardTo {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<String>) -> ActorResult {
         while let Some(message) = ctx.recv().await {
             self.target.send(message).await?;
         }
@@ -209,7 +209,7 @@ struct PendingActor;
 impl RawActor for PendingActor {
     type Msg = ();
 
-    async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+    async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
         pending::<()>().await;
         Ok(())
     }

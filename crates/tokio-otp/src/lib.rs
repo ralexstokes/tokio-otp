@@ -190,6 +190,8 @@
 //! - `examples/actor_metrics.rs` — the stats-sampler export pattern.
 //! - `examples/actor_tracing.rs`, `examples/supervisor_snapshot_trace.rs` —
 //!   tracing and snapshot observability.
+//! - `examples/json_edge.rs` — decoding byte-oriented JSON frames into typed
+//!   actor messages (requires `serde`).
 //! - `examples/console.rs` — serving the web console for a supervised
 //!   runtime.
 //!
@@ -200,11 +202,15 @@
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Forwards to `tokio-supervisor/metrics` lifecycle metrics. |
 //! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
+//! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries; serialization for topology metadata. |
 
 mod actor;
 mod builder;
+#[cfg(feature = "serde")]
+pub mod codec;
 mod runtime;
 mod supervised_actors;
+mod topology;
 
 /// Common imports for `tokio-otp` consumers.
 ///
@@ -217,12 +223,14 @@ pub mod prelude {
     // available only at the crate root.
     #[cfg(feature = "derive")]
     pub use crate::Topology;
+    #[cfg(feature = "serde")]
+    pub use crate::codec;
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
         CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
         RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
         RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt,
-        TryRecvError,
+        TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -248,3 +256,4 @@ pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
 pub use supervised_actors::SupervisedActors;
 pub use tokio::sync::mpsc::error::TryRecvError;
+pub use topology::{TopologyEdge, TopologyMetadata, TopologyNode};

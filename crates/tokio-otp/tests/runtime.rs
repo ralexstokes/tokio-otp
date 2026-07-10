@@ -36,7 +36,7 @@ impl<M> Clone for Drain<M> {
 impl<M: Send + 'static> RawActor for Drain<M> {
     type Msg = M;
 
-    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<M>) -> ActorResult {
         while ctx.recv().await.is_some() {}
         Ok(())
     }
@@ -50,7 +50,7 @@ struct Observe {
 impl RawActor for Observe {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<String>) -> ActorResult {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("receiver alive");
         }
@@ -66,7 +66,7 @@ struct ObserveOnce {
 impl RawActor for ObserveOnce {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<String>) -> ActorResult {
         let message = ctx.recv().await.expect("message received before shutdown");
         self.observed.send(message).expect("receiver alive");
         Ok(())
@@ -153,7 +153,7 @@ struct FailAfterObserve {
 impl RawActor for FailAfterObserve {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<String>) -> ActorResult {
         match ctx.recv().await {
             Some(message) => {
                 self.observed.send(message).expect("receiver alive");
@@ -381,7 +381,7 @@ struct FailOnMessage;
 impl RawActor for FailOnMessage {
     type Msg = ();
 
-    async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<()>) -> ActorResult {
         if ctx.recv().await.is_some() {
             return Err::<(), BoxError>(Box::new(io::Error::other("boom")));
         }
@@ -512,7 +512,7 @@ struct AlwaysFails;
 impl RawActor for AlwaysFails {
     type Msg = ();
 
-    async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+    async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
         Err::<(), BoxError>(Box::new(io::Error::other("boom")))
     }
 }

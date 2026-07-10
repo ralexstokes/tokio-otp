@@ -6,7 +6,11 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
-use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
+use std::collections::HashSet;
+
+use syn::{
+    Attribute, Data, DeriveInput, Field, Fields, Ident, parse_macro_input, spanned::Spanned,
+};
 
 /// Derives a static actor topology from a named-field struct.
 ///
@@ -137,7 +141,16 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 ///
 /// For dynamic graphs — actors created in a loop, or ids chosen at runtime —
 /// use `GraphBuilder` directly instead of this derive.
-#[proc_macro_derive(Topology)]
+///
+/// # Optional metadata
+///
+/// Add `#[topology(metadata)]` to generate `topology_metadata()`. Outgoing
+/// message-flow edges are declared on their source fields with
+/// `#[topology(sends_to(target, ...))]`; every target must name another field
+/// in the topology. The method returns `TopologyMetadata`
+/// with actor and message type names and the declared edges. These annotations
+/// are purely descriptive and do not change graph construction.
+#[proc_macro_derive(Topology, attributes(topology))]
 pub fn derive_topology(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand_topology(input)
@@ -146,6 +159,7 @@ pub fn derive_topology(input: TokenStream) -> TokenStream {
 }
 
 fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let emit_metadata = parse_topology_attributes(&input.attrs)?;
     let topology = input.ident;
     let vis = input.vis;
 
@@ -196,6 +210,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let field_vis: Vec<_> = fields.iter().map(|field| &field.vis).collect();
     let field_types: Vec<_> = fields.iter().map(|field| &field.ty).collect();
     let field_names: Vec<_> = field_idents.iter().map(|ident| ident.to_string()).collect();
+    let edges = parse_edges(&fields, emit_metadata, &field_idents)?;
     let slot_idents: Vec<_> = field_idents
         .iter()
         .map(|ident| format_ident!("{ident}_slot"))
@@ -225,6 +240,47 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             }
         })
         .collect();
+    let metadata_method = emit_metadata.then(|| {
+        let nodes = field_types
+            .iter()
+            .zip(&field_names)
+            .map(|(ty, name)| {
+                quote_spanned! {ty.span()=>
+                    ::tokio_otp::TopologyNode {
+                        name: ::std::string::String::from(#name),
+                        actor_type: ::std::string::String::from(::std::any::type_name::<#ty>()),
+                        message_type: ::std::string::String::from(
+                            ::std::any::type_name::<<#ty as ::tokio_otp::RawActor>::Msg>(),
+                        ),
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let edge_values = edges.iter().map(|edge| {
+            let source = &edge.source_name;
+            let target = &edge.target_name;
+            let target_ty = field_types[edge.target_index];
+            quote_spanned! {edge.target.span()=>
+                ::tokio_otp::TopologyEdge {
+                    source: ::std::string::String::from(#source),
+                    target: ::std::string::String::from(#target),
+                    message_type: ::std::string::String::from(
+                        ::std::any::type_name::<<#target_ty as ::tokio_otp::RawActor>::Msg>(),
+                    ),
+                }
+            }
+        });
+
+        quote! {
+            /// Returns the actor nodes and declared message-flow edges for this topology.
+            #vis fn topology_metadata() -> ::tokio_otp::TopologyMetadata {
+                ::tokio_otp::TopologyMetadata {
+                    nodes: ::std::vec::Vec::from([#(#nodes),*]),
+                    edges: ::std::vec::Vec::from([#(#edge_values),*]),
+                }
+            }
+        }
+    });
 
     Ok(quote! {
         #vis struct #refs {
@@ -235,6 +291,8 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         }
 
         impl #topology {
+            #metadata_method
+
             #vis fn graph(
                 wire: impl FnOnce(&#refs) -> #topology,
             ) -> ::core::result::Result<::tokio_otp::Graph, ::tokio_otp::GraphBuildError> {
@@ -260,4 +318,104 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             }
         }
     })
+}
+
+struct Edge {
+    source_name: String,
+    target: Ident,
+    target_name: String,
+    target_index: usize,
+}
+
+fn parse_topology_attributes(attrs: &[Attribute]) -> syn::Result<bool> {
+    let mut emit_metadata = false;
+
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("topology")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("metadata") {
+                if emit_metadata {
+                    return Err(meta.error("duplicate `metadata` option"));
+                }
+                emit_metadata = true;
+                Ok(())
+            } else {
+                Err(meta.error("expected `metadata`"))
+            }
+        })?;
+    }
+
+    Ok(emit_metadata)
+}
+
+fn parse_edges(
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    emit_metadata: bool,
+    field_idents: &[&Ident],
+) -> syn::Result<Vec<Edge>> {
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+
+    for field in fields {
+        let source = field.ident.as_ref().expect("named fields");
+        for attr in field
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("topology"))
+        {
+            attr.parse_nested_meta(|meta| {
+                if !meta.path.is_ident("sends_to") {
+                    return Err(meta.error("expected `sends_to(...)`"));
+                }
+                if !emit_metadata {
+                    return Err(meta.error(
+                        "`sends_to` requires `#[topology(metadata)]` on the topology struct",
+                    ));
+                }
+
+                if meta.input.peek(syn::token::Paren) {
+                    let input = meta.input.fork();
+                    let targets;
+                    syn::parenthesized!(targets in input);
+                    if targets.is_empty() {
+                        return Err(syn::Error::new_spanned(
+                            &meta.path,
+                            "expected at least one target actor field",
+                        ));
+                    }
+                }
+
+                let mut parsed_target = false;
+                meta.parse_nested_meta(|target_meta| {
+                    parsed_target = true;
+                    let Some(target) = target_meta.path.get_ident() else {
+                        return Err(target_meta.error("expected an actor field name"));
+                    };
+                    let Some(target_index) = field_idents.iter().position(|ident| *ident == target)
+                    else {
+                        return Err(target_meta.error("unknown topology actor field"));
+                    };
+                    let key = (source.to_string(), target.to_string());
+                    if !seen.insert(key.clone()) {
+                        return Err(target_meta.error("duplicate topology edge"));
+                    }
+                    edges.push(Edge {
+                        source_name: key.0,
+                        target: target.clone(),
+                        target_name: key.1,
+                        target_index,
+                    });
+                    Ok(())
+                })?;
+                if !parsed_target {
+                    return Err(syn::Error::new_spanned(
+                        &meta.path,
+                        "expected at least one target actor field",
+                    ));
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    Ok(edges)
 }
