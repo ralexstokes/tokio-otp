@@ -1,0 +1,5 @@
+error: duplicate topology edge
+  --> tests/ui/topology/metadata_duplicate_edge.rs:17:31
+   |
+17 |     #[topology(sends_to(park, park))]
+   |                               ^^^^
