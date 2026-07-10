@@ -35,7 +35,7 @@ use super::{
 
 /// Slab key for a child entry. Stable across restarts but invalidated when the
 /// child is removed from the slab.
-type ChildKey = usize;
+pub(crate) type ChildKey = usize;
 
 /// Message returned by a child task through the `JoinSet`, carrying the task
 /// result alongside the bookkeeping keys needed to correlate it back to the
@@ -684,6 +684,10 @@ impl SupervisorRuntime {
         let Some(classified) = self.consume_joined_child(joined)? else {
             return Ok(());
         };
+        self.dispatch_exit(classified).await
+    }
+
+    async fn dispatch_exit(&mut self, classified: ClassifiedExit) -> Result<(), SupervisorError> {
         self.record_exit(classified.key, classified.generation, &classified.status);
 
         if self.state == SupervisorState::Stopping {
@@ -754,7 +758,7 @@ impl SupervisorRuntime {
         }
     }
 
-    fn record_exit(&mut self, key: ChildKey, generation: u64, status: &ExitStatus) {
+    pub(crate) fn record_exit(&mut self, key: ChildKey, generation: u64, status: &ExitStatus) {
         if counts_as_running(
             self.children[key].membership,
             self.children[key].runtime.state,
@@ -891,7 +895,7 @@ impl SupervisorRuntime {
             "restarting child suffix after exit from {}",
             failing_child.id
         );
-        self.drain_for_rest_for_one_restart(&keys).await?;
+        let deferred = self.drain_for_rest_for_one_restart(&keys).await?;
         for key in keys {
             let entry = &self.children[key];
             if entry.membership != MembershipState::Active
@@ -903,6 +907,9 @@ impl SupervisorRuntime {
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
             }
+        }
+        for classified in deferred {
+            Box::pin(self.dispatch_exit(classified)).await?;
         }
         Ok(())
     }
@@ -1086,7 +1093,7 @@ impl SupervisorRuntime {
         Ok(())
     }
 
-    fn consume_joined_child(
+    pub(crate) fn consume_joined_child(
         &mut self,
         joined: Result<(Id, ChildEnvelope), JoinError>,
     ) -> Result<Option<ClassifiedExit>, SupervisorError> {
@@ -1141,11 +1148,11 @@ fn map_supervisor_error_to_control(err: SupervisorError) -> ControlError {
     }
 }
 
-struct ClassifiedExit {
-    key: ChildKey,
+pub(crate) struct ClassifiedExit {
+    pub(crate) key: ChildKey,
     instance: u64,
-    generation: u64,
-    status: ExitStatus,
+    pub(crate) generation: u64,
+    pub(crate) status: ExitStatus,
 }
 
 /// Why the supervisor is draining its join set.
@@ -1153,6 +1160,7 @@ struct ClassifiedExit {
 pub(crate) enum DrainReason {
     Shutdown,
     GroupRestart,
+    RestForOneRestart,
 }
 
 fn counts_as_running(membership: MembershipState, state: RuntimeChildState) -> bool {

@@ -101,7 +101,9 @@ Two cross-cutting principles shape the API surface:
   `Never` children are drained with the group but not respawned; the old
   generation is fully drained before the new one spawns — no overlap), or
   `RestForOne` (the failed child and children declared after it are drained,
-  then eligible children in that suffix restart in declaration order).
+  then eligible children in that suffix restart in declaration order; an
+  upstream exit observed during the drain is handled according to its policy
+  and strategy after the suffix restart completes).
 - `RestartIntensity { max_restarts: usize, within: Duration, backoff }`
   (default 5 in 30 s, no backoff; `new(max_restarts, within)` +
   `.with_backoff(policy)`): a sliding window of restart timestamps. On each

@@ -9,12 +9,40 @@ use crate::{
     event::SupervisorEvent,
     runtime::{
         child_runtime::RuntimeChildState,
-        supervision::{ChildEntry, DrainReason, MembershipState, SupervisorState},
+        supervision::{
+            ChildEntry, ChildKey, ClassifiedExit, DrainReason, MembershipState, SupervisorState,
+        },
     },
     shutdown::ShutdownMode,
 };
 
 use super::supervision::SupervisorRuntime;
+
+#[derive(Clone, Copy)]
+enum DrainScope<'a> {
+    All,
+    Subset(&'a HashSet<ChildKey>),
+}
+
+impl DrainScope<'_> {
+    fn contains(self, key: ChildKey) -> bool {
+        match self {
+            Self::All => true,
+            Self::Subset(keys) => keys.contains(&key),
+        }
+    }
+
+    fn is_drained(self, runtime: &SupervisorRuntime) -> bool {
+        match self {
+            Self::All => runtime.live_tasks == 0,
+            Self::Subset(keys) => !keys.iter().any(|&key| {
+                runtime.children.get(key).is_some_and(|child| {
+                    child.membership != MembershipState::Removed && child.runtime.state.is_active()
+                })
+            }),
+        }
+    }
+}
 
 impl SupervisorRuntime {
     pub(crate) async fn shutdown_all(&mut self) -> Result<(), SupervisorError> {
@@ -28,7 +56,8 @@ impl SupervisorRuntime {
             self.state = SupervisorState::Stopping;
             self.cancel_running_children();
             self.send_event(SupervisorEvent::SupervisorStopping);
-            self.drain_children(DrainReason::Shutdown).await?;
+            self.drain_children(DrainReason::Shutdown, DrainScope::All)
+                .await?;
             self.finish();
             Ok(())
         }
@@ -38,13 +67,15 @@ impl SupervisorRuntime {
 
     pub(crate) async fn drain_for_group_restart(&mut self) -> Result<(), SupervisorError> {
         self.cancel_running_children();
-        self.drain_children(DrainReason::GroupRestart).await
+        self.drain_children(DrainReason::GroupRestart, DrainScope::All)
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn drain_for_rest_for_one_restart(
         &mut self,
-        keys: &[usize],
-    ) -> Result<(), SupervisorError> {
+        keys: &[ChildKey],
+    ) -> Result<Vec<ClassifiedExit>, SupervisorError> {
         let keys: HashSet<_> = keys.iter().copied().collect();
         let mut cancelled = 0usize;
         for &key in self.child_order.iter().rev() {
@@ -66,82 +97,8 @@ impl SupervisorRuntime {
             }
         }
         self.running_children = self.running_children.saturating_sub(cancelled);
-        self.drain_child_subset(&keys).await
-    }
-
-    async fn drain_child_subset(&mut self, keys: &HashSet<usize>) -> Result<(), SupervisorError> {
-        let started_at = StdInstant::now();
-        let mut max_grace: Option<std::time::Duration> = None;
-        for &key in keys {
-            let Some(child) = self.children.get(key) else {
-                continue;
-            };
-            if child.membership == MembershipState::Removed || !child.runtime.state.is_active() {
-                continue;
-            }
-            let grace = child.runtime.definition.shutdown_policy.grace;
-            if matches!(
-                child.runtime.definition.shutdown_policy.mode,
-                ShutdownMode::CooperativeStrict | ShutdownMode::CooperativeThenAbort
-            ) {
-                max_grace = Some(max_grace.map_or(grace, |current| current.max(grace)));
-            }
-        }
-
-        abort_matching_children(&self.children, |key, child| {
-            keys.contains(&key)
-                && matches!(
-                    child.runtime.definition.shutdown_policy.mode,
-                    ShutdownMode::Abort
-                )
-        });
-        tokio::task::yield_now().await;
-        self.drain_ready_joins().await?;
-
-        if let Some(grace) = max_grace {
-            let deadline = Instant::now() + grace;
-            while subset_has_active_tasks(&self.children, keys) {
-                tokio::select! {
-                    maybe = self.join_set.join_next_with_id() => {
-                        let Some(joined) = maybe else { break; };
-                        self.handle_drained_join(joined)?;
-                    }
-                    _ = sleep_until(deadline) => break,
-                }
-            }
-        }
-
-        let timed_out = collect_child_names(&self.children, |key, child| {
-            keys.contains(&key)
-                && child.membership != MembershipState::Removed
-                && child.runtime.state.is_active()
-                && matches!(
-                    child.runtime.definition.shutdown_policy.mode,
-                    ShutdownMode::CooperativeStrict
-                )
-        });
-        if subset_has_active_tasks(&self.children, keys) {
-            abort_matching_children(&self.children, |key, _| keys.contains(&key));
-            tokio::task::yield_now().await;
-            self.drain_ready_joins().await?;
-        }
-        let remaining = collect_child_names(&self.children, |key, child| {
-            keys.contains(&key)
-                && child.membership != MembershipState::Removed
-                && child.runtime.state.is_active()
-        });
-        self.meta.observability.record_shutdown_duration(
-            "group_restart",
-            started_at.elapsed(),
-            None,
-        );
-        if !timed_out.is_empty() {
-            return Err(SupervisorError::ShutdownTimedOut(timed_out));
-        }
-        if !remaining.is_empty() {
-            return Err(SupervisorError::ShutdownTimedOut(remaining));
-        }
-        Ok(())
+        self.drain_children(DrainReason::RestForOneRestart, DrainScope::Subset(&keys))
+            .await
     }
 
     fn cancel_running_children(&mut self) {
@@ -160,22 +117,26 @@ impl SupervisorRuntime {
             }
         }
         self.running_children = self.running_children.saturating_sub(cancelled);
-        // Child tokens are children of group_token, so this cancels all of them.
         self.group_token.cancel();
     }
 
-    async fn drain_children(&mut self, reason: DrainReason) -> Result<(), SupervisorError> {
+    async fn drain_children(
+        &mut self,
+        reason: DrainReason,
+        scope: DrainScope<'_>,
+    ) -> Result<Vec<ClassifiedExit>, SupervisorError> {
         if matches!(reason, DrainReason::Shutdown) {
             self.command_rx.close();
         }
         let started_at = StdInstant::now();
+        let mut deferred = Vec::new();
         let mut max_grace: Option<std::time::Duration> = None;
 
-        // Use a single deadline for the whole drain equal to the maximum grace
-        // among cooperative children. This keeps shutdown and `OneForAll`
-        // restarts from compounding per-child grace periods serially.
-        for (_, child) in self.children.iter() {
-            if child.membership == MembershipState::Removed || !child.runtime.state.is_active() {
+        for (key, child) in self.children.iter() {
+            if !scope.contains(key)
+                || child.membership == MembershipState::Removed
+                || !child.runtime.state.is_active()
+            {
                 continue;
             }
 
@@ -188,92 +149,115 @@ impl SupervisorRuntime {
             }
         }
 
-        abort_matching_children(&self.children, |_, child| {
-            matches!(
-                child.runtime.definition.shutdown_policy.mode,
-                ShutdownMode::Abort
-            )
+        abort_matching_children(&self.children, |key, child| {
+            scope.contains(key)
+                && matches!(
+                    child.runtime.definition.shutdown_policy.mode,
+                    ShutdownMode::Abort
+                )
         });
         tokio::task::yield_now().await;
-        self.drain_ready_joins().await?;
-        if self.live_tasks == 0 {
-            self.meta.observability.record_shutdown_duration(
-                shutdown_operation(reason),
-                started_at.elapsed(),
-                None,
-            );
-            return Ok(());
+        self.drain_ready_joins_for_scope(scope, &mut deferred)
+            .await?;
+        if scope.is_drained(self) {
+            self.record_drain_duration(reason, started_at);
+            return Ok(deferred);
         }
 
         if let Some(grace) = max_grace {
             let deadline = Instant::now() + grace;
-            loop {
-                if self.live_tasks == 0 {
-                    break;
-                }
-
+            while !scope.is_drained(self) {
                 tokio::select! {
                     maybe = self.join_set.join_next_with_id() => {
-                        let Some(joined) = maybe else {
-                            break;
-                        };
-                        self.handle_drained_join(joined)?;
+                        let Some(joined) = maybe else { break; };
+                        self.handle_join_for_scope(joined, scope, &mut deferred)?;
                     }
-                    _ = sleep_until(deadline) => {
-                        break;
-                    }
+                    _ = sleep_until(deadline) => break,
                 }
             }
 
-            if self.live_tasks != 0 && matches!(reason, DrainReason::Shutdown) {
+            if !scope.is_drained(self) && matches!(reason, DrainReason::Shutdown) {
                 self.meta
                     .observability
                     .record_shutdown_timeout("shutdown", None);
             }
         }
 
-        let timed_out = cooperative_timeout_names(&self.children);
-        let remaining = active_task_names(&self.children);
+        let timed_out = collect_child_names(&self.children, |key, child| {
+            scope.contains(key)
+                && child.membership != MembershipState::Removed
+                && child.runtime.state.is_active()
+                && matches!(
+                    child.runtime.definition.shutdown_policy.mode,
+                    ShutdownMode::CooperativeStrict
+                )
+        });
+        let remaining = active_task_names(&self.children, scope);
         if !remaining.is_empty() {
-            abort_matching_children(&self.children, |_, _| true);
+            abort_matching_children(&self.children, |key, _| scope.contains(key));
             tokio::task::yield_now().await;
-            self.drain_ready_joins().await?;
+            self.drain_ready_joins_for_scope(scope, &mut deferred)
+                .await?;
         }
 
-        let remaining = active_task_names(&self.children);
+        let remaining = active_task_names(&self.children, scope);
+        self.record_drain_duration(reason, started_at);
         if !timed_out.is_empty() {
-            self.meta.observability.record_shutdown_duration(
-                shutdown_operation(reason),
-                started_at.elapsed(),
-                None,
-            );
             return Err(SupervisorError::ShutdownTimedOut(timed_out));
         }
-
-        if !remaining.is_empty() {
-            self.meta.observability.record_shutdown_duration(
-                shutdown_operation(reason),
-                started_at.elapsed(),
-                None,
-            );
-            return match reason {
-                DrainReason::Shutdown => Ok(()),
-                DrainReason::GroupRestart => Err(SupervisorError::ShutdownTimedOut(remaining)),
-            };
+        if !remaining.is_empty() && !matches!(reason, DrainReason::Shutdown) {
+            return Err(SupervisorError::ShutdownTimedOut(remaining));
         }
+        Ok(deferred)
+    }
 
+    async fn drain_ready_joins_for_scope(
+        &mut self,
+        scope: DrainScope<'_>,
+        deferred: &mut Vec<ClassifiedExit>,
+    ) -> Result<(), SupervisorError> {
+        loop {
+            match tokio::time::timeout(std::time::Duration::ZERO, self.join_set.join_next_with_id())
+                .await
+            {
+                Ok(Some(joined)) => self.handle_join_for_scope(joined, scope, deferred)?,
+                Ok(None) | Err(_) => return Ok(()),
+            }
+        }
+    }
+
+    fn handle_join_for_scope(
+        &mut self,
+        joined: Result<
+            (tokio::task::Id, super::supervision::ChildEnvelope),
+            tokio::task::JoinError,
+        >,
+        scope: DrainScope<'_>,
+        deferred: &mut Vec<ClassifiedExit>,
+    ) -> Result<(), SupervisorError> {
+        let Some(classified) = self.consume_joined_child(joined)? else {
+            return Ok(());
+        };
+        if scope.contains(classified.key) {
+            self.record_exit(classified.key, classified.generation, &classified.status);
+        } else {
+            deferred.push(classified);
+        }
+        Ok(())
+    }
+
+    fn record_drain_duration(&self, reason: DrainReason, started_at: StdInstant) {
         self.meta.observability.record_shutdown_duration(
             shutdown_operation(reason),
             started_at.elapsed(),
             None,
         );
-        Ok(())
     }
 }
 
 fn abort_matching_children(
     children: &Slab<ChildEntry>,
-    predicate: impl Fn(usize, &ChildEntry) -> bool,
+    predicate: impl Fn(ChildKey, &ChildEntry) -> bool,
 ) {
     for (key, child) in children.iter() {
         if child.membership != MembershipState::Removed
@@ -286,47 +270,30 @@ fn abort_matching_children(
     }
 }
 
-fn cooperative_timeout_names(children: &Slab<ChildEntry>) -> String {
-    collect_child_names(children, |_, child| {
-        child.membership != MembershipState::Removed
+fn active_task_names(children: &Slab<ChildEntry>, scope: DrainScope<'_>) -> String {
+    collect_child_names(children, |key, child| {
+        scope.contains(key)
+            && child.membership != MembershipState::Removed
             && child.runtime.state.is_active()
-            && matches!(
-                child.runtime.definition.shutdown_policy.mode,
-                ShutdownMode::CooperativeStrict
-            )
-    })
-}
-
-fn active_task_names(children: &Slab<ChildEntry>) -> String {
-    collect_child_names(children, |_, child| {
-        child.membership != MembershipState::Removed && child.runtime.state.is_active()
     })
 }
 
 fn collect_child_names(
     children: &Slab<ChildEntry>,
-    predicate: impl Fn(usize, &ChildEntry) -> bool,
+    predicate: impl Fn(ChildKey, &ChildEntry) -> bool,
 ) -> String {
     children
         .iter()
         .filter(|(key, child)| predicate(*key, child))
-        .map(|(_, child)| child)
-        .map(|child| child.id.as_str())
+        .map(|(_, child)| child.id.as_str())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn subset_has_active_tasks(children: &Slab<ChildEntry>, keys: &HashSet<usize>) -> bool {
-    keys.iter().any(|&key| {
-        children.get(key).is_some_and(|child| {
-            child.membership != MembershipState::Removed && child.runtime.state.is_active()
-        })
-    })
 }
 
 fn shutdown_operation(reason: DrainReason) -> &'static str {
     match reason {
         DrainReason::Shutdown => "shutdown",
         DrainReason::GroupRestart => "group_restart",
+        DrainReason::RestForOneRestart => "rest_for_one_restart",
     }
 }
