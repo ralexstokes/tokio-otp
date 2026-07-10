@@ -90,6 +90,7 @@ impl<H: Actor> RawActor for H {
                     if handler.drain_policy() == DrainPolicy::Drain {
                         ctx.mailbox.close();
                         while let Some(message) = ctx.mailbox.recv().await {
+                            ctx.myself.record_received();
                             ctx.observability.emit_message_received(&ctx.id);
                             handler.handle(message, &ctx).await?;
                         }
@@ -102,6 +103,7 @@ impl<H: Actor> RawActor for H {
             let Some(message) = message else {
                 break;
             };
+            ctx.myself.record_received();
             ctx.observability.emit_message_received(&ctx.id);
             handler.handle(message, &ctx).await?;
         }

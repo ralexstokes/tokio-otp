@@ -1,16 +1,15 @@
 use std::{
     any::{Any, TypeId, type_name},
     collections::HashMap,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use thiserror::Error;
 
 use crate::{
-    binding::{BindingCore, BindingLifecycle},
+    binding::{ActorStats, BindingCore, BindingLifecycle},
     context::ActorRef,
     error::LookupError,
-    observability::GraphObservability,
 };
 
 #[derive(Clone)]
@@ -20,7 +19,6 @@ struct RegistryEntry {
     message_type_name: &'static str,
     binding: Arc<dyn Any + Send + Sync>,
     binding_lifecycle: Arc<dyn BindingLifecycle>,
-    observability: Arc<OnceLock<GraphObservability>>,
 }
 
 impl std::fmt::Debug for RegistryEntry {
@@ -83,6 +81,19 @@ impl ActorRegistry {
         actor_ids
     }
 
+    /// Returns point-in-time stats for all registered actors, sorted by id.
+    pub fn stats(&self) -> Vec<ActorStats> {
+        let mut stats = self
+            .entries
+            .read()
+            .expect("actor registry rwlock poisoned")
+            .values()
+            .map(|entry| entry.binding_lifecycle.stats())
+            .collect::<Vec<_>>();
+        stats.sort_unstable_by(|left, right| left.actor_id.cmp(&right.actor_id));
+        stats
+    }
+
     /// Returns a stable typed actor reference for external callers.
     pub fn actor_ref<M: Send + 'static>(&self, actor_id: &str) -> Result<ActorRef<M>, LookupError> {
         self.actor_ref_for_source(actor_id, None)
@@ -122,7 +133,6 @@ impl ActorRegistry {
         actor_id: Arc<str>,
         message_type: TypeId,
         message_type_name: &'static str,
-        observability: Arc<OnceLock<GraphObservability>>,
         binding: Arc<dyn Any + Send + Sync>,
         binding_lifecycle: Arc<dyn BindingLifecycle>,
     ) -> Result<(), RegistryError> {
@@ -146,7 +156,6 @@ impl ActorRegistry {
                 message_type_name,
                 binding,
                 binding_lifecycle,
-                observability,
             },
         );
         Ok(())
@@ -182,7 +191,7 @@ impl ActorRegistry {
         Ok(ActorRef::from_parts(
             entry.actor_id,
             binding.subscribe(),
-            entry.observability,
+            binding.stats_counters(),
             source_actor_id.cloned(),
         ))
     }

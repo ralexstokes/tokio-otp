@@ -1,8 +1,70 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use tokio::sync::{mpsc, watch};
 
 use crate::{error::SendError, observability::GraphObservability};
+
+/// A point-in-time snapshot of one actor's message and mailbox statistics.
+///
+/// Message counters accumulate for the lifetime of the actor binding and
+/// therefore survive restarts. Mailbox fields describe the currently bound
+/// incarnation and are zero while no mailbox is bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActorStats {
+    /// Actor id used to correlate these stats with supervisor snapshots.
+    pub actor_id: String,
+    /// Messages removed from the mailbox by the actor.
+    pub messages_received: u64,
+    /// Messages accepted by `send` or `try_send`.
+    pub messages_accepted: u64,
+    /// `send` or `try_send` calls that returned an error.
+    pub sends_rejected: u64,
+    /// Messages currently occupying the bound mailbox.
+    pub mailbox_depth: usize,
+    /// Maximum capacity of the currently bound mailbox.
+    pub mailbox_capacity: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ActorStatsCounters {
+    messages_received: AtomicU64,
+    messages_accepted: AtomicU64,
+    sends_rejected: AtomicU64,
+}
+
+impl ActorStatsCounters {
+    pub(crate) fn record_received(&self) {
+        self.messages_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_send(&self, accepted: bool) {
+        let counter = if accepted {
+            &self.messages_accepted
+        } else {
+            &self.sends_rejected
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        actor_id: &str,
+        mailbox_depth: usize,
+        mailbox_capacity: usize,
+    ) -> ActorStats {
+        ActorStats {
+            actor_id: actor_id.to_owned(),
+            messages_received: self.messages_received.load(Ordering::Relaxed),
+            messages_accepted: self.messages_accepted.load(Ordering::Relaxed),
+            sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
+            mailbox_depth,
+            mailbox_capacity,
+        }
+    }
+}
 
 /// Sender for one bound mailbox instance of an actor.
 pub(crate) struct MailboxRef<M> {
@@ -44,6 +106,11 @@ impl<M> MailboxRef<M> {
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
         self.sender.same_channel(&other.sender)
     }
+
+    pub(crate) fn usage(&self) -> (usize, usize) {
+        let capacity = self.sender.max_capacity();
+        (capacity.saturating_sub(self.sender.capacity()), capacity)
+    }
 }
 
 /// The current lifecycle state of an actor mailbox binding.
@@ -83,6 +150,7 @@ pub enum RebindPolicy {
 pub(crate) trait BindingLifecycle: Send + Sync {
     fn unbind(&self);
     fn terminate(&self);
+    fn stats(&self) -> ActorStats;
 }
 
 /// Long-lived binding slot for one actor's current mailbox.
@@ -93,7 +161,7 @@ pub(crate) trait BindingLifecycle: Send + Sync {
 pub(crate) struct BindingCore<M> {
     actor_id: Arc<str>,
     current: watch::Sender<BindingState<M>>,
-    observability: Arc<OnceLock<GraphObservability>>,
+    stats: Arc<ActorStatsCounters>,
 }
 
 impl<M> BindingCore<M> {
@@ -102,7 +170,7 @@ impl<M> BindingCore<M> {
         Self {
             actor_id,
             current,
-            observability: Arc::new(OnceLock::new()),
+            stats: Arc::new(ActorStatsCounters::default()),
         }
     }
 
@@ -114,12 +182,17 @@ impl<M> BindingCore<M> {
         self.current.subscribe()
     }
 
-    pub(crate) fn observability_slot(&self) -> Arc<OnceLock<GraphObservability>> {
-        Arc::clone(&self.observability)
+    pub(crate) fn stats_counters(&self) -> Arc<ActorStatsCounters> {
+        Arc::clone(&self.stats)
     }
 
-    pub(crate) fn set_observability(&self, observability: GraphObservability) {
-        let _ = self.observability.set(observability);
+    pub(crate) fn stats(&self) -> ActorStats {
+        let state = self.current.borrow();
+        let (depth, capacity) = match &*state {
+            BindingState::Bound(mailbox) => mailbox.usage(),
+            BindingState::Unbound | BindingState::Terminated => (0, 0),
+        };
+        self.stats.snapshot(&self.actor_id, depth, capacity)
     }
 
     fn bind(&self, mailbox: MailboxRef<M>) {
@@ -152,6 +225,10 @@ impl<M: Send + 'static> BindingLifecycle for BindingCore<M> {
 
     fn terminate(&self) {
         BindingCore::terminate(self);
+    }
+
+    fn stats(&self) -> ActorStats {
+        BindingCore::stats(self)
     }
 }
 

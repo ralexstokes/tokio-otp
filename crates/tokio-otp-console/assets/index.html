@@ -182,6 +182,7 @@
 
   const MAX_LOG = 500;
   let snapshot = null;
+  let actorStats = [];
   let logEntries = [];
 
   // --- WebSocket with auto-reconnect ---
@@ -227,6 +228,10 @@
         renderStats();
       } else if (msg.type === "event") {
         addLogEntry(msg.data);
+      } else if (msg.type === "actor_stats") {
+        actorStats = msg.data || [];
+        renderTree();
+        renderStats();
       }
     };
   }
@@ -286,6 +291,18 @@
       meta.textContent = parts.join(" | ");
     }
     sum.appendChild(meta);
+
+    var actor = actorStats.find(function (stats) { return stats.actor_id === child.id; });
+    if (actor) {
+      var actorMeta = document.createElement("span");
+      actorMeta.className = "meta";
+      actorMeta.textContent =
+        "mailbox:" + actor.mailbox_depth + "/" + actor.mailbox_capacity +
+        " | recv:" + actor.messages_received +
+        " | accepted:" + actor.messages_accepted +
+        " | rejected:" + actor.sends_rejected;
+      sum.appendChild(actorMeta);
+    }
 
     var exitStr = formatExit(child.last_exit);
     if (exitStr) {
@@ -384,7 +401,16 @@
         '<div class="stat-row"><span class="stat-label">Starting</span><span class="stat-value" style="color:#60a5fa">' + c.Starting + '</span></div>' +
         '<div class="stat-row"><span class="stat-label">Stopping</span><span class="stat-value" style="color:#fbbf24">' + c.Stopping + '</span></div>' +
         '<div class="stat-row"><span class="stat-label">Stopped</span><span class="stat-value" style="color:#9ca3af">' + c.Stopped + '</span></div>' +
-      '</div>';
+      '</div>' +
+      actorStats.map(function (actor) {
+        return '<div class="stat-card">' +
+          '<div class="stat-row"><span class="stat-label">Actor</span><span class="stat-value">' + esc(actor.actor_id) + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Mailbox</span><span class="stat-value">' + actor.mailbox_depth + ' / ' + actor.mailbox_capacity + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Received</span><span class="stat-value">' + actor.messages_received + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Accepted</span><span class="stat-value">' + actor.messages_accepted + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Rejected</span><span class="stat-value">' + actor.sends_rejected + '</span></div>' +
+        '</div>';
+      }).join('');
   }
 
   // --- Rendering: Event Log ---

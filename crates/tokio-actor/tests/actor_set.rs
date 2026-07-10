@@ -68,6 +68,26 @@ impl RawActor for StopsOnShutdown {
     }
 }
 
+#[derive(Clone)]
+struct GatedDrain {
+    started: mpsc::UnboundedSender<()>,
+    release: Arc<Notify>,
+    received: mpsc::UnboundedSender<()>,
+}
+
+impl RawActor for GatedDrain {
+    type Msg = u32;
+
+    async fn run(&self, mut ctx: ActorContext<u32>) -> ActorResult {
+        self.started.send(()).expect("receiver alive");
+        self.release.notified().await;
+        while let Some(_message) = ctx.recv().await {
+            self.received.send(()).expect("receiver alive");
+        }
+        Ok(())
+    }
+}
+
 fn start_actor(actor: RunnableActor) -> (CancellationToken, JoinHandle<Result<(), ActorRunError>>) {
     let stop = CancellationToken::new();
     let task = tokio::spawn({
@@ -90,6 +110,61 @@ async fn stop_actor(
 
 fn single_actor(actor_set: &ActorSet, id: &str) -> RunnableActor {
     actor_set.actor(id).expect("actor exists").clone()
+}
+
+#[tokio::test]
+async fn actor_stats_track_send_receive_and_bounded_mailbox() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    builder.mailbox_capacity(2);
+    let worker_ref = builder.actor(
+        "worker",
+        GatedDrain {
+            started: started_tx,
+            release: Arc::clone(&release),
+            received: received_tx,
+        },
+    );
+    let actor_set = builder
+        .build()
+        .expect("valid graph")
+        .into_actor_set()
+        .expect("actor set");
+    let worker = single_actor(&actor_set, "worker");
+    let (stop, task) = start_actor(worker);
+
+    started_rx.recv().await.expect("actor started");
+    worker_ref.send(1).await.expect("send accepted");
+    worker_ref.try_send(2).expect("try_send accepted");
+    assert!(matches!(
+        worker_ref.try_send(3),
+        Err(SendError::MailboxFull { .. })
+    ));
+
+    assert_eq!(
+        worker_ref.stats(),
+        tokio_actor::ActorStats {
+            actor_id: "worker".to_owned(),
+            messages_received: 0,
+            messages_accepted: 2,
+            sends_rejected: 1,
+            mailbox_depth: 2,
+            mailbox_capacity: 2,
+        }
+    );
+    assert_eq!(actor_set.stats(), vec![worker_ref.stats()]);
+
+    release.notify_one();
+    received_rx.recv().await.expect("first message received");
+    received_rx.recv().await.expect("second message received");
+    let stats = worker_ref.stats();
+    assert_eq!(stats.messages_received, 2);
+    assert_eq!(stats.mailbox_depth, 0);
+    assert_eq!(stats.mailbox_capacity, 2);
+
+    stop_actor(stop, task).await.expect("actor stops");
 }
 
 #[tokio::test(start_paused = true)]

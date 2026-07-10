@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, watch};
 use tokio_actor::{
-    ActorRef, ActorRegistry, RawActor, RebindPolicy, RegistryError, RunnableActor,
+    ActorRef, ActorRegistry, ActorStats, RawActor, RebindPolicy, RegistryError, RunnableActor,
     RunnableActorFactory,
 };
 use tokio_supervisor::{
@@ -266,6 +266,16 @@ impl RuntimeHandle {
         self.supervisor.snapshot()
     }
 
+    /// Returns point-in-time stats for all actors registered with this runtime.
+    ///
+    /// Runtimes created directly from a supervisor have no actor registry and
+    /// return an empty collection.
+    pub fn actor_stats(&self) -> Vec<ActorStats> {
+        self.dynamic
+            .as_ref()
+            .map_or_else(Vec::new, |dynamic| dynamic.registry.stats())
+    }
+
     /// Returns a watch receiver that updates when the snapshot changes.
     pub fn subscribe_snapshots(&self) -> watch::Receiver<SupervisorSnapshot> {
         self.supervisor.subscribe_snapshots()
@@ -277,9 +287,27 @@ impl RuntimeHandle {
     /// Returns a [`ConsoleBuilder`](tokio_otp_console::ConsoleBuilder) pre-wired
     /// with this runtime's snapshot and event channels.
     pub fn console(&self) -> tokio_otp_console::ConsoleBuilder {
+        let dynamic = self.dynamic.clone();
         tokio_otp_console::Console::builder()
             .snapshots(self.supervisor.subscribe_snapshots())
             .events(self.supervisor.event_sender())
+            .actor_stats(move || {
+                dynamic.as_ref().map_or_else(Vec::new, |dynamic| {
+                    dynamic
+                        .registry
+                        .stats()
+                        .into_iter()
+                        .map(|stats| tokio_otp_console::ActorStatsView {
+                            actor_id: stats.actor_id,
+                            messages_received: stats.messages_received,
+                            messages_accepted: stats.messages_accepted,
+                            sends_rejected: stats.sends_rejected,
+                            mailbox_depth: stats.mailbox_depth,
+                            mailbox_capacity: stats.mailbox_capacity,
+                        })
+                        .collect()
+                })
+            })
     }
 }
 

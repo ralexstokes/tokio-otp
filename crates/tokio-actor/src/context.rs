@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    sync::{Arc, OnceLock},
-};
+use std::{fmt, sync::Arc};
 
 use tokio::sync::{
     mpsc::{self, error::TryRecvError},
@@ -10,9 +7,9 @@ use tokio::sync::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    binding::{BindingCore, BindingState, MailboxRef},
+    binding::{ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxRef},
     error::{CallError, SendError},
-    observability::{GraphObservability, MessageOperation, SendRejection},
+    observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
     registry::ActorRegistry,
 };
 
@@ -25,7 +22,7 @@ use crate::{
 pub struct ActorRef<M> {
     actor_id: Arc<str>,
     binding: watch::Receiver<BindingState<M>>,
-    observability: Arc<OnceLock<GraphObservability>>,
+    stats: Arc<ActorStatsCounters>,
     source_actor_id: Option<Arc<str>>,
 }
 
@@ -34,7 +31,7 @@ impl<M> Clone for ActorRef<M> {
         Self {
             actor_id: Arc::clone(&self.actor_id),
             binding: self.binding.clone(),
-            observability: Arc::clone(&self.observability),
+            stats: Arc::clone(&self.stats),
             source_actor_id: self.source_actor_id.clone(),
         }
     }
@@ -53,7 +50,7 @@ impl<M> ActorRef<M> {
         Self::from_parts(
             core.actor_id().clone(),
             core.subscribe(),
-            core.observability_slot(),
+            core.stats_counters(),
             source_actor_id,
         )
     }
@@ -61,13 +58,13 @@ impl<M> ActorRef<M> {
     pub(crate) fn from_parts(
         actor_id: Arc<str>,
         binding: watch::Receiver<BindingState<M>>,
-        observability: Arc<OnceLock<GraphObservability>>,
+        stats: Arc<ActorStatsCounters>,
         source_actor_id: Option<Arc<str>>,
     ) -> Self {
         Self {
             actor_id,
             binding,
-            observability,
+            stats,
             source_actor_id,
         }
     }
@@ -80,6 +77,16 @@ impl<M> ActorRef<M> {
     /// Returns the target actor id.
     pub fn id(&self) -> &str {
         &self.actor_id
+    }
+
+    /// Returns a point-in-time snapshot of this actor's message counters and
+    /// current mailbox usage.
+    pub fn stats(&self) -> ActorStats {
+        let (depth, capacity) = match &*self.binding.borrow() {
+            BindingState::Bound(mailbox) => mailbox.usage(),
+            BindingState::Unbound | BindingState::Terminated => (0, 0),
+        };
+        self.stats.snapshot(&self.actor_id, depth, capacity)
     }
 
     fn current_mailbox(&self) -> Result<MailboxRef<M>, SendError> {
@@ -108,42 +115,32 @@ impl<M> ActorRef<M> {
         let mut message = message;
 
         loop {
-            let started_at = self.start_message_timing();
             let mailbox = match self.wait_for_next_mailbox(&mut binding).await {
                 Ok(mailbox) => mailbox,
                 Err(error) => {
-                    let result = Err(error);
-                    self.observe_send(
-                        MessageOperation::Send,
-                        Self::finish_message_timing(started_at),
-                        &result,
-                    );
-                    return result;
+                    self.observe_send(MessageOperation::Send, Some(send_rejection(&error)));
+                    self.stats.record_send(false);
+                    return Err(error);
                 }
             };
 
             match mailbox.send_retaining(message).await {
                 Ok(()) => {
-                    let result = Ok(());
-                    self.observe_send(
-                        MessageOperation::Send,
-                        Self::finish_message_timing(started_at),
-                        &result,
-                    );
-                    return result;
+                    self.observe_send(MessageOperation::Send, None);
+                    self.stats.record_send(true);
+                    return Ok(());
                 }
                 Err(returned) => {
-                    let result = Err(SendError::MailboxClosed {
-                        actor_id: self.actor_id.to_string(),
-                    });
-                    self.observe_send(
-                        MessageOperation::Send,
-                        Self::finish_message_timing(started_at),
-                        &result,
-                    );
+                    self.observe_send(MessageOperation::Send, Some(SendRejection::MailboxClosed));
                     message = returned;
-                    self.wait_for_rebind_or_termination(&mut binding, &mailbox)
-                        .await?;
+                    if let Err(error) = self
+                        .wait_for_rebind_or_termination(&mut binding, &mailbox)
+                        .await
+                    {
+                        self.observe_send(MessageOperation::Send, Some(send_rejection(&error)));
+                        self.stats.record_send(false);
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -151,16 +148,15 @@ impl<M> ActorRef<M> {
 
     /// Attempts to send a message without waiting for mailbox capacity.
     pub fn try_send(&self, message: M) -> Result<(), SendError> {
-        let started_at = self.start_message_timing();
         let result = match self.current_mailbox() {
             Ok(mailbox) => mailbox.try_send(message),
             Err(error) => Err(error),
         };
         self.observe_send(
             MessageOperation::TrySend,
-            Self::finish_message_timing(started_at),
-            &result,
+            result.as_ref().err().map(send_rejection),
         );
+        self.stats.record_send(result.is_ok());
         result
     }
 
@@ -230,31 +226,17 @@ impl<M> ActorRef<M> {
         }
     }
 
-    fn start_message_timing(&self) -> Option<std::time::Instant> {
-        self.observability
-            .get()
-            .and_then(GraphObservability::start_message_timing)
+    fn observe_send(&self, operation: MessageOperation, rejection: Option<SendRejection>) {
+        trace_actor_message(
+            self.source_actor_id.as_deref(),
+            &self.actor_id,
+            operation,
+            rejection,
+        );
     }
 
-    fn finish_message_timing(started_at: Option<std::time::Instant>) -> std::time::Duration {
-        GraphObservability::finish_message_timing(started_at)
-    }
-
-    fn observe_send(
-        &self,
-        operation: MessageOperation,
-        duration: std::time::Duration,
-        result: &Result<(), SendError>,
-    ) {
-        if let Some(observability) = self.observability.get() {
-            observability.emit_actor_message(
-                self.source_actor_id.as_deref(),
-                &self.actor_id,
-                operation,
-                duration,
-                result.as_ref().err().map(send_rejection),
-            );
-        }
+    pub(crate) fn record_received(&self) {
+        self.stats.record_received();
     }
 }
 
@@ -341,6 +323,7 @@ impl<M: Send + 'static> ActorContext<M> {
         };
 
         if message.is_some() {
+            self.myself.record_received();
             self.observability.emit_message_received(&self.id);
         }
 
@@ -364,6 +347,7 @@ impl<M: Send + 'static> ActorContext<M> {
     pub fn try_recv(&mut self) -> Result<M, TryRecvError> {
         let message = self.mailbox.try_recv();
         if message.is_ok() {
+            self.myself.record_received();
             self.observability.emit_message_received(&self.id);
         }
         message

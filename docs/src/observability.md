@@ -4,7 +4,7 @@ The crates expose four views into a running system:
 
 1. supervisor events
 2. supervisor snapshots
-3. `tracing` and optional `metrics`
+3. `tracing`, pull-based actor stats, and optional supervisor metrics
 4. the `tokio-otp-console` web UI
 
 ## Events And Snapshots
@@ -25,31 +25,31 @@ tokio::spawn(async move {
 `subscribe_snapshots()` returns a `watch::Receiver` that updates when the
 snapshot changes.
 
-## Tracing And Metrics
+## Tracing And Stats
 
 `tokio-actor` emits graph, actor, mailbox, and message tracing events. Message
 events include `source_actor_id` when the sender is another actor; external
 sends through an `ActorRef` have no source actor.
 
-The old external-entry and byte-size fields are gone. Typed messages do not have a
-crate-level byte length, so input sizing belongs at the application boundary.
+Every `ActorRef` exposes cumulative message counters and current mailbox usage:
 
-With the `metrics` feature, actor metrics include:
+```rust,ignore
+let stats = worker.stats();
+println!("received={} queued={}/{}",
+    stats.messages_received, stats.mailbox_depth, stats.mailbox_capacity);
+```
 
-- `actor_graph.runs.started` / `actor_graph.runs.stopped`
-- `actor_graph.actors.started` / `actor_graph.actors.exited`
-- `actor_graph.messages.sent` / `actor_graph.messages.rejected`
-- `actor_graph.messages.received`
-- `actor_graph.mailbox.bound`
-- duration histograms for graph runs and sends
+Applications that need time-series export periodically sample these values and
+the supervisor snapshot. The `tokio-otp` `actor_metrics` example prints the
+result in Prometheus-shaped text without an actor-layer metrics backend.
 
-`tokio-supervisor` continues to emit supervisor lifecycle counters, gauges,
-and histograms.
+The `metrics` feature forwards only to `tokio-supervisor`, which continues to
+emit supervisor lifecycle counters, gauges, and histograms.
 
 ## Web Console
 
 With the `console` feature, a runtime handle can launch a web console backed
-by the same snapshots and events:
+by the same snapshots, events, and actor stats:
 
 ```rust,ignore
 let handle = runtime.spawn();

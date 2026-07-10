@@ -41,6 +41,7 @@ fn registry_tracks_registered_actor_refs() {
 
     assert!(registry.contains("worker"));
     assert_eq!(registry.actor_ids(), vec!["worker".to_owned()]);
+    assert_eq!(registry.stats(), vec![worker.stats()]);
     assert_eq!(
         registry
             .actor_ref::<u32>("worker")

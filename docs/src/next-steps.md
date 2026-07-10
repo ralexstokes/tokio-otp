@@ -44,7 +44,7 @@ cargo run -p <crate> --example <name>
 | `blocking_lifecycle` | Detached blocking work returning results as actor messages. |
 | `graph_failures` | Error propagation from actor failures. |
 | `builder_validation` | Build-time graph validation errors. |
-| `actor_tracing` / `actor_metrics` | Observability integration. |
+| `actor_tracing` | Structured actor and message tracing. |
 
 ### `tokio-otp`
 
@@ -54,6 +54,7 @@ cargo run -p <crate> --example <name>
 | `individual_actor_policies` | Per-actor restart/shutdown overrides. |
 | `dynamic_actors` | Adding and removing actors at runtime. |
 | `supervisor_snapshot_trace` | Observing runtime state in detail. |
+| `actor_metrics` | Pull-based actor stats and user-owned export sampling. |
 | `console` | The live web console (needs `--features console`). |
 
 ## Design notes

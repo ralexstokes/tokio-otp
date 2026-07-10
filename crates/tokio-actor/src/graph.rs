@@ -4,7 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicU8, Ordering},
     },
     time::{Duration, Instant},
@@ -70,7 +70,7 @@ impl GraphInner {
         Ok(ActorRef::from_parts(
             actor.actor_id.clone(),
             binding.subscribe(),
-            actor.observability.clone(),
+            binding.stats_counters(),
             source_actor_id.cloned(),
         ))
     }
@@ -100,7 +100,6 @@ pub(crate) struct GraphActor {
     pub(crate) message_type_name: &'static str,
     pub(crate) binding: Arc<dyn Any + Send + Sync>,
     pub(crate) binding_lifecycle: Arc<dyn BindingLifecycle>,
-    pub(crate) observability: Arc<OnceLock<GraphObservability>>,
     pub(crate) runner: Arc<dyn ErasedRunner>,
 }
 
@@ -175,7 +174,7 @@ impl Graph {
         }
     }
 
-    /// Returns the graph name used in tracing fields and metric labels.
+    /// Returns the graph name used in tracing fields.
     pub fn name(&self) -> &str {
         &self.inner.name
     }

@@ -35,15 +35,29 @@
 mod server;
 mod ws;
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{SupervisorEvent, SupervisorSnapshot};
+
+/// Display-oriented snapshot of one actor's message and mailbox statistics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActorStatsView {
+    pub actor_id: String,
+    pub messages_received: u64,
+    pub messages_accepted: u64,
+    pub sends_rejected: u64,
+    pub mailbox_depth: usize,
+    pub mailbox_capacity: usize,
+}
+
+type StatsSource = Arc<dyn Fn() -> Vec<ActorStatsView> + Send + Sync>;
 
 /// Builder for configuring a [`Console`] server.
 pub struct ConsoleBuilder {
     snapshots: Option<watch::Receiver<SupervisorSnapshot>>,
     events: Option<broadcast::Sender<SupervisorEvent>>,
+    stats: StatsSource,
     bind: SocketAddr,
 }
 
@@ -52,6 +66,7 @@ impl ConsoleBuilder {
         Self {
             snapshots: None,
             events: None,
+            stats: Arc::new(Vec::new),
             bind: ([127, 0, 0, 1], 9100).into(),
         }
     }
@@ -66,6 +81,15 @@ impl ConsoleBuilder {
     /// `subscribe()` to get its own receiver.
     pub fn events(mut self, tx: broadcast::Sender<SupervisorEvent>) -> Self {
         self.events = Some(tx);
+        self
+    }
+
+    /// Sets the pull source sampled for per-actor stats.
+    pub fn actor_stats(
+        mut self,
+        source: impl Fn() -> Vec<ActorStatsView> + Send + Sync + 'static,
+    ) -> Self {
+        self.stats = Arc::new(source);
         self
     }
 
@@ -84,6 +108,7 @@ impl ConsoleBuilder {
         Console {
             snapshots: self.snapshots.expect("ConsoleBuilder: snapshots required"),
             events: self.events.expect("ConsoleBuilder: events required"),
+            stats: self.stats,
             bind: self.bind,
         }
     }
@@ -93,6 +118,7 @@ impl ConsoleBuilder {
 pub struct Console {
     snapshots: watch::Receiver<SupervisorSnapshot>,
     events: broadcast::Sender<SupervisorEvent>,
+    stats: StatsSource,
     bind: SocketAddr,
 }
 
@@ -107,12 +133,12 @@ impl Console {
     /// Returns a [`ConsoleHandle`] that can be used to query the local address
     /// or shut the server down.
     pub async fn spawn(self) -> std::io::Result<ConsoleHandle> {
-        server::spawn(self.snapshots, self.events, self.bind).await
+        server::spawn(self.snapshots, self.events, self.stats, self.bind).await
     }
 
     /// Runs the server on the current task until shut down.
     pub async fn run(self) -> std::io::Result<()> {
-        server::run(self.snapshots, self.events, self.bind).await
+        server::run(self.snapshots, self.events, self.stats, self.bind).await
     }
 }
 

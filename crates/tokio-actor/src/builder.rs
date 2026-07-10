@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
@@ -63,7 +63,6 @@ struct Slot {
     message_type_name: &'static str,
     binding: Arc<dyn Any + Send + Sync>,
     binding_lifecycle: Arc<dyn BindingLifecycle>,
-    observability: Arc<OnceLock<GraphObservability>>,
     runner: Option<Arc<dyn ErasedRunner>>,
 }
 
@@ -91,7 +90,7 @@ impl GraphBuilder {
         }
     }
 
-    /// Sets the graph name used in tracing fields and metric labels.
+    /// Sets the graph name used in tracing fields.
     ///
     /// If omitted, a stable anonymous name is generated during
     /// [`build`](Self::build).
@@ -182,7 +181,7 @@ impl GraphBuilder {
     ///
     /// If multiple actors have the same type name, later registrations receive
     /// `-2`, `-3`, and so on. Renaming the actor type therefore renames tracing
-    /// fields and metric labels; users who need stable observability names
+    /// fields; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
     pub fn add<A: RawActor>(&mut self, actor: A) -> ActorRef<A::Msg> {
         let base = short_type_name(type_name::<A>());
@@ -228,14 +227,12 @@ impl GraphBuilder {
                     actor_id: slot.actor_id.to_string(),
                 });
             };
-            let _ = slot.observability.set(observability.clone());
             actors.push(GraphActor {
                 actor_id: slot.actor_id,
                 message_type: slot.message_type,
                 message_type_name: slot.message_type_name,
                 binding: slot.binding,
                 binding_lifecycle: slot.binding_lifecycle,
-                observability: slot.observability,
                 runner,
             });
         }
@@ -268,7 +265,6 @@ impl GraphBuilder {
 
         let actor_id: Arc<str> = actor_id.into();
         let core = Arc::new(BindingCore::<M>::new(actor_id.clone()));
-        let observability = core.observability_slot();
         let actor_ref = ActorRef::from_core(&core, None);
         let index = self.slots.len();
         self.index.insert(actor_id.clone(), index);
@@ -278,7 +274,6 @@ impl GraphBuilder {
             message_type_name: type_name::<M>(),
             binding: core.clone(),
             binding_lifecycle: core,
-            observability,
             runner: None,
         });
         Some((index, actor_ref))

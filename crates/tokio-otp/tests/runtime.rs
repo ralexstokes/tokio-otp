@@ -121,6 +121,92 @@ async fn runtime_spawn_combines_actor_refs_and_supervisor_control() {
 }
 
 #[tokio::test]
+async fn runtime_handle_enumerates_actor_stats() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, worker_ref) = build_runtime(Observe {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    worker_ref
+        .send("counted".to_owned())
+        .await
+        .expect("message sent");
+    observed_rx.recv().await.expect("message received");
+
+    let stats = handle.actor_stats();
+    assert_eq!(stats, vec![worker_ref.stats()]);
+    assert_eq!(stats[0].messages_accepted, 1);
+    assert_eq!(stats[0].messages_received, 1);
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("supervisor shut down cleanly");
+}
+
+#[derive(Clone)]
+struct FailAfterObserve {
+    observed: mpsc::UnboundedSender<String>,
+}
+
+impl RawActor for FailAfterObserve {
+    type Msg = String;
+
+    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+        match ctx.recv().await {
+            Some(message) => {
+                self.observed.send(message).expect("receiver alive");
+                Err("deliberate failure".into())
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn actor_stats_accumulate_across_supervised_restarts() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, worker_ref) = build_runtime(FailAfterObserve {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    worker_ref
+        .send("first".to_owned())
+        .await
+        .expect("first message sent");
+    observed_rx.recv().await.expect("first message observed");
+
+    // The incarnation fails after observing; `send` waits for the restarted
+    // incarnation's mailbox to bind before delivering.
+    timeout(Duration::from_secs(5), worker_ref.send("second".to_owned()))
+        .await
+        .expect("rebind within timeout")
+        .expect("second message sent");
+    observed_rx.recv().await.expect("second message observed");
+
+    let restarted = handle
+        .snapshot()
+        .child("worker")
+        .map_or(0, |child| child.restart_count);
+    assert!(restarted >= 1, "worker should have restarted");
+
+    // Counters accumulate across incarnations; mailbox fields describe only
+    // the current binding (and are zero in the window between incarnations),
+    // so only the counters are asserted here.
+    let stats = worker_ref.stats();
+    assert_eq!(stats.messages_received, 2);
+    assert_eq!(stats.messages_accepted, 2);
+    assert_eq!(stats.sends_rejected, 0);
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("supervisor shut down cleanly");
+}
+
+#[tokio::test]
 async fn runtime_into_supervisor_spawn_accepts_ref_cloned_before_startup() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, worker_ref) = build_runtime(ObserveOnce {

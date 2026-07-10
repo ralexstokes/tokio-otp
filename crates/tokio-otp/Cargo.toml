@@ -10,7 +10,7 @@ categories = ["asynchronous", "concurrency"]
 
 [features]
 console = ["dep:tokio-otp-console"]
-metrics = ["tokio-actor/metrics", "tokio-supervisor/metrics"]
+metrics = ["tokio-supervisor/metrics"]
 
 [dependencies]
 thiserror.workspace = true

@@ -65,11 +65,11 @@
 //!
 //! - `tracing` spans and structured logs are emitted automatically for graph,
 //!   actor, and mailbox lifecycle.
-//! - optional `metrics` counters, gauges, and histograms are available via the
-//!   `metrics` cargo feature.
+//! - pull-based message counters and live mailbox usage are available through
+//!   [`ActorRef::stats`].
 //!
-//! Install subscribers and metric recorders in the application boundary or an
-//! example binary, not inside the library.
+//! Install tracing subscribers and run any stats-export sampler at the
+//! application boundary, not inside the library.
 //!
 //! # Resource limits
 //!
@@ -224,7 +224,6 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
-//! | `metrics` | no | Enables `metrics` crate integration for counters, gauges, and histograms. |
 
 mod actor;
 mod actor_set;
@@ -243,15 +242,15 @@ pub mod prelude {
     pub use crate::Topology;
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        ActorSlot, BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
-        GraphError, GraphHandle, LookupError, RawActor, RebindPolicy, RegistryError, Reply,
-        RunnableActor, RunnableActorFactory, SendError, TryRecvError,
+        ActorSlot, ActorStats, BoxError, CallError, DrainPolicy, Graph, GraphBuildError,
+        GraphBuilder, GraphError, GraphHandle, LookupError, RawActor, RebindPolicy, RegistryError,
+        Reply, RunnableActor, RunnableActorFactory, SendError, TryRecvError,
     };
 }
 
 pub use actor::{ActorResult, BoxError, RawActor};
 pub use actor_set::{ActorRunError, ActorSet, RunnableActor, RunnableActorFactory};
-pub use binding::RebindPolicy;
+pub use binding::{ActorStats, RebindPolicy};
 pub use builder::{ActorSlot, GraphBuilder};
 pub use context::{ActorContext, ActorRef, Reply};
 pub use error::{CallError, GraphBuildError, GraphError, LookupError, SendError};

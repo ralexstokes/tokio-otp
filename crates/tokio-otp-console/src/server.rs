@@ -4,7 +4,7 @@ use axum::{Router, response::Html, routing::get};
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{SupervisorEvent, SupervisorSnapshot};
 
-use crate::{ConsoleHandle, ws};
+use crate::{ConsoleHandle, StatsSource, ws};
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 
@@ -12,6 +12,7 @@ const INDEX_HTML: &str = include_str!("../assets/index.html");
 pub(crate) struct AppState {
     pub(crate) snapshots: watch::Receiver<SupervisorSnapshot>,
     pub(crate) events: broadcast::Sender<SupervisorEvent>,
+    pub(crate) stats: StatsSource,
 }
 
 fn router(state: AppState) -> Router {
@@ -28,9 +29,14 @@ async fn index() -> Html<&'static str> {
 async fn bind_app(
     snapshots: watch::Receiver<SupervisorSnapshot>,
     events: broadcast::Sender<SupervisorEvent>,
+    stats: StatsSource,
     bind: SocketAddr,
 ) -> std::io::Result<(tokio::net::TcpListener, Router, SocketAddr)> {
-    let app = router(AppState { snapshots, events });
+    let app = router(AppState {
+        snapshots,
+        events,
+        stats,
+    });
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local_addr = listener.local_addr()?;
     Ok((listener, app, local_addr))
@@ -43,9 +49,10 @@ async fn shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
 pub(crate) async fn spawn(
     snapshots: watch::Receiver<SupervisorSnapshot>,
     events: broadcast::Sender<SupervisorEvent>,
+    stats: StatsSource,
     bind: SocketAddr,
 ) -> std::io::Result<ConsoleHandle> {
-    let (listener, app, local_addr) = bind_app(snapshots, events, bind).await?;
+    let (listener, app, local_addr) = bind_app(snapshots, events, stats, bind).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     tracing::info!(%local_addr, "tokio-otp-console listening");
@@ -68,9 +75,10 @@ pub(crate) async fn spawn(
 pub(crate) async fn run(
     snapshots: watch::Receiver<SupervisorSnapshot>,
     events: broadcast::Sender<SupervisorEvent>,
+    stats: StatsSource,
     bind: SocketAddr,
 ) -> std::io::Result<()> {
-    let (listener, app, local_addr) = bind_app(snapshots, events, bind).await?;
+    let (listener, app, local_addr) = bind_app(snapshots, events, stats, bind).await?;
 
     tracing::info!(%local_addr, "tokio-otp-console listening");
 

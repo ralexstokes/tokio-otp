@@ -18,7 +18,7 @@ use tracing::Instrument;
 
 use crate::{
     actor::{BoxError, RawActor},
-    binding::{BindingCore, BindingLifecycle, RebindPolicy},
+    binding::{ActorStats, BindingCore, BindingLifecycle, RebindPolicy},
     builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
     context::ActorRef,
     error::LookupError,
@@ -84,7 +84,6 @@ impl ActorSet {
                     message_type_name: actor.message_type_name,
                     binding: actor.binding.clone(),
                     binding_lifecycle: actor.binding_lifecycle.clone(),
-                    observability_slot: actor.observability.clone(),
                     runner: actor.runner.clone(),
                     registry: OnceLock::new(),
                     rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
@@ -124,6 +123,11 @@ impl ActorSet {
         &self.inner.actors
     }
 
+    /// Returns point-in-time stats for every actor in graph definition order.
+    pub fn stats(&self) -> Vec<ActorStats> {
+        self.inner.actors.iter().map(RunnableActor::stats).collect()
+    }
+
     /// Returns a factory for constructing additional runnable actors that use
     /// the same runtime configuration as this actor set.
     pub fn dynamic_factory(&self) -> RunnableActorFactory {
@@ -157,7 +161,6 @@ struct RunnableActorInner {
     message_type_name: &'static str,
     binding: Arc<dyn Any + Send + Sync>,
     binding_lifecycle: Arc<dyn BindingLifecycle>,
-    observability_slot: Arc<OnceLock<crate::observability::GraphObservability>>,
     runner: Arc<dyn ErasedRunner>,
     registry: OnceLock<ActorRegistry>,
     rebind_policy: std::sync::atomic::AtomicU8,
@@ -171,6 +174,11 @@ impl RunnableActor {
     /// Returns the actor id.
     pub fn id(&self) -> &str {
         &self.inner.actor_id
+    }
+
+    /// Returns a point-in-time snapshot of this actor's stats.
+    pub fn stats(&self) -> ActorStats {
+        self.inner.binding_lifecycle.stats()
     }
 
     /// Returns a stable typed actor reference for this actor.
@@ -190,7 +198,7 @@ impl RunnableActor {
         Ok(ActorRef::from_parts(
             self.inner.actor_id.clone(),
             binding.subscribe(),
-            self.inner.observability_slot.clone(),
+            binding.stats_counters(),
             None,
         ))
     }
@@ -201,7 +209,6 @@ impl RunnableActor {
             self.inner.actor_id.clone(),
             self.inner.message_type,
             self.inner.message_type_name,
-            self.inner.observability_slot.clone(),
             self.inner.binding.clone(),
             self.inner.binding_lifecycle.clone(),
         )
@@ -444,8 +451,6 @@ impl RunnableActorFactory {
     pub fn actor<A: RawActor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
         let actor_id: Arc<str> = actor_id.into().into();
         let binding = Arc::new(BindingCore::<A::Msg>::new(actor_id.clone()));
-        binding.set_observability(self.observability.clone());
-        let observability_slot = binding.observability_slot();
         RunnableActor {
             inner: Arc::new(RunnableActorInner {
                 actor_id,
@@ -453,7 +458,6 @@ impl RunnableActorFactory {
                 message_type_name: type_name::<A::Msg>(),
                 binding: binding.clone(),
                 binding_lifecycle: binding.clone(),
-                observability_slot,
                 runner: Arc::new(TypedRunner { actor, binding }),
                 registry: OnceLock::new(),
                 rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
