@@ -7,17 +7,15 @@
 //! - providing restart-stable typed actor references
 //!
 //! Internal restart policy and supervision are intentionally out of scope.
-//! When an actor fails, panics, or exits before shutdown, the whole graph run
-//! fails. That makes a graph instance a good fit for hosting as a single child
-//! in a `tokio-supervisor` tree.
+//! Each runnable actor is an independent execution unit, normally hosted as a
+//! child in a `tokio-supervisor` tree through `tokio-otp`.
 //!
 //! # Core concepts
 //!
 //! | Type | Role |
 //! |------|------|
 //! | [`GraphBuilder`] | Constructs and validates the actor graph. |
-//! | [`Graph`] | Immutable, cloneable graph spec that can be rerun. |
-//! | [`ActorSet`] | Decomposed graph where actors can be run independently. |
+//! | [`Graph`] | Wiring plus runnable actors in declaration order. |
 //! | [`RunnableActor`] | One actor plus stable binding for per-actor supervision. |
 //! | [`RawActor`] | Custom-loop typed actor definition. |
 //! | [`Actor`] | Handler-style actor definition with a provided receive loop. |
@@ -28,13 +26,11 @@
 //! # Stable mailbox handles
 //!
 //! `ActorRef<M>` is bound to a long-lived mailbox binding instead of a single
-//! actor runtime. When a graph is rerun or a decomposed actor is restarted
-//! from the same graph wiring, those handles transparently follow the current
-//! mailbox for the target actor.
+//! actor runtime. When an actor is restarted from the same graph wiring, those
+//! handles transparently follow the current mailbox for the target actor.
 //!
-//! This is especially useful when the graph is hosted inside a supervised
-//! child task and can be restarted by `tokio-supervisor`, or when a graph is
-//! decomposed with [`Graph::into_actor_set`] for per-actor supervision.
+//! This is especially useful when graph actors are hosted as individual
+//! supervised children through `tokio-otp`.
 //!
 //! # Message loss at shutdown and restart
 //!
@@ -80,8 +76,9 @@
 //!
 //! # Quick start
 //!
-//! ```no_run
-//! use tokio_actor::{ActorContext, ActorResult, GraphBuilder, Actor, Reply};
+//! ```
+//! use tokio_actor::{ActorContext, ActorResult, GraphBuilder, Actor, RebindPolicy, Reply};
+//! use tokio_util::sync::CancellationToken;
 //!
 //! enum CounterMsg {
 //!     Add(u64),
@@ -116,13 +113,21 @@
 //! let counter = builder.add(Counter { total: 0 });
 //! let graph = builder.build().expect("valid graph");
 //!
-//! let handle = graph.spawn()?;
+//! // Drive the actor by hand; production code normally hosts each actor as
+//! // a supervised child through `tokio-otp` instead.
+//! let actor = graph.actors()[0].clone();
+//! let stop = CancellationToken::new();
+//! let run = tokio::spawn({
+//!     let stop = stop.clone();
+//!     async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await }
+//! });
 //!
 //! counter.send(CounterMsg::Add(2)).await.expect("send succeeded");
 //! counter.send(CounterMsg::Add(3)).await.expect("send succeeded");
 //! assert_eq!(counter.call(CounterMsg::Total).await?, 5);
 //!
-//! handle.shutdown_and_wait().await?;
+//! stop.cancel();
+//! run.await??;
 //! # Ok(())
 //! # }
 //! ```
@@ -226,7 +231,6 @@
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 
 mod actor;
-mod actor_set;
 mod binding;
 mod builder;
 mod context;
@@ -241,20 +245,19 @@ pub mod prelude {
     #[cfg(feature = "derive")]
     pub use crate::Topology;
     pub use crate::{
-        Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        ActorSlot, ActorStats, BoxError, CallError, DrainPolicy, Graph, GraphBuildError,
-        GraphBuilder, GraphError, GraphHandle, LookupError, RawActor, RebindPolicy, RegistryError,
-        Reply, RunnableActor, RunnableActorFactory, SendError, TryRecvError,
+        Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSlot,
+        ActorStats, BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
+        LookupError, RawActor, RebindPolicy, RegistryError, Reply, RunnableActor,
+        RunnableActorFactory, SendError, TryRecvError,
     };
 }
 
 pub use actor::{ActorResult, BoxError, RawActor};
-pub use actor_set::{ActorRunError, ActorSet, RunnableActor, RunnableActorFactory};
 pub use binding::{ActorStats, RebindPolicy};
 pub use builder::{ActorSlot, GraphBuilder};
 pub use context::{ActorContext, ActorRef, Reply};
-pub use error::{CallError, GraphBuildError, GraphError, LookupError, SendError};
-pub use graph::{Graph, GraphHandle};
+pub use error::{CallError, GraphBuildError, LookupError, SendError};
+pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};
 pub use handler::{Actor, DrainPolicy};
 pub use registry::{ActorRegistry, RegistryError};
 pub use tokio::sync::mpsc::error::TryRecvError;

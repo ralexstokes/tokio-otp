@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let graph = builder.build()?;
 
-    let children = SupervisedActors::new(graph)?
+    let children = SupervisedActors::new(graph)
         .actor_restart("worker", Restart::Transient)
         .actor_restart_intensity(
             "worker",

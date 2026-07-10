@@ -1,10 +1,41 @@
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, GraphBuildError, GraphBuilder, RawActor, SendError,
-    Topology,
+    Actor, ActorContext, ActorRef, ActorResult, ActorRunError, Graph, GraphBuildError,
+    GraphBuilder, RawActor, RebindPolicy, SendError, Topology,
 };
+use tokio_util::sync::CancellationToken;
+
+fn start_graph(
+    graph: &Graph,
+) -> (
+    CancellationToken,
+    Vec<JoinHandle<Result<(), ActorRunError>>>,
+) {
+    let stop = CancellationToken::new();
+    let tasks = graph
+        .actors()
+        .iter()
+        .cloned()
+        .map(|actor| {
+            let stop = stop.clone();
+            tokio::spawn(
+                async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await },
+            )
+        })
+        .collect();
+    (stop, tasks)
+}
+
+async fn stop_graph(stop: CancellationToken, tasks: Vec<JoinHandle<Result<(), ActorRunError>>>) {
+    stop.cancel();
+    for task in tasks {
+        task.await
+            .expect("actor task joined")
+            .expect("actor stopped cleanly");
+    }
+}
 
 enum FrontendMsg {
     Feed(String),
@@ -100,7 +131,7 @@ async fn derived_topology_runs_cyclic_pipeline() {
     let frontend = graph
         .actor_ref::<FrontendMsg>("frontend")
         .expect("frontend ref");
-    let handle = graph.spawn().expect("spawn graph");
+    let (stop, tasks) = start_graph(&graph);
 
     frontend
         .send(FrontendMsg::Feed("hello".to_owned()))
@@ -110,7 +141,7 @@ async fn derived_topology_runs_cyclic_pipeline() {
     assert_eq!(out_rx.recv().await.as_deref(), Some("HELLO"));
     assert_eq!(acks_rx.recv().await, Some(()));
 
-    handle.shutdown_and_wait().await.expect("clean shutdown");
+    stop_graph(stop, tasks).await;
 }
 
 #[tokio::test]
@@ -207,7 +238,7 @@ async fn graph_with_applies_builder_config() {
     assert_eq!(graph.name(), "configured");
 
     let park = graph.actor_ref::<()>("park").expect("park ref");
-    let handle = graph.spawn().expect("spawn graph");
+    let (stop, tasks) = start_graph(&graph);
 
     park.send(()).await.expect("first message fits");
     assert!(matches!(
@@ -215,7 +246,7 @@ async fn graph_with_applies_builder_config() {
         Err(SendError::MailboxFull { actor_id }) if actor_id == "park"
     ));
 
-    handle.shutdown_and_wait().await.expect("clean shutdown");
+    stop_graph(stop, tasks).await;
 }
 
 #[test]

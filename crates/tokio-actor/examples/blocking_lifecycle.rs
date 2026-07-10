@@ -3,6 +3,8 @@ use std::{error::Error, thread, time::Duration};
 use tokio::sync::mpsc;
 use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder};
 
+mod support;
+
 enum Command {
     Start(i64),
     Finished(Result<u64, String>),
@@ -45,7 +47,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     let graph = builder.build()?;
 
-    let handle = graph.spawn()?;
+    let handle = support::ActorTasks::start(&graph);
 
     worker.send(Command::Start(12)).await?;
     worker.send(Command::Start(-1)).await?;

@@ -3,6 +3,8 @@ use std::error::Error;
 use tokio::sync::mpsc;
 use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder};
 
+mod support;
+
 enum WorkMsg {
     Process(String),
     Finished(String),
@@ -48,7 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     let graph = builder.build()?;
 
-    let handle = graph.spawn()?;
+    let handle = support::ActorTasks::start(&graph);
 
     worker
         .send(WorkMsg::Process("hello blocking actor".to_owned()))

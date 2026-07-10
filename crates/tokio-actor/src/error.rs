@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::actor::BoxError;
-
 /// Errors returned while validating a graph during build.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum GraphBuildError {
@@ -23,33 +21,6 @@ pub enum GraphBuildError {
     /// Generic invalid builder configuration.
     #[error("{0}")]
     InvalidConfig(&'static str),
-}
-
-/// Errors returned while running a graph.
-#[derive(Debug, Error)]
-pub enum GraphError {
-    /// Another instance of the same graph spec is already running.
-    #[error("graph is already running")]
-    AlreadyRunning,
-    /// The graph runtime observed invalid internal state.
-    #[error("graph runtime state is invalid: {detail}")]
-    InvalidState { detail: String },
-    /// An actor returned `Ok(())` before graph shutdown was requested.
-    #[error("actor `{actor_id}` exited before graph shutdown")]
-    ActorStopped { actor_id: String },
-    /// An actor returned an error.
-    #[error("actor `{actor_id}` returned an error")]
-    ActorFailed {
-        actor_id: String,
-        #[source]
-        source: BoxError,
-    },
-    /// An actor panicked while running.
-    #[error("actor `{actor_id}` panicked")]
-    ActorPanicked { actor_id: String },
-    /// An actor task was externally cancelled or aborted.
-    #[error("actor `{actor_id}` was cancelled")]
-    ActorCancelled { actor_id: String },
 }
 
 /// Errors returned when sending to an actor mailbox.

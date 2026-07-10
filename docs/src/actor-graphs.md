@@ -14,6 +14,7 @@ references do not require string lookup.
 
 ```rust,no_run
 use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, Actor, Reply, Topology};
+use tokio_otp::Runtime;
 
 struct Order(String);
 struct Parcel(String);
@@ -101,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let orders = graph.actor_ref::<Order>("front_desk")?;
     let shipping = graph.actor_ref::<ShippingMsg>("shipping")?;
 
-    let handle = graph.spawn()?;
+    let handle = Runtime::builder().graph(graph).build()?.spawn();
 
     orders.send(Order("business cards x100".into())).await?;
     orders.send(Order("flyers x500".into())).await?;
@@ -114,9 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`Graph::run_until` remains available when you want to drive a graph inside
-your own task or `select!` loop. `tokio-otp` uses that lower-level API for
-supervised graph children.
+For lower-level hosting, iterate `graph.actors()` and drive each
+`RunnableActor::run_until` independently. `tokio-otp` performs that adaptation
+for the common supervised runtime.
 
 ## Struct Topologies
 

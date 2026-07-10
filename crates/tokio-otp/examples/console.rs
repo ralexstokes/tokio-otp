@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let graph = builder.build()?;
 
-    let runtime = SupervisedActors::new(graph)?
+    let runtime = SupervisedActors::new(graph)
         .actor_restart_intensity(
             "worker",
             RestartIntensity::new(20, Duration::from_secs(120)),

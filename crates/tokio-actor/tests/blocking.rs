@@ -13,7 +13,9 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use tokio_actor::{ActorContext, ActorResult, Graph, GraphBuilder, GraphError, RawActor};
+use tokio_actor::{
+    ActorContext, ActorResult, ActorRunError, Graph, GraphBuilder, RawActor, RebindPolicy,
+};
 use tokio_util::sync::CancellationToken;
 
 type SenderSlot<T> = Arc<Mutex<Option<oneshot::Sender<T>>>>;
@@ -28,17 +30,17 @@ fn send_once<T>(slot: &SenderSlot<T>, value: T) {
     }
 }
 
-fn start_graph(graph: &Graph) -> (CancellationToken, JoinHandle<Result<(), GraphError>>) {
+fn start_graph(graph: &Graph) -> (CancellationToken, JoinHandle<Result<(), ActorRunError>>) {
     let stop = CancellationToken::new();
+    let actor = graph.actors().first().expect("actor exists").clone();
     let task = tokio::spawn({
-        let graph = graph.clone();
         let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
+        async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await }
     });
     (stop, task)
 }
 
-async fn stop_graph(stop: CancellationToken, task: JoinHandle<Result<(), GraphError>>) {
+async fn stop_graph(stop: CancellationToken, task: JoinHandle<Result<(), ActorRunError>>) {
     stop.cancel();
     timeout(Duration::from_secs(1), task)
         .await
@@ -269,11 +271,13 @@ async fn blocking_panic_propagates_as_actor_panic() {
     builder.actor("worker", Panics);
     let graph = builder.build().expect("valid graph");
 
-    let result = timeout(Duration::from_secs(1), graph.run_until(pending::<()>()))
-        .await
-        .expect("graph observed actor panic");
-    assert!(matches!(
-        result,
-        Err(GraphError::ActorPanicked { actor_id, .. }) if actor_id == "worker"
-    ));
+    let actor = graph.actor("worker").expect("worker exists").clone();
+    let result = timeout(
+        Duration::from_secs(1),
+        tokio::spawn(async move { actor.run_until(pending::<()>(), RebindPolicy::Never).await }),
+    )
+    .await
+    .expect("actor panic observed")
+    .expect_err("actor task panicked");
+    assert!(result.is_panic());
 }

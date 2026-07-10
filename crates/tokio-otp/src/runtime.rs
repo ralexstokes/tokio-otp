@@ -338,14 +338,14 @@ pub(crate) fn actor_child_spec(
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
 ) -> ChildSpec {
-    let actor_id = actor.id().to_owned();
-    actor.set_rebind_policy(rebind_policy_for_restart(restart));
+    let actor_id = actor.label().to_owned();
+    let rebind = rebind_policy_for_restart(restart);
     let guard = Arc::new(TerminateBindingOnDrop { actor });
     let mut child = ChildSpec::new(actor_id, move |ctx| {
         let actor = guard.actor.clone();
         async move {
             actor
-                .run_until(ctx.shutdown_token().cancelled())
+                .run_until(ctx.shutdown_token().cancelled(), rebind)
                 .await
                 .map_err(Into::into)
         }

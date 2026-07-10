@@ -31,8 +31,7 @@ fn registry_tracks_registered_actor_refs() {
     builder.actor("worker", Drain::<u32>::new());
     let graph = builder.build().expect("valid graph");
 
-    let actor_set = graph.into_actor_set().expect("graph decomposes");
-    let worker = actor_set.actor("worker").expect("worker exists");
+    let worker = graph.actor("worker").expect("worker exists");
     let registry = ActorRegistry::new();
 
     worker

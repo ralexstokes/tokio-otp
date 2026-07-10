@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     let graph = builder.build()?;
 
-    let handle = graph.spawn()?;
+    let handle = Runtime::builder().graph(graph).build()?.spawn();
     worker.send(Msg::Hold).await?;
     started_rx.recv().await.expect("worker entered hold");
 

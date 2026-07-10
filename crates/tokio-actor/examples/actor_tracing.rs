@@ -3,6 +3,8 @@ use std::error::Error;
 use tokio::sync::mpsc;
 use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder};
 
+mod support;
+
 #[derive(Clone)]
 struct Worker {
     completed: mpsc::UnboundedSender<()>,
@@ -34,7 +36,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     let graph = builder.build()?;
 
-    let handle = graph.spawn()?;
+    let handle = support::ActorTasks::start(&graph);
 
     worker.send("hello tracing").await?;
     completed_rx.recv().await.expect("message processed");

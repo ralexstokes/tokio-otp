@@ -145,7 +145,7 @@ impl RuntimeBuilder {
 
         match self.graph {
             Some(graph) => {
-                let actors = SupervisedActors::new(graph)?
+                let actors = SupervisedActors::new(graph)
                     .restart(self.restart)
                     .shutdown(self.shutdown);
                 actors.build_runtime(supervisor)

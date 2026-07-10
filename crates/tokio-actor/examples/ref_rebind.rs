@@ -1,7 +1,13 @@
-use std::{error::Error, marker::PhantomData};
+use std::{error::Error, future::pending, marker::PhantomData};
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, SendError};
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder, RebindPolicy};
+use tokio_util::sync::CancellationToken;
+
+enum Command<M> {
+    Observe(M),
+    Fail,
+}
 
 struct Observe<M> {
     observed: mpsc::UnboundedSender<M>,
@@ -27,11 +33,20 @@ impl<M> Clone for Observe<M> {
 }
 
 impl<M: Send + 'static> Actor for Observe<M> {
-    type Msg = M;
+    type Msg = Command<M>;
 
-    async fn handle(&mut self, message: M, _ctx: &ActorContext<M>) -> ActorResult {
-        self.observed.send(message).expect("receiver alive");
-        Ok(())
+    async fn handle(
+        &mut self,
+        message: Command<M>,
+        _ctx: &ActorContext<Command<M>>,
+    ) -> ActorResult {
+        match message {
+            Command::Observe(message) => {
+                self.observed.send(message).expect("receiver alive");
+                Ok(())
+            }
+            Command::Fail => Err(std::io::Error::other("restart requested").into()),
+        }
     }
 }
 
@@ -42,23 +57,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
     let frontend = builder.add(Observe::<String>::new(observed_tx));
     let graph = builder.build()?;
-
-    let handle = graph.spawn()?;
-    frontend.send("first".to_owned()).await?;
-    println!("observed {:?}", observed_rx.recv().await);
-    handle.shutdown_and_wait().await?;
-
-    match frontend.try_send("between-runs".to_owned()) {
-        Err(SendError::ActorTerminated { actor_id }) => {
-            println!("`{actor_id}` has no running graph instance");
+    let actor = graph.actors()[0].clone();
+    let first_run = tokio::spawn({
+        let actor = actor.clone();
+        async move {
+            actor
+                .run_until(pending::<()>(), RebindPolicy::OnFailure)
+                .await
         }
-        other => println!("unexpected send result: {other:?}"),
-    }
-
-    let handle = graph.spawn()?;
-    frontend.send("second".to_owned()).await?;
+    });
+    frontend.send(Command::Observe("first".to_owned())).await?;
     println!("observed {:?}", observed_rx.recv().await);
-    handle.shutdown_and_wait().await?;
+
+    frontend.send(Command::Fail).await?;
+    let _failure = first_run.await?.expect_err("first run fails");
+    println!("actor is waiting for its next binding");
+
+    let stop = CancellationToken::new();
+    let second_run = tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            actor
+                .run_until(stop.cancelled(), RebindPolicy::OnFailure)
+                .await
+        }
+    });
+    frontend.send(Command::Observe("second".to_owned())).await?;
+    println!("observed {:?}", observed_rx.recv().await);
+    stop.cancel();
+    second_run.await??;
 
     Ok(())
 }

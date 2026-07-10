@@ -118,8 +118,8 @@ pub(crate) enum BindingState<M> {
     /// Not yet started, or between restarts where a new mailbox is expected.
     Unbound,
     Bound(MailboxRef<M>),
-    /// No restart is scheduled. A later graph rerun or actor re-add may bind
-    /// a new mailbox.
+    /// No restart is scheduled. A later dynamic actor re-add may bind a new
+    /// mailbox.
     Terminated,
 }
 
@@ -135,7 +135,6 @@ impl<M> Clone for BindingState<M> {
 
 /// Controls whether a binding should wait for another mailbox after a run
 /// exits.
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RebindPolicy {
     /// A rebind is always expected unless shutdown was requested.
@@ -156,8 +155,7 @@ pub(crate) trait BindingLifecycle: Send + Sync {
 /// Long-lived binding slot for one actor's current mailbox.
 ///
 /// [`ActorRef`](crate::ActorRef)s subscribe to this slot, so they
-/// transparently follow the current mailbox across graph reruns and per-actor
-/// restarts.
+/// transparently follow the current mailbox across per-actor restarts.
 pub(crate) struct BindingCore<M> {
     actor_id: Arc<str>,
     current: watch::Sender<BindingState<M>>,

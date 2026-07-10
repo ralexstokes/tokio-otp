@@ -3,6 +3,8 @@ use std::error::Error;
 use tokio::sync::mpsc;
 use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, Topology};
 
+mod support;
+
 enum FrontendMsg {
     Feed(String),
     Ack,
@@ -87,7 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         sink: Sink { out: out_tx },
     })?;
     let frontend = graph.actor_ref::<FrontendMsg>("frontend")?;
-    let handle = graph.spawn()?;
+    let handle = support::ActorTasks::start(&graph);
 
     frontend.send(FrontendMsg::Feed("hello".to_owned())).await?;
     println!(

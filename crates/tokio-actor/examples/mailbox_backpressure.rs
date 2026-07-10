@@ -3,6 +3,8 @@ use std::{error::Error, sync::Arc};
 use tokio::sync::Notify;
 use tokio_actor::{ActorContext, ActorResult, GraphBuilder, RawActor, SendError};
 
+mod support;
+
 #[derive(Clone)]
 struct ParkBeforeRecv {
     release: Arc<Notify>,
@@ -34,7 +36,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     let graph = builder.build()?;
 
-    let handle = graph.spawn()?;
+    let handle = support::ActorTasks::start(&graph);
 
     worker.try_send("first")?;
     match worker.try_send("second") {

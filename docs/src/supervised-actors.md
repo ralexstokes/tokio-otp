@@ -89,14 +89,14 @@ alone — drop down to `SupervisedActors`, which the builder uses under the
 hood:
 
 ```rust,ignore
-let runtime = SupervisedActors::new(graph)?
+let runtime = SupervisedActors::new(graph)
     .restart(Restart::Transient)
     .actor_restart_intensity("press", RestartIntensity::new(5, Duration::from_secs(60)))
     .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
 ```
 
-`SupervisedActors::new(graph)` calls `Graph::into_actor_set`, then you choose
-the integration level:
+`SupervisedActors::new(graph)` adapts the graph's runnable actors, then you
+choose the integration level:
 
 - `build_runtime(builder)` returns a `Runtime` with a supervisor, registry,
   and dynamic actor support.
@@ -109,5 +109,5 @@ failures such as `LookupError::MessageTypeMismatch` arrive wrapped in
 `DynamicActorError::Lookup`, and a runtime built without a dynamic registry
 returns `DynamicActorError::Unsupported`.
 
-Whole-graph supervision is still available through `SupervisedGraph` when a
-group of actors should restart as one child.
+Use `Strategy::OneForAll` when a group of actor children should share fate,
+or place them in a nested supervisor for a scoped restart boundary.

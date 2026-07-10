@@ -73,7 +73,6 @@ where
     let graph = builder.build().expect("valid graph");
 
     let runtime = SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("runtime builds");
 
@@ -376,7 +375,6 @@ async fn snapshot_wait_reports_all_children_running_after_spawn() {
     let graph = builder.build().expect("valid graph");
 
     let runtime = SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("runtime builds");
     let handle = runtime.spawn();

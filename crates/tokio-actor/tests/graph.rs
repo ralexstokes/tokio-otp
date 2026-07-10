@@ -15,8 +15,9 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, CallError, DrainPolicy, Graph, GraphBuildError,
-    GraphBuilder, GraphError, LookupError, RawActor, Reply, SendError, TryRecvError,
+    Actor, ActorContext, ActorRef, ActorResult, ActorRunError, CallError, DrainPolicy, Graph,
+    GraphBuildError, GraphBuilder, LookupError, RawActor, RebindPolicy, Reply, SendError,
+    TryRecvError,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -43,23 +44,48 @@ impl<M: Send + 'static> RawActor for Drain<M> {
     }
 }
 
-fn start_graph(graph: &Graph) -> (CancellationToken, JoinHandle<Result<(), GraphError>>) {
+fn start_graph(
+    graph: &Graph,
+) -> (
+    CancellationToken,
+    JoinHandle<Vec<Result<(), ActorRunError>>>,
+) {
     let stop = CancellationToken::new();
-    let task = tokio::spawn({
-        let graph = graph.clone();
-        let stop = stop.clone();
-        async move { graph.run_until(stop.cancelled()).await }
+    let tasks = graph
+        .actors()
+        .iter()
+        .cloned()
+        .map(|actor| {
+            let stop = stop.clone();
+            tokio::spawn(
+                async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await },
+            )
+        })
+        .collect::<Vec<_>>();
+    let task = tokio::spawn(async move {
+        let mut results = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            results.push(task.await.expect("actor task joined"));
+        }
+        results
     });
     (stop, task)
 }
 
-async fn stop_graph(stop: CancellationToken, task: JoinHandle<Result<(), GraphError>>) {
+async fn stop_graph(stop: CancellationToken, task: JoinHandle<Vec<Result<(), ActorRunError>>>) {
     stop.cancel();
-    timeout(Duration::from_secs(1), task)
+    wait_graph(task).await;
+}
+
+async fn wait_graph(task: JoinHandle<Vec<Result<(), ActorRunError>>>) {
+    let results = timeout(Duration::from_secs(1), task)
         .await
         .expect("graph stopped in time")
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+        .expect("graph task joined");
+    assert!(
+        results.iter().all(Result::is_ok),
+        "all actors stopped cleanly: {results:?}"
+    );
 }
 
 async fn recv<T>(rx: &mut mpsc::UnboundedReceiver<T>, message: &str) -> T {
@@ -143,36 +169,6 @@ impl RawActor for Echo {
         }
         Ok(())
     }
-}
-
-#[tokio::test]
-async fn refs_survive_graph_rerun() {
-    let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
-
-    let mut builder = GraphBuilder::new();
-    let echo = builder.actor("echo", Echo { seen: seen_tx });
-    let graph = builder.build().expect("valid graph");
-
-    let handle = graph.spawn().expect("graph spawned");
-    echo.send(1).await.expect("send during first run");
-    assert_eq!(recv(&mut seen_rx, "first message").await, 1);
-    handle
-        .shutdown_and_wait()
-        .await
-        .expect("graph stopped cleanly");
-
-    assert!(matches!(
-        echo.try_send(2),
-        Err(SendError::ActorTerminated { .. })
-    ));
-
-    let handle = graph.spawn().expect("graph spawned");
-    echo.send(3).await.expect("send across rerun");
-    assert_eq!(recv(&mut seen_rx, "second message").await, 3);
-    handle
-        .shutdown_and_wait()
-        .await
-        .expect("graph stopped cleanly");
 }
 
 #[tokio::test]
@@ -310,47 +306,6 @@ async fn handler_receives_messages_in_order_and_preserves_state() {
     stop_graph(stop, task).await;
 }
 
-#[tokio::test]
-async fn handler_state_resets_on_graph_rerun_and_ref_rebinds() {
-    let mut builder = GraphBuilder::new();
-    let counter = builder.actor("counter", HandlerCounter { total: 0 });
-    let graph = builder.build().expect("valid graph");
-
-    let handle = graph.spawn().expect("graph spawned");
-    counter
-        .send(HandlerCounterMsg::Add(5))
-        .await
-        .expect("first run add sent");
-    assert_eq!(
-        counter
-            .call(HandlerCounterMsg::Total)
-            .await
-            .expect("first total"),
-        5
-    );
-    handle
-        .shutdown_and_wait()
-        .await
-        .expect("graph stopped cleanly");
-
-    let handle = graph.spawn().expect("graph spawned");
-    counter
-        .send(HandlerCounterMsg::Add(1))
-        .await
-        .expect("send across rerun");
-    assert_eq!(
-        counter
-            .call(HandlerCounterMsg::Total)
-            .await
-            .expect("second total"),
-        1
-    );
-    handle
-        .shutdown_and_wait()
-        .await
-        .expect("graph stopped cleanly");
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum LifecycleEvent {
     Started,
@@ -445,16 +400,20 @@ impl Actor for FailingStartHandler {
 }
 
 #[tokio::test]
-async fn handler_on_start_error_fails_without_handle_or_stop() {
+async fn handler_on_start_error_fails_actor_run_without_handle_or_stop() {
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     builder.actor("worker", FailingStartHandler { events: events_tx });
     let graph = builder.build().expect("valid graph");
 
-    let result = graph.run_until(pending::<()>()).await;
+    let result = graph
+        .actor("worker")
+        .expect("worker exists")
+        .run_until(pending::<()>(), RebindPolicy::Never)
+        .await;
     assert!(matches!(
         result,
-        Err(GraphError::ActorFailed { actor_id, .. }) if actor_id == "worker"
+        Err(ActorRunError::Failed { actor_id, .. }) if actor_id == "worker"
     ));
     assert_eq!(
         recv(&mut events_rx, "handler started").await,
@@ -478,12 +437,14 @@ impl Actor for FailingHandler {
 }
 
 #[tokio::test]
-async fn handler_error_fails_the_graph() {
+async fn handler_error_fails_the_actor_run() {
     let mut builder = GraphBuilder::new();
     let actor = builder.actor("worker", FailingHandler);
     let graph = builder.build().expect("valid graph");
 
-    let (_stop, task) = start_graph(&graph);
+    let worker = graph.actor("worker").expect("worker exists").clone();
+    let task =
+        tokio::spawn(async move { worker.run_until(pending::<()>(), RebindPolicy::Never).await });
     actor.send(()).await.expect("message sent");
 
     let result = timeout(Duration::from_secs(1), task)
@@ -492,7 +453,7 @@ async fn handler_error_fails_the_graph() {
         .expect("graph task joined");
     assert!(matches!(
         result,
-        Err(GraphError::ActorFailed { actor_id, .. }) if actor_id == "worker"
+        Err(ActorRunError::Failed { actor_id, .. }) if actor_id == "worker"
     ));
 }
 
@@ -591,11 +552,7 @@ async fn handler_discard_drops_queued_messages_and_call_reply() {
 
     stop.cancel();
     release.notify_one();
-    timeout(Duration::from_secs(1), task)
-        .await
-        .expect("graph stopped in time")
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    wait_graph(task).await;
 
     assert!(matches!(
         call_task.await.expect("call task joined"),
@@ -648,11 +605,7 @@ async fn handler_drain_handles_queued_messages_and_replies_before_stop() {
         call_task.await.expect("call task joined").expect("reply"),
         3
     );
-    timeout(Duration::from_secs(1), task)
-        .await
-        .expect("graph stopped in time")
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    wait_graph(task).await;
 
     assert_eq!(
         recv(&mut events_rx, "first drained message").await,
@@ -751,11 +704,7 @@ async fn try_recv_drains_messages_after_shutdown_recv_returns_none() {
 
     stop.cancel();
     release.notify_one();
-    timeout(Duration::from_secs(1), task)
-        .await
-        .expect("graph stopped in time")
-        .expect("graph task joined")
-        .expect("graph stopped cleanly");
+    wait_graph(task).await;
 
     assert_eq!(
         recv(&mut events_rx, "first drained value").await,
@@ -923,16 +872,20 @@ impl RawActor for Fail {
 }
 
 #[tokio::test]
-async fn actor_error_fails_the_graph() {
+async fn actor_error_fails_its_run() {
     let mut builder = GraphBuilder::new();
     builder.actor("healthy", Drain::<()>::new());
     builder.actor("bad", Fail);
     let graph = builder.build().expect("valid graph");
 
-    let result = graph.run_until(pending::<()>()).await;
+    let result = graph
+        .actor("bad")
+        .expect("bad actor exists")
+        .run_until(pending::<()>(), RebindPolicy::Never)
+        .await;
     assert!(matches!(
         result,
-        Err(GraphError::ActorFailed { actor_id, .. }) if actor_id == "bad"
+        Err(ActorRunError::Failed { actor_id, .. }) if actor_id == "bad"
     ));
 }
 
@@ -948,33 +901,17 @@ impl RawActor for Quit {
 }
 
 #[tokio::test]
-async fn early_clean_exit_fails_the_graph() {
+async fn early_clean_exit_is_a_clean_actor_run() {
     let mut builder = GraphBuilder::new();
     builder.actor("quitter", Quit);
     let graph = builder.build().expect("valid graph");
 
-    let result = graph.run_until(pending::<()>()).await;
-    assert!(matches!(
-        result,
-        Err(GraphError::ActorStopped { actor_id }) if actor_id == "quitter"
-    ));
-}
-
-#[tokio::test]
-async fn graph_can_only_run_once_at_a_time() {
-    let mut builder = GraphBuilder::new();
-    builder.actor("worker", Drain::<()>::new());
-    let graph = builder.build().expect("valid graph");
-
-    let handle = graph.spawn().expect("graph spawned");
-    assert!(matches!(
-        graph.run_until(async {}).await,
-        Err(GraphError::AlreadyRunning)
-    ));
-    handle
-        .shutdown_and_wait()
+    graph
+        .actor("quitter")
+        .expect("quitter exists")
+        .run_until(pending::<()>(), RebindPolicy::Never)
         .await
-        .expect("graph stopped cleanly");
+        .expect("clean early exit is ordinary completion");
 }
 
 #[tokio::test]
@@ -1027,6 +964,19 @@ async fn graph_shutdown_aborts_uncooperative_actor_after_timeout() {
     );
 }
 
+#[test]
+fn actors_are_exposed_in_declaration_order() {
+    let mut builder = GraphBuilder::new();
+    builder.actor("first", Drain::<()>::new());
+    let (slot, _second) = builder.slot::<u32>("second");
+    builder.actor("third", Drain::<()>::new());
+    builder.define(slot, Drain::<u32>::new());
+    let graph = builder.build().expect("valid graph");
+
+    let labels: Vec<&str> = graph.actors().iter().map(|actor| actor.label()).collect();
+    assert_eq!(labels, ["first", "second", "third"]);
+}
+
 #[tokio::test]
 async fn send_to_dropped_never_started_graph_returns_actor_terminated() {
     let mut builder = GraphBuilder::new();
@@ -1038,4 +988,679 @@ async fn send_to_dropped_never_started_graph_returns_actor_terminated() {
         echo.send(1).await,
         Err(SendError::ActorTerminated { actor_id }) if actor_id == "echo"
     ));
+}
+
+mod runnable_actor {
+    use std::{
+        fmt,
+        future::pending,
+        marker::PhantomData,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use tokio::{
+        sync::{Notify, mpsc},
+        task::JoinHandle,
+        time::{sleep, timeout},
+    };
+    use tokio_actor::{
+        ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, BoxError, Graph,
+        GraphBuilder, LookupError, RawActor, RebindPolicy, RunnableActor, SendError,
+    };
+    use tokio_util::sync::CancellationToken;
+    use tracing::{Dispatch, field::Visit};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+    struct Drain<M>(PhantomData<fn(M)>);
+
+    impl<M> Drain<M> {
+        fn new() -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl<M> Clone for Drain<M> {
+        fn clone(&self) -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl<M: Send + 'static> RawActor for Drain<M> {
+        type Msg = M;
+
+        async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+            while ctx.recv().await.is_some() {}
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct NeverStops;
+
+    impl RawActor for NeverStops {
+        type Msg = ();
+
+        async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+            pending::<ActorResult>().await
+        }
+    }
+
+    #[derive(Clone)]
+    struct StopsOnShutdown;
+
+    impl RawActor for StopsOnShutdown {
+        type Msg = ();
+
+        async fn run(&self, ctx: ActorContext<()>) -> ActorResult {
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct GatedDrain {
+        started: mpsc::UnboundedSender<()>,
+        release: Arc<Notify>,
+        received: mpsc::UnboundedSender<()>,
+    }
+
+    impl RawActor for GatedDrain {
+        type Msg = u32;
+
+        async fn run(&self, mut ctx: ActorContext<u32>) -> ActorResult {
+            self.started.send(()).expect("receiver alive");
+            self.release.notified().await;
+            while let Some(_message) = ctx.recv().await {
+                self.received.send(()).expect("receiver alive");
+            }
+            Ok(())
+        }
+    }
+
+    fn start_actor(
+        actor: RunnableActor,
+    ) -> (CancellationToken, JoinHandle<Result<(), ActorRunError>>) {
+        start_actor_with_policy(actor, RebindPolicy::Never)
+    }
+
+    fn start_actor_with_policy(
+        actor: RunnableActor,
+        rebind: RebindPolicy,
+    ) -> (CancellationToken, JoinHandle<Result<(), ActorRunError>>) {
+        let stop = CancellationToken::new();
+        let task = tokio::spawn({
+            let stop = stop.clone();
+            async move { actor.run_until(stop.cancelled(), rebind).await }
+        });
+        (stop, task)
+    }
+
+    async fn stop_actor(
+        stop: CancellationToken,
+        task: JoinHandle<Result<(), ActorRunError>>,
+    ) -> Result<(), ActorRunError> {
+        stop.cancel();
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("actor stopped in time")
+            .expect("actor task joined")
+    }
+
+    fn single_actor(graph: &Graph, id: &str) -> RunnableActor {
+        graph.actor(id).expect("actor exists").clone()
+    }
+
+    #[tokio::test]
+    async fn actor_stats_track_send_receive_and_bounded_mailbox() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(Notify::new());
+        let mut builder = GraphBuilder::new();
+        builder.mailbox_capacity(2);
+        let worker_ref = builder.actor(
+            "worker",
+            GatedDrain {
+                started: started_tx,
+                release: Arc::clone(&release),
+                received: received_tx,
+            },
+        );
+        let graph = builder.build().expect("valid graph");
+        let worker = single_actor(&graph, "worker");
+        let (stop, task) = start_actor(worker);
+
+        started_rx.recv().await.expect("actor started");
+        worker_ref.send(1).await.expect("send accepted");
+        worker_ref.try_send(2).expect("try_send accepted");
+        assert!(matches!(
+            worker_ref.try_send(3),
+            Err(SendError::MailboxFull { .. })
+        ));
+
+        assert_eq!(
+            worker_ref.stats(),
+            tokio_actor::ActorStats {
+                actor_id: "worker".to_owned(),
+                messages_received: 0,
+                messages_accepted: 2,
+                sends_rejected: 1,
+                mailbox_depth: 2,
+                mailbox_capacity: 2,
+            }
+        );
+        assert_eq!(graph.stats(), vec![worker_ref.stats()]);
+
+        release.notify_one();
+        received_rx.recv().await.expect("first message received");
+        received_rx.recv().await.expect("second message received");
+        let stats = worker_ref.stats();
+        assert_eq!(stats.messages_received, 2);
+        assert_eq!(stats.mailbox_depth, 0);
+        assert_eq!(stats.mailbox_capacity, 2);
+
+        stop_actor(stop, task).await.expect("actor stops");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runnable_actor_shutdown_timeout_aborts_uncooperative_actor_cleanly() {
+        let mut builder = GraphBuilder::new();
+        builder.actor_shutdown_timeout(Duration::from_millis(100));
+        builder.actor("worker", NeverStops);
+        let graph = builder.build().expect("valid graph");
+        let worker = single_actor(&graph, "worker");
+
+        worker
+            .run_until(async {}, RebindPolicy::Never)
+            .await
+            .expect("timeout abort is a clean requested shutdown");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runnable_actor_shutdown_timeout_leaves_cooperative_actor_clean() {
+        let mut builder = GraphBuilder::new();
+        builder.actor_shutdown_timeout(Duration::from_secs(30));
+        builder.actor("worker", StopsOnShutdown);
+        let graph = builder.build().expect("valid graph");
+        let worker = single_actor(&graph, "worker");
+
+        worker
+            .run_until(async {}, RebindPolicy::Never)
+            .await
+            .expect("cooperative shutdown completes cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dynamic_factory_actor_inherits_shutdown_timeout() {
+        let mut builder = GraphBuilder::new();
+        builder.actor_shutdown_timeout(Duration::from_millis(100));
+        builder.actor("anchor", Drain::<()>::new());
+        let graph = builder.build().expect("valid graph");
+        let worker = graph.dynamic_factory().actor("worker", NeverStops);
+
+        worker
+            .run_until(async {}, RebindPolicy::Never)
+            .await
+            .expect("factory actor uses inherited shutdown timeout");
+    }
+
+    #[derive(Clone, Default)]
+    struct MailboxClosedCounter {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl MailboxClosedCounter {
+        fn count(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl<S> Layer<S> for MailboxClosedCounter
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = RejectionVisitor::default();
+            event.record(&mut visitor);
+            if visitor.mailbox_closed {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RejectionVisitor {
+        mailbox_closed: bool,
+    }
+
+    impl Visit for RejectionVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "reason" && value == "mailbox_closed" {
+                self.mailbox_closed = true;
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            if field.name() == "reason" && format!("{value:?}").contains("mailbox_closed") {
+                self.mailbox_closed = true;
+            }
+        }
+    }
+
+    fn mailbox_closed_counter_dispatch(counter: MailboxClosedCounter) -> Dispatch {
+        Dispatch::new(
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::filter::LevelFilter::TRACE)
+                .with(counter),
+        )
+    }
+
+    async fn wait_for_stale_mailbox(actor_ref: &ActorRef<String>) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                match actor_ref.try_send("probe".to_owned()) {
+                    Err(SendError::MailboxClosed { .. }) => break,
+                    Err(SendError::ActorNotRunning { .. }) => {
+                        panic!("binding cleared before stale mailbox was observed");
+                    }
+                    Err(SendError::ActorTerminated { .. }) => {
+                        panic!("binding terminated before stale mailbox was observed");
+                    }
+                    Ok(()) | Err(SendError::MailboxFull { .. }) => {
+                        sleep(Duration::from_millis(1)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("stale mailbox observed in time");
+    }
+
+    #[derive(Clone)]
+    struct RebindActor {
+        runs: Arc<AtomicUsize>,
+        entered_stale_window: mpsc::UnboundedSender<()>,
+        release_first_run: Arc<Notify>,
+        observed: mpsc::UnboundedSender<String>,
+    }
+
+    impl RawActor for RebindActor {
+        type Msg = String;
+
+        async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+            let run = self.runs.fetch_add(1, Ordering::SeqCst);
+            if run == 0 {
+                drop(ctx);
+                self.entered_stale_window.send(()).expect("receiver alive");
+                self.release_first_run.notified().await;
+                return Ok(());
+            }
+
+            while let Some(message) = ctx.recv().await {
+                self.observed.send(message).expect("receiver alive");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn actor_ref_send_waits_for_stale_binding_to_change() {
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(Notify::new());
+
+        let mut builder = GraphBuilder::new();
+        builder.actor(
+            "worker",
+            RebindActor {
+                runs: Arc::new(AtomicUsize::new(0)),
+                entered_stale_window: entered_tx,
+                release_first_run: release.clone(),
+                observed: observed_tx,
+            },
+        );
+        let graph = builder.build().expect("valid graph");
+
+        let worker = single_actor(&graph, "worker");
+        let actor_ref = worker.actor_ref::<String>().expect("typed ref");
+        let (_first_stop, first_task) =
+            start_actor_with_policy(worker.clone(), RebindPolicy::Always);
+
+        timeout(Duration::from_secs(1), entered_rx.recv())
+            .await
+            .expect("actor entered stale window")
+            .expect("actor reported stale window");
+        wait_for_stale_mailbox(&actor_ref).await;
+
+        let counter = MailboxClosedCounter::default();
+        let dispatch = mailbox_closed_counter_dispatch(counter.clone());
+        let guard = tracing::dispatcher::set_default(&dispatch);
+
+        let sending_ref = actor_ref.clone();
+        let send_task = tokio::spawn(async move { sending_ref.send("held".to_owned()).await });
+        timeout(Duration::from_secs(1), async {
+            while counter.count() == 0 {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("send task observed stale closed mailbox in time");
+        assert!(
+            !send_task.is_finished(),
+            "send should wait for a new binding"
+        );
+
+        drop(guard);
+        assert_eq!(
+            counter.count(),
+            1,
+            "stale closed mailbox should be observed once before waiting"
+        );
+
+        release.notify_one();
+        first_task
+            .await
+            .expect("first actor task joined")
+            .expect("first actor run completed cleanly");
+
+        let (second_stop, second_task) = start_actor_with_policy(worker, RebindPolicy::Always);
+        assert_eq!(
+            timeout(Duration::from_secs(1), observed_rx.recv())
+                .await
+                .expect("held message delivered")
+                .expect("message observed"),
+            "held"
+        );
+        send_task
+            .await
+            .expect("send task joined")
+            .expect("send completed after rebind");
+
+        stop_actor(second_stop, second_task)
+            .await
+            .expect("second actor stopped cleanly");
+    }
+
+    #[tokio::test]
+    async fn runnable_actor_rejects_concurrent_runs() {
+        let mut builder = GraphBuilder::new();
+        builder.actor("worker", Drain::<()>::new());
+        let graph = builder.build().expect("valid graph");
+
+        let worker = single_actor(&graph, "worker");
+        let (stop, task) = start_actor(worker.clone());
+        sleep(Duration::from_millis(20)).await;
+
+        assert!(matches!(
+            worker
+                .run_until(pending::<()>(), RebindPolicy::Never)
+                .await,
+            Err(ActorRunError::AlreadyRunning { actor_id }) if actor_id == "worker"
+        ));
+
+        stop_actor(stop, task)
+            .await
+            .expect("worker stopped cleanly");
+    }
+
+    #[derive(Clone)]
+    struct FailsOnMessage;
+
+    impl RawActor for FailsOnMessage {
+        type Msg = ();
+
+        async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
+            ctx.recv().await;
+            Err(std::io::Error::other("commanded failure").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn rebind_policy_is_per_run_not_sticky() {
+        let mut builder = GraphBuilder::new();
+        let worker_ref = builder.actor("worker", FailsOnMessage);
+        let graph = builder.build().expect("valid graph");
+        let worker = single_actor(&graph, "worker");
+
+        // First run declares OnFailure: the failed exit leaves the binding
+        // waiting to rebind.
+        let (_stop, task) = start_actor_with_policy(worker.clone(), RebindPolicy::OnFailure);
+        worker_ref.send(()).await.expect("send accepted");
+        let result = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("first run exits in time")
+            .expect("first actor task joined");
+        assert!(matches!(result, Err(ActorRunError::Failed { .. })));
+        assert!(matches!(
+            worker_ref.try_send(()),
+            Err(SendError::ActorNotRunning { actor_id }) if actor_id == "worker"
+        ));
+
+        // A second run of the same actor declares Never: the same failed exit
+        // now terminates the binding — this run's argument wins over any state
+        // left behind by the first run.
+        let (_stop, task) = start_actor_with_policy(worker, RebindPolicy::Never);
+        worker_ref
+            .send(())
+            .await
+            .expect("send accepted after rebind");
+        let result = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("second run exits in time")
+            .expect("second actor task joined");
+        assert!(matches!(result, Err(ActorRunError::Failed { .. })));
+        assert!(matches!(
+            worker_ref.try_send(()),
+            Err(SendError::ActorTerminated { actor_id }) if actor_id == "worker"
+        ));
+    }
+
+    struct Work(&'static str);
+
+    #[derive(Clone)]
+    struct Forwarder {
+        worker: ActorRef<Work>,
+    }
+
+    impl RawActor for Forwarder {
+        type Msg = Work;
+
+        async fn run(&self, mut ctx: ActorContext<Work>) -> ActorResult {
+            while let Some(work) = ctx.recv().await {
+                let worker = self.worker.clone();
+                worker.send(work).await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct RestartingWorker {
+        runs: Arc<AtomicUsize>,
+        observed: mpsc::UnboundedSender<&'static str>,
+    }
+
+    impl RawActor for RestartingWorker {
+        type Msg = Work;
+
+        async fn run(&self, mut ctx: ActorContext<Work>) -> ActorResult {
+            let run = self.runs.fetch_add(1, Ordering::SeqCst);
+            while let Some(Work(payload)) = ctx.recv().await {
+                self.observed.send(payload).expect("receiver alive");
+                if run == 0 {
+                    return Err::<(), BoxError>(std::io::Error::other("boom").into());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_refs_survive_individual_actor_restarts() {
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+
+        let mut builder = GraphBuilder::new();
+        let (worker_slot, worker_ref) = builder.slot::<Work>("worker");
+        builder.actor("frontend", Forwarder { worker: worker_ref });
+        builder.define(
+            worker_slot,
+            RestartingWorker {
+                runs: Arc::new(AtomicUsize::new(0)),
+                observed: observed_tx,
+            },
+        );
+        let graph = builder.build().expect("valid graph");
+
+        let frontend = single_actor(&graph, "frontend");
+        let worker = single_actor(&graph, "worker");
+        let frontend_ref = graph
+            .actor_ref::<Work>("frontend")
+            .expect("frontend ref exists");
+
+        let (frontend_stop, frontend_task) = start_actor(frontend);
+        let (_first_worker_stop, first_worker_task) =
+            start_actor_with_policy(worker.clone(), RebindPolicy::OnFailure);
+
+        frontend_ref.send(Work("first")).await.expect("first send");
+        assert_eq!(
+            timeout(Duration::from_secs(1), observed_rx.recv())
+                .await
+                .expect("first observed")
+                .expect("message observed"),
+            "first"
+        );
+        assert!(matches!(
+            timeout(Duration::from_secs(1), first_worker_task)
+                .await
+                .expect("first worker exited")
+                .expect("first worker task joined"),
+            Err(ActorRunError::Failed { ref actor_id, .. }) if actor_id == "worker"
+        ));
+
+        frontend_ref
+            .send(Work("second"))
+            .await
+            .expect("second send");
+        assert!(
+            timeout(Duration::from_millis(100), observed_rx.recv())
+                .await
+                .is_err(),
+            "frontend should hold the message until worker restarts"
+        );
+
+        let (second_worker_stop, second_worker_task) =
+            start_actor_with_policy(worker, RebindPolicy::OnFailure);
+        assert_eq!(
+            timeout(Duration::from_secs(1), observed_rx.recv())
+                .await
+                .expect("second observed")
+                .expect("message observed"),
+            "second"
+        );
+
+        stop_actor(frontend_stop, frontend_task)
+            .await
+            .expect("frontend stopped cleanly");
+        stop_actor(second_worker_stop, second_worker_task)
+            .await
+            .expect("worker stopped cleanly");
+    }
+
+    enum ProbeMsg {
+        Check,
+    }
+
+    #[derive(Clone)]
+    struct RegistryProbe {
+        result: mpsc::UnboundedSender<bool>,
+    }
+
+    impl RawActor for RegistryProbe {
+        type Msg = ProbeMsg;
+
+        async fn run(&self, mut ctx: ActorContext<ProbeMsg>) -> ActorResult {
+            while let Some(ProbeMsg::Check) = ctx.recv().await {
+                let mismatch = matches!(
+                    ctx.registry()
+                        .expect("registry installed")
+                        .actor_ref::<String>("numbers"),
+                    Err(LookupError::MessageTypeMismatch { .. })
+                );
+                self.result.send(mismatch).expect("receiver alive");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn context_registry_lookup_checks_message_type() {
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let mut builder = GraphBuilder::new();
+        builder.actor("numbers", Drain::<u32>::new());
+        builder.actor("probe", RegistryProbe { result: result_tx });
+        let graph = builder.build().expect("valid graph");
+
+        let registry = ActorRegistry::new();
+        for actor in graph.actors() {
+            actor.set_registry(registry.clone());
+            actor.register_with(&registry).expect("actor registers");
+        }
+
+        let probe = single_actor(&graph, "probe");
+        let probe_ref = graph.actor_ref::<ProbeMsg>("probe").expect("probe ref");
+        let (stop, task) = start_actor(probe);
+
+        probe_ref.send(ProbeMsg::Check).await.expect("probe send");
+        assert!(
+            timeout(Duration::from_secs(1), result_rx.recv())
+                .await
+                .expect("probe answered")
+                .expect("probe result")
+        );
+
+        stop_actor(stop, task).await.expect("probe stopped cleanly");
+    }
+
+    #[derive(Clone)]
+    struct CleanExit;
+
+    impl RawActor for CleanExit {
+        type Msg = ();
+
+        async fn run(&self, _ctx: ActorContext<()>) -> ActorResult {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_evicts_actor_after_terminal_clean_exit() {
+        let mut builder = GraphBuilder::new();
+        builder.actor("temporary", CleanExit);
+        let graph = builder.build().expect("valid graph");
+        let actor = single_actor(&graph, "temporary");
+
+        let registry = ActorRegistry::new();
+        actor.set_registry(registry.clone());
+        actor.register_with(&registry).expect("actor registered");
+        assert!(registry.contains("temporary"));
+
+        let task = tokio::spawn(async move {
+            actor
+                .run_until(pending::<()>(), RebindPolicy::OnFailure)
+                .await
+        });
+        task.await
+            .expect("actor task joined")
+            .expect("actor exited cleanly");
+
+        assert!(!registry.contains("temporary"));
+        assert!(registry.actor_ids().is_empty());
+        assert!(matches!(
+            registry.actor_ref::<()>("temporary"),
+            Err(LookupError::UnknownActor { actor_id }) if actor_id == "temporary"
+        ));
+    }
 }

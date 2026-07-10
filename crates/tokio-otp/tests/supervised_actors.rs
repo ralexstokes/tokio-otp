@@ -100,7 +100,6 @@ async fn supervised_actors_restart_only_the_failed_actor() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .restart(Restart::Transient)
         .build_supervisor(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("supervisor builds");
@@ -183,7 +182,6 @@ async fn send_waits_during_permanent_restart_window() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .actor_restart("worker", Restart::Permanent)
         .actor_restart_intensity(
             "worker",
@@ -253,7 +251,6 @@ async fn send_to_cleanly_exiting_transient_returns_actor_terminated_promptly() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .restart(Restart::Transient)
         .build_supervisor(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("supervisor builds");
@@ -343,7 +340,6 @@ async fn call_succeeds_across_restart_window() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .actor_restart("rpc", Restart::Transient)
         .actor_restart_intensity(
             "rpc",
@@ -417,7 +413,6 @@ fn supervised_actors_reject_unknown_actor_overrides() {
     let graph = builder.build().expect("valid graph");
 
     let result = SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .actor_restart("missing", Restart::Permanent)
         .build();
 

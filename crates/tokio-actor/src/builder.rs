@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -14,7 +14,7 @@ use crate::{
     binding::{BindingCore, BindingLifecycle},
     context::ActorRef,
     error::GraphBuildError,
-    graph::{ErasedRunner, Graph, GraphActor, GraphInner, TypedRunner},
+    graph::{ErasedRunner, Graph, RunnableActor, RunnableActorParts, TypedRunner},
     observability::{GraphObservability, anonymous_graph_name},
 };
 
@@ -108,9 +108,9 @@ impl GraphBuilder {
     /// Sets how long shutdown waits for an actor task to stop after
     /// cancellation is requested.
     ///
-    /// This applies to [`Graph::run_until`](crate::Graph::run_until) and to
-    /// each [`RunnableActor::run_until`](crate::RunnableActor::run_until)
-    /// independently. The default timeout is 5 seconds. Any actor task still
+    /// This applies to each
+    /// [`RunnableActor::run_until`](crate::RunnableActor::run_until). The
+    /// default timeout is 5 seconds. Any actor task still
     /// running after the timeout is aborted; when this happens during a
     /// requested shutdown it is reported as a clean shutdown with a
     /// `Cancelled` actor exit.
@@ -227,25 +227,26 @@ impl GraphBuilder {
                     actor_id: slot.actor_id.to_string(),
                 });
             };
-            actors.push(GraphActor {
+            actors.push(RunnableActor::new(RunnableActorParts {
                 actor_id: slot.actor_id,
                 message_type: slot.message_type,
                 message_type_name: slot.message_type_name,
                 binding: slot.binding,
                 binding_lifecycle: slot.binding_lifecycle,
                 runner,
-            });
+                mailbox_capacity: self.mailbox_capacity,
+                actor_shutdown_timeout: self.actor_shutdown_timeout,
+                observability: observability.clone(),
+            }));
         }
 
-        Ok(Graph::new(GraphInner {
-            name: graph_name,
+        Ok(Graph::new(
+            graph_name,
             actors,
-            actor_index: self.index,
-            mailbox_capacity: self.mailbox_capacity,
-            actor_shutdown_timeout: self.actor_shutdown_timeout,
-            state: AtomicU8::new(0),
             observability,
-        }))
+            self.mailbox_capacity,
+            self.actor_shutdown_timeout,
+        ))
     }
 
     /// Creates a named slot and returns its index plus typed ref.

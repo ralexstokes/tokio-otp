@@ -1,9 +1,6 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use tracing::{Span, debug, info, info_span, trace, warn};
@@ -40,65 +37,8 @@ impl GraphObservability {
         }
     }
 
-    pub(crate) fn graph_span(&self, actor_count: usize, mailbox_capacity: usize) -> Span {
-        info_span!(
-            "actor_graph",
-            graph = %self.graph_name,
-            actor_count,
-            mailbox_capacity,
-        )
-    }
-
     pub(crate) fn actor_span(&self, actor_id: &str) -> Span {
         info_span!("actor", graph = %self.graph_name, actor_id = %actor_id)
-    }
-
-    pub(crate) fn emit_graph_started(&self, actor_count: usize, mailbox_capacity: usize) {
-        info!(
-            graph = %self.graph_name,
-            actor_count,
-            mailbox_capacity,
-            "graph started"
-        );
-    }
-
-    pub(crate) fn emit_graph_stopped(
-        &self,
-        duration: Duration,
-        status: GraphRunStatus,
-        error: Option<&str>,
-    ) {
-        if status == GraphRunStatus::Ok {
-            info!(
-                graph = %self.graph_name,
-                status = status.as_str(),
-                duration_secs = duration.as_secs_f64(),
-                "graph stopped"
-            );
-        } else if let Some(error) = error {
-            warn!(
-                graph = %self.graph_name,
-                status = status.as_str(),
-                error = %error,
-                duration_secs = duration.as_secs_f64(),
-                "graph stopped"
-            );
-        } else {
-            warn!(
-                graph = %self.graph_name,
-                status = status.as_str(),
-                duration_secs = duration.as_secs_f64(),
-                "graph stopped"
-            );
-        }
-    }
-
-    pub(crate) fn emit_shutdown_requested(&self, cause: GraphShutdownCause) {
-        debug!(
-            graph = %self.graph_name,
-            cause = cause.as_str(),
-            "graph shutdown requested"
-        );
     }
 
     pub(crate) fn emit_actor_started(&self, actor_id: &Arc<str>) {
@@ -204,42 +144,6 @@ pub(crate) fn trace_actor_message(
             operation = operation.as_str(),
             "message sent"
         ),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GraphRunStatus {
-    Ok,
-    Failed,
-}
-
-impl GraphRunStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GraphShutdownCause {
-    External,
-    ActorStopped,
-    ActorFailed,
-    ActorPanicked,
-    ActorCancelled,
-}
-
-impl GraphShutdownCause {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::External => "external",
-            Self::ActorStopped => "actor_stopped",
-            Self::ActorFailed => "actor_failed",
-            Self::ActorPanicked => "actor_panicked",
-            Self::ActorCancelled => "actor_cancelled",
-        }
     }
 }
 

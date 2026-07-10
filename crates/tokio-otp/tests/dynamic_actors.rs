@@ -9,7 +9,6 @@ use tokio_supervisor::{ChildSpec, ControlError, ShutdownPolicy, Strategy, Superv
 
 fn build_runtime(graph: tokio_actor::Graph) -> Runtime {
     SupervisedActors::new(graph)
-        .expect("graph decomposes")
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("runtime builds")
 }

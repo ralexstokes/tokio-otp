@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tokio_actor::{ActorRegistry, ActorSet, Graph};
+use tokio_actor::{ActorRegistry, Graph};
 use tokio_supervisor::{
     ChildSpec, Restart, RestartIntensity, ShutdownPolicy, Supervisor, SupervisorBuilder,
 };
@@ -20,23 +20,21 @@ struct ActorOverrides {
 /// Builder that adapts each actor in a graph into its own supervised child.
 #[derive(Clone, Debug)]
 pub struct SupervisedActors {
-    actor_set: ActorSet,
+    graph: Graph,
     default_restart: Restart,
     default_shutdown: ShutdownPolicy,
     overrides: HashMap<String, ActorOverrides>,
 }
 
 impl SupervisedActors {
-    /// Decomposes a graph into per-actor supervised children.
-    pub fn new(graph: Graph) -> Result<Self, RuntimeBuildError> {
-        let actor_set = graph.into_actor_set()?;
-
-        Ok(Self {
-            actor_set,
+    /// Adapts a graph into per-actor supervised children.
+    pub fn new(graph: Graph) -> Self {
+        Self {
+            graph,
             default_restart: Restart::Transient,
             default_shutdown: ShutdownPolicy::default(),
             overrides: HashMap::new(),
-        })
+        }
     }
 
     /// Sets the default restart policy applied to every actor child.
@@ -106,12 +104,12 @@ impl SupervisedActors {
         self.validate_overrides()?;
 
         let registry = ActorRegistry::new();
-        for actor in self.actor_set.actors() {
+        for actor in self.graph.actors() {
             actor.set_registry(registry.clone());
             actor.register_with(&registry)?;
         }
 
-        let actor_factory = self.actor_set.dynamic_factory();
+        let actor_factory = self.graph.dynamic_factory();
         let children = self.actor_children();
         let builder = children
             .into_iter()
@@ -123,7 +121,7 @@ impl SupervisedActors {
 
     fn validate_overrides(&self) -> Result<(), RuntimeBuildError> {
         for actor_id in self.overrides.keys() {
-            if self.actor_set.actor(actor_id).is_none() {
+            if self.graph.actor(actor_id).is_none() {
                 return Err(RuntimeBuildError::UnknownActor {
                     actor_id: actor_id.clone(),
                 });
@@ -134,7 +132,7 @@ impl SupervisedActors {
     }
 
     fn actor_children(&self) -> Vec<ChildSpec> {
-        self.actor_set
+        self.graph
             .actors()
             .iter()
             .cloned()
@@ -143,7 +141,11 @@ impl SupervisedActors {
     }
 
     fn actor_child(&self, actor: tokio_actor::RunnableActor) -> ChildSpec {
-        let overrides = self.overrides.get(actor.id()).copied().unwrap_or_default();
+        let overrides = self
+            .overrides
+            .get(actor.label())
+            .copied()
+            .unwrap_or_default();
         actor_child_spec(
             actor,
             overrides.restart.unwrap_or(self.default_restart),

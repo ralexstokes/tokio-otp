@@ -33,13 +33,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         observed: observed_tx,
     });
     let sink_id = sink_ref.id().to_owned();
-    let actor_set = builder.build()?.into_actor_set()?;
-    let sink = actor_set.actor(&sink_id).expect("sink exists").clone();
-    sink.set_rebind_policy(RebindPolicy::Always);
+    let graph = builder.build()?;
+    let sink = graph.actor(&sink_id).expect("sink exists").clone();
 
     let first_run = tokio::spawn({
         let sink = sink.clone();
-        async move { sink.run_until(pending::<()>()).await }
+        async move { sink.run_until(pending::<()>(), RebindPolicy::Always).await }
     });
     sink_ref.send("first run".to_owned()).await?;
     println!(
@@ -72,7 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let second_run = tokio::spawn({
         let sink = sink.clone();
-        async move { sink.run_until(pending::<()>()).await }
+        async move { sink.run_until(pending::<()>(), RebindPolicy::Always).await }
     });
     println!(
         "sink observed `{}`",
