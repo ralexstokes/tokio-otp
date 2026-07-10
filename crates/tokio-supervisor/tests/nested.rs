@@ -9,8 +9,8 @@ use std::{
 use tokio::sync::{Notify, broadcast, mpsc};
 use tokio_supervisor::{
     BackoffPolicy, ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView,
-    Restart, RestartIntensity, ShutdownPolicy, SupervisorBuilder, SupervisorEvent, SupervisorSpec,
-    SupervisorStateView,
+    RestartIntensity, RestartPolicy, ShutdownPolicy, SupervisorBuilder, SupervisorEvent,
+    SupervisorSpec, SupervisorStateView,
 };
 
 mod common;
@@ -18,14 +18,14 @@ mod common;
 #[tokio::test]
 async fn nested_supervisor_completes_as_a_clean_child_exit() {
     let nested = SupervisorBuilder::new()
-        .child(ChildSpec::new("leaf", |_ctx| async move { Ok(()) }).restart(Restart::Temporary))
+        .child(ChildSpec::new("leaf", |_ctx| async move { Ok(()) }).restart(RestartPolicy::Never))
         .build()
         .expect("valid nested supervisor");
 
     let outer = SupervisorBuilder::new()
         .supervisor(
             "nested",
-            SupervisorSpec::new(nested).restart(Restart::Temporary),
+            SupervisorSpec::new(nested).restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid outer supervisor");
@@ -76,7 +76,7 @@ async fn nested_terminal_failure_remains_in_the_nested_snapshot() {
                     }
                 }
             })
-            .restart(Restart::Temporary),
+            .restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid nested supervisor");
@@ -84,7 +84,7 @@ async fn nested_terminal_failure_remains_in_the_nested_snapshot() {
     let outer = SupervisorBuilder::new()
         .supervisor(
             "nested",
-            SupervisorSpec::new(nested).restart(Restart::Transient),
+            SupervisorSpec::new(nested).restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid outer supervisor");
@@ -346,14 +346,14 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
 #[tokio::test]
 async fn parent_event_stream_includes_forwarded_nested_events() {
     let nested = SupervisorBuilder::new()
-        .child(ChildSpec::new("leaf", |_ctx| async move { Ok(()) }).restart(Restart::Temporary))
+        .child(ChildSpec::new("leaf", |_ctx| async move { Ok(()) }).restart(RestartPolicy::Never))
         .build()
         .expect("valid nested supervisor");
 
     let outer = SupervisorBuilder::new()
         .supervisor(
             "nested",
-            SupervisorSpec::new(nested).restart(Restart::Temporary),
+            SupervisorSpec::new(nested).restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid outer supervisor");
@@ -416,14 +416,14 @@ async fn parent_event_stream_includes_forwarded_nested_events() {
 #[tokio::test]
 async fn nested_events_preserve_the_full_tree_path() {
     let deepest = SupervisorBuilder::new()
-        .child(ChildSpec::new("leaf", |_ctx| async move { Ok(()) }).restart(Restart::Temporary))
+        .child(ChildSpec::new("leaf", |_ctx| async move { Ok(()) }).restart(RestartPolicy::Never))
         .build()
         .expect("valid deepest supervisor");
 
     let middle = SupervisorBuilder::new()
         .supervisor(
             "middle",
-            SupervisorSpec::new(deepest).restart(Restart::Temporary),
+            SupervisorSpec::new(deepest).restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid middle supervisor");
@@ -431,7 +431,7 @@ async fn nested_events_preserve_the_full_tree_path() {
     let outer = SupervisorBuilder::new()
         .supervisor(
             "outer",
-            SupervisorSpec::new(middle).restart(Restart::Temporary),
+            SupervisorSpec::new(middle).restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid outer supervisor");

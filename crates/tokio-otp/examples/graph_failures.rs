@@ -63,7 +63,7 @@ async fn demonstrate(strategy: Strategy) -> Result<(usize, usize), Box<dyn Error
     let handle = Runtime::builder()
         .graph(builder.build()?)
         .strategy(strategy)
-        .restart(Restart::Permanent)
+        .restart(RestartPolicy::Always)
         .build()?
         .spawn();
 

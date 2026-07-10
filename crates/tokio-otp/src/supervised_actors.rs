@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use crate::{ActorRef, Graph};
 use tokio_supervisor::{
-    ChildSpec, Restart, RestartIntensity, ShutdownPolicy, Supervisor, SupervisorBuilder,
+    ChildSpec, RestartIntensity, RestartPolicy, ShutdownPolicy, Supervisor, SupervisorBuilder,
 };
 
 use crate::runtime::{Runtime, actor_child_spec};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ActorOverrides {
-    restart: Option<Restart>,
+    restart: Option<RestartPolicy>,
     restart_intensity: Option<RestartIntensity>,
     shutdown: Option<ShutdownPolicy>,
 }
@@ -18,7 +18,7 @@ struct ActorOverrides {
 #[derive(Clone, Debug)]
 pub struct SupervisedActors {
     graph: Graph,
-    default_restart: Restart,
+    default_restart: RestartPolicy,
     default_shutdown: ShutdownPolicy,
     overrides: HashMap<String, ActorOverrides>,
 }
@@ -28,7 +28,7 @@ impl SupervisedActors {
     pub fn new(graph: Graph) -> Self {
         Self {
             graph,
-            default_restart: Restart::Transient,
+            default_restart: RestartPolicy::OnFailure,
             default_shutdown: ShutdownPolicy::default(),
             overrides: HashMap::new(),
         }
@@ -36,7 +36,7 @@ impl SupervisedActors {
 
     /// Sets the default restart policy applied to every actor child.
     #[must_use]
-    pub fn restart(mut self, restart: Restart) -> Self {
+    pub fn restart(mut self, restart: RestartPolicy) -> Self {
         self.default_restart = restart;
         self
     }
@@ -50,7 +50,7 @@ impl SupervisedActors {
 
     /// Overrides the restart policy for the actor identified by this typed ref.
     #[must_use]
-    pub fn actor_restart<M>(mut self, actor: &ActorRef<M>, restart: Restart) -> Self {
+    pub fn actor_restart<M>(mut self, actor: &ActorRef<M>, restart: RestartPolicy) -> Self {
         self.overrides
             .entry(actor.id().to_owned())
             .or_default()

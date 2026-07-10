@@ -8,8 +8,8 @@ use tokio::{
     time::{Duration, sleep, timeout},
 };
 use tokio_supervisor::{
-    BackoffPolicy, ChildSpec, ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy,
-    SupervisorBuilder, SupervisorEvent,
+    BackoffPolicy, ChildSpec, ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy,
+    Strategy, SupervisorBuilder, SupervisorEvent,
 };
 
 mod common;
@@ -37,7 +37,7 @@ async fn failed_transient_child_restarts_and_sibling_keeps_running() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let sibling_ticks_for_child = sibling_ticks.clone();
     let sibling = ChildSpec::new("sibling", move |ctx| {
@@ -103,7 +103,7 @@ async fn permanent_child_restarts_after_completion() {
             Ok(())
         }
     })
-    .restart(Restart::Permanent);
+    .restart(RestartPolicy::Always);
 
     let supervisor = SupervisorBuilder::new()
         .child(child)
@@ -133,7 +133,7 @@ async fn temporary_child_does_not_restart() {
                     Err(common::test_error("no restart"))
                 }
             })
-            .restart(Restart::Temporary),
+            .restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid supervisor");
@@ -196,7 +196,7 @@ async fn child_restart_intensity_is_isolated_per_child() {
             Ok(())
         }
     })
-    .restart(Restart::Transient)
+    .restart(RestartPolicy::OnFailure)
     .restart_intensity(child_restart_intensity);
 
     let child_b = ChildSpec::new("child-b", move |ctx| {
@@ -214,7 +214,7 @@ async fn child_restart_intensity_is_isolated_per_child() {
             Ok(())
         }
     })
-    .restart(Restart::Transient)
+    .restart(RestartPolicy::OnFailure)
     .restart_intensity(child_restart_intensity);
 
     let supervisor = SupervisorBuilder::new()
@@ -260,7 +260,7 @@ async fn restart_events_follow_exit_schedule_start_restart_order() {
                     }
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor")

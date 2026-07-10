@@ -19,7 +19,7 @@ use crate::{
     event::{ExitStatusView, NestedEventNotification, SupervisorEvent},
     handle::{NestedChannels, NestedHandles, StableSupervisorChannels, SupervisorCommand},
     observability::{SupervisorObservability, format_child_path},
-    restart::{Restart, RestartIntensity},
+    restart::{RestartIntensity, RestartPolicy},
     snapshot::{
         ChildMembershipView, ChildSnapshot, ChildStateView, NestedSnapshotNotification,
         NestedSnapshotState, SupervisorSnapshot, SupervisorStateView,
@@ -845,7 +845,7 @@ impl SupervisorRuntime {
         for key in keys {
             let entry = &self.children[key];
             if entry.membership != MembershipState::Active
-                || matches!(entry.runtime.definition.restart, Restart::Temporary)
+                || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
             {
                 continue;
             }

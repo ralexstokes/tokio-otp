@@ -5,7 +5,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_supervisor::{
-    ChildSpec, ControlError, ExitStatusView, Restart, ShutdownMode, ShutdownPolicy,
+    ChildSpec, ControlError, ExitStatusView, RestartPolicy, ShutdownMode, ShutdownPolicy,
     SupervisorBuilder, SupervisorEvent,
 };
 
@@ -30,7 +30,7 @@ async fn empty_supervisor_starts_empty_and_accepts_children() {
 
     handle
         .add_child(
-            ChildSpec::new("dynamic", |_ctx| async move { Ok(()) }).restart(Restart::Temporary),
+            ChildSpec::new("dynamic", |_ctx| async move { Ok(()) }).restart(RestartPolicy::Never),
         )
         .await
         .expect("empty supervisor accepts a child");
@@ -136,7 +136,7 @@ async fn transient_success_idles_until_shutdown() {
                     Ok(())
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor");
@@ -187,7 +187,7 @@ async fn terminal_failure_remains_visible_while_idle() {
                     Err(common::test_error("terminal failure"))
                 }
             })
-            .restart(Restart::Temporary),
+            .restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid supervisor");
@@ -280,7 +280,7 @@ async fn remove_child_stops_it_without_restarting() {
                     Err(common::test_error("do not restart on remove"))
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
@@ -386,7 +386,7 @@ async fn concurrent_removal_requests_are_serialized() {
                     Ok(())
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
@@ -449,7 +449,7 @@ async fn removal_returns_supervisor_stopping_when_shutdown_intervenes() {
                     Ok(())
                 }
             })
-            .restart(Restart::Transient)
+            .restart(RestartPolicy::OnFailure)
             .shutdown(fast_shutdown),
         )
         .child(
@@ -483,7 +483,7 @@ async fn removal_returns_supervisor_stopping_when_shutdown_intervenes() {
 #[tokio::test]
 async fn control_plane_remains_available_after_all_children_exit() {
     let handle = SupervisorBuilder::new()
-        .child(ChildSpec::new("done", |_ctx| async move { Ok(()) }).restart(Restart::Temporary))
+        .child(ChildSpec::new("done", |_ctx| async move { Ok(()) }).restart(RestartPolicy::Never))
         .build()
         .expect("valid supervisor")
         .spawn();
@@ -528,7 +528,7 @@ async fn remove_child_completes_promptly_during_restart_backoff() {
                     Err(common::test_error("restart me later"))
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
@@ -602,7 +602,7 @@ async fn removed_child_does_not_restart_recycled_slot_after_backoff() {
                     Err(common::test_error("restart me later"))
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
             ctx.shutdown_token().cancelled().await;

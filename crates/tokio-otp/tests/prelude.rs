@@ -17,12 +17,12 @@ mod coverage_probe {
     mod supervisor {
         use tokio_otp::prelude::{
             BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
-            ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart,
-            RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy,
-            Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
-            SupervisorEvent, SupervisorEventReceiverExt as _, SupervisorHandle, SupervisorSnapshot,
-            SupervisorSnapshotReceiverExt as _, SupervisorSpec, SupervisorStateView,
-            SupervisorToken,
+            ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView,
+            RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode,
+            ShutdownPolicy, Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder,
+            SupervisorError, SupervisorEvent, SupervisorEventReceiverExt as _, SupervisorHandle,
+            SupervisorSnapshot, SupervisorSnapshotReceiverExt as _, SupervisorSpec,
+            SupervisorStateView, SupervisorToken,
         };
     }
 

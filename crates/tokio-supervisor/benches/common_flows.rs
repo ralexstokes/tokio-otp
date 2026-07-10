@@ -15,7 +15,7 @@ use tokio::{
     sync::Notify,
 };
 use tokio_supervisor::{
-    BoxError, ChildSpec, Restart, Strategy, SupervisorBuilder, SupervisorEvent,
+    BoxError, ChildSpec, RestartPolicy, Strategy, SupervisorBuilder, SupervisorEvent,
 };
 
 const DEFAULT_WARMUP_ITERS: usize = 10;
@@ -137,7 +137,7 @@ async fn one_for_one_restart_flow() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let mut builder = SupervisorBuilder::new()
         .strategy(Strategy::OneForOne)
@@ -179,7 +179,7 @@ async fn one_for_all_restart_flow() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let mut builder = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
@@ -190,7 +190,7 @@ async fn one_for_all_restart_flow() {
                 ctx.shutdown_token().cancelled().await;
                 Ok(())
             })
-            .restart(Restart::Permanent),
+            .restart(RestartPolicy::Always),
         );
     }
 

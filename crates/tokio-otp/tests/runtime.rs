@@ -15,7 +15,7 @@ use tokio_otp::{
     RawActor, Reply, Runtime, SendError, SupervisedActors,
 };
 use tokio_supervisor::{
-    ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy, SupervisorBuilder,
+    ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, Strategy, SupervisorBuilder,
     SupervisorStateView,
 };
 
@@ -399,7 +399,7 @@ async fn runtime_handle_monitor_restart_delegates_to_supervisor() {
     let runtime = Runtime::builder()
         .graph(graph)
         .strategy(Strategy::OneForOne)
-        .restart(Restart::Transient)
+        .restart(RestartPolicy::OnFailure)
         .build()
         .expect("runtime builds");
     let handle = runtime.spawn();
@@ -441,7 +441,7 @@ async fn send_fails_after_restart_intensity_is_exhausted() {
     let runtime = Runtime::builder()
         .graph(graph)
         .strategy(Strategy::OneForOne)
-        .restart(Restart::Permanent)
+        .restart(RestartPolicy::Always)
         .restart_intensity(RestartIntensity::new(1, Duration::from_secs(60)))
         .build()
         .expect("runtime builds");
@@ -516,7 +516,7 @@ async fn supervised_restart_resets_actor_state_to_the_wiring_time_value() {
 
     let runtime = Runtime::builder()
         .graph(graph)
-        .restart(Restart::Permanent)
+        .restart(RestartPolicy::Always)
         .build()
         .expect("runtime builds");
     let handle = runtime.spawn();

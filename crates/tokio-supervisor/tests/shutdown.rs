@@ -8,7 +8,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 use tokio_supervisor::{
-    BackoffPolicy, ChildSpec, ControlError, Restart, RestartIntensity, ShutdownMode,
+    BackoffPolicy, ChildSpec, ControlError, RestartIntensity, RestartPolicy, ShutdownMode,
     ShutdownPolicy, SupervisorBuilder, SupervisorError, SupervisorEvent,
 };
 
@@ -399,7 +399,7 @@ async fn shutdown_preempts_zero_delay_restart() {
             ChildSpec::new("flaky", |_ctx| async move {
                 Err(common::test_error("restart immediately"))
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor");
@@ -452,7 +452,7 @@ async fn shutdown_preempts_delayed_restart_in_cooperative_mode() {
             ChildSpec::new("flaky", |_ctx| async move {
                 Err(common::test_error("restart later"))
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .child(
             ChildSpec::new("keeper", move |ctx| {

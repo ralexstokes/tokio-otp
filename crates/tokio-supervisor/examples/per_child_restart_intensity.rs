@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     })
-    .restart(Restart::Transient)
+    .restart(RestartPolicy::OnFailure)
     .restart_intensity(RestartIntensity {
         max_restarts: 1,
         within: Duration::from_secs(1),

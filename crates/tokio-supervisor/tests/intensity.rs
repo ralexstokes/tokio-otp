@@ -11,7 +11,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_supervisor::{
-    BackoffPolicy, ChildSpec, Restart, RestartIntensity, SupervisorBuilder, SupervisorError,
+    BackoffPolicy, ChildSpec, RestartIntensity, RestartPolicy, SupervisorBuilder, SupervisorError,
     SupervisorEvent,
 };
 
@@ -27,7 +27,7 @@ async fn repeated_failures_can_exceed_restart_intensity() {
         })
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
-                .restart(Restart::Transient),
+                .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor");
@@ -51,7 +51,7 @@ async fn configured_backoff_delays_restart_attempts() {
         })
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
-                .restart(Restart::Transient),
+                .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor");
@@ -84,7 +84,7 @@ async fn jittered_exponential_backoff_delays_restart_attempts() {
         })
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
-                .restart(Restart::Transient),
+                .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor");
@@ -132,7 +132,7 @@ async fn exponential_backoff_delays_restart_attempts_by_expected_steps() {
                     }
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor")
@@ -196,7 +196,7 @@ async fn backoff_attempts_survive_window_eviction_and_reset_after_a_long_run() {
                     }
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor")
@@ -240,7 +240,7 @@ async fn child_restart_intensity_override_controls_backoff() {
         })
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
-                .restart(Restart::Transient)
+                .restart(RestartPolicy::OnFailure)
                 .restart_intensity(RestartIntensity {
                     max_restarts: 1,
                     within: Duration::from_secs(1),
@@ -286,7 +286,7 @@ async fn restart_intensity_is_tracked_per_child_for_one_for_one() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let beta = ChildSpec::new("beta", move |ctx| {
         let beta_attempts = beta_attempts.clone();
@@ -303,7 +303,7 @@ async fn restart_intensity_is_tracked_per_child_for_one_for_one() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let handle = SupervisorBuilder::new()
         .restart_intensity(RestartIntensity {
@@ -344,7 +344,7 @@ async fn child_restart_intensity_override_is_enforced() {
                     Err(common::test_error("boom"))
                 }
             })
-            .restart(Restart::Transient)
+            .restart(RestartPolicy::OnFailure)
             .restart_intensity(RestartIntensity {
                 max_restarts: 1,
                 within: Duration::from_secs(1),
@@ -399,7 +399,7 @@ async fn restart_budget_recovers_after_failures_age_out_of_window() {
                     }
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor")
@@ -442,7 +442,7 @@ async fn restart_intensity_is_tracked_per_failing_child_for_one_for_all() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let release_beta_for_child = release_beta.clone();
     let beta = ChildSpec::new("beta", move |ctx| {
@@ -461,7 +461,7 @@ async fn restart_intensity_is_tracked_per_failing_child_for_one_for_all() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let handle = SupervisorBuilder::new()
         .strategy(tokio_supervisor::Strategy::OneForAll)

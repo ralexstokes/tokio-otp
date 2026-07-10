@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         })
-        .restart(Restart::Permanent)
+        .restart(RestartPolicy::Always)
     };
 
     let decode = {
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         })
-        .restart(Restart::Transient)
+        .restart(RestartPolicy::OnFailure)
     };
 
     let sink = {
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         })
-        .restart(Restart::Permanent)
+        .restart(RestartPolicy::Always)
     };
 
     let supervisor = SupervisorBuilder::new()

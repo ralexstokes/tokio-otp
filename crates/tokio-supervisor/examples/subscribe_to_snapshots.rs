@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }))
         .supervisor(
             "nested",
-            SupervisorSpec::new(nested).restart(Restart::Temporary),
+            SupervisorSpec::new(nested).restart(RestartPolicy::Never),
         )
         .build()?;
 

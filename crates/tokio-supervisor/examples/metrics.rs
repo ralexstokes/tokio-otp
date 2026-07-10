@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(())
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()?;
 

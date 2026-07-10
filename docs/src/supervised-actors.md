@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder()
         .graph(graph)
         .strategy(Strategy::OneForOne)
-        .restart(Restart::Transient)
+        .restart(RestartPolicy::OnFailure)
         .restart_intensity(RestartIntensity::new(5, Duration::from_secs(60)))
         .build()?;
     let handle = runtime.spawn();
@@ -91,7 +91,7 @@ unrepresentable:
 
 ```rust,ignore
 let runtime = SupervisedActors::new(graph)
-    .restart(Restart::Transient)
+    .restart(RestartPolicy::OnFailure)
     .actor_restart_intensity(&press_ref, RestartIntensity::new(5, Duration::from_secs(60)))
     .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
 ```

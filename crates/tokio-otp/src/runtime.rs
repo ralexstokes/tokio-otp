@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::{ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory};
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{
-    ChildSpec, ControlError, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
+    ChildSpec, ControlError, RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy,
     ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,
     SupervisorSnapshot, SupervisorSpec,
 };
@@ -49,7 +49,7 @@ impl ActorRuntimeState {
 #[derive(Clone, Debug)]
 pub struct DynamicActorOptions {
     /// Restart policy for the supervised actor child.
-    pub restart: Restart,
+    pub restart: RestartPolicy,
     /// Shutdown policy for the supervised actor child.
     pub shutdown: ShutdownPolicy,
     /// Optional restart intensity override for this actor child.
@@ -59,7 +59,7 @@ pub struct DynamicActorOptions {
 impl Default for DynamicActorOptions {
     fn default() -> Self {
         Self {
-            restart: Restart::Transient,
+            restart: RestartPolicy::OnFailure,
             shutdown: ShutdownPolicy::default(),
             restart_intensity: None,
         }
@@ -287,8 +287,8 @@ impl std::fmt::Debug for RuntimeHandle {
 
 /// Terminates the actor's binding when the supervisor drops the child spec —
 /// the point after which no further restart can happen (restart intensity
-/// exhausted, child removed, or supervisor exit). Without this, a Permanent
-/// or Transient actor whose last run failed leaves its binding `Unbound` and
+/// exhausted, child removed, or supervisor exit). Without this, an `Always`
+/// or `OnFailure` actor whose last run failed leaves its binding `Unbound` and
 /// senders wait forever for a rebind.
 struct TerminateBindingOnDrop {
     actor: RunnableActor,
@@ -302,7 +302,7 @@ impl Drop for TerminateBindingOnDrop {
 
 pub(crate) fn actor_child_spec(
     actor: RunnableActor,
-    restart: Restart,
+    restart: RestartPolicy,
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
 ) -> ChildSpec {
@@ -328,10 +328,10 @@ pub(crate) fn actor_child_spec(
     child
 }
 
-fn rebind_policy_for_restart(restart: Restart) -> RebindPolicy {
+fn rebind_policy_for_restart(restart: RestartPolicy) -> RebindPolicy {
     match restart {
-        Restart::Permanent => RebindPolicy::Always,
-        Restart::Transient => RebindPolicy::OnFailure,
-        Restart::Temporary => RebindPolicy::Never,
+        RestartPolicy::Always => RebindPolicy::Always,
+        RestartPolicy::OnFailure => RebindPolicy::OnFailure,
+        RestartPolicy::Never => RebindPolicy::Never,
     }
 }

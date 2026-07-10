@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use tokio::sync::mpsc;
-use tokio_supervisor::{ChildSpec, Restart, Strategy, SupervisorBuilder};
+use tokio_supervisor::{ChildSpec, RestartPolicy, Strategy, SupervisorBuilder};
 
 mod common;
 
@@ -30,7 +30,7 @@ async fn transient_child_panic_causes_restart() {
                     Ok(())
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor");
@@ -63,7 +63,7 @@ async fn transient_factory_panic_causes_restart() {
                     Ok(())
                 }
             })
-            .restart(Restart::Transient),
+            .restart(RestartPolicy::OnFailure),
         )
         .build()
         .expect("valid supervisor");
@@ -97,7 +97,7 @@ async fn one_for_all_panic_restarts_the_whole_group() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
@@ -109,7 +109,7 @@ async fn one_for_all_panic_restarts_the_whole_group() {
             Ok(())
         }
     })
-    .restart(Restart::Permanent);
+    .restart(RestartPolicy::Always);
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
@@ -146,7 +146,7 @@ async fn one_for_all_factory_panic_restarts_the_whole_group() {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
@@ -158,7 +158,7 @@ async fn one_for_all_factory_panic_restarts_the_whole_group() {
             Ok(())
         }
     })
-    .restart(Restart::Permanent);
+    .restart(RestartPolicy::Always);
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)

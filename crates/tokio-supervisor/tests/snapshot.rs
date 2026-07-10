@@ -12,7 +12,7 @@ use tokio::{
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, ExitStatusView,
-    Restart, RestartIntensity, SupervisorBuilder, SupervisorEvent, SupervisorSnapshot,
+    RestartIntensity, RestartPolicy, SupervisorBuilder, SupervisorEvent, SupervisorSnapshot,
     SupervisorStateView,
 };
 
@@ -83,7 +83,7 @@ async fn snapshot_shows_restart_state_and_last_exit() {
             Ok(())
         }
     })
-    .restart(Restart::Transient)
+    .restart(RestartPolicy::OnFailure)
     .restart_intensity(RestartIntensity {
         max_restarts: 5,
         within: Duration::from_secs(1),
@@ -298,7 +298,7 @@ async fn stopped_snapshot_remains_available_after_shutdown() {
 async fn completed_children_leave_the_supervisor_idle_until_shutdown() {
     let supervisor = SupervisorBuilder::new()
         .child(
-            ChildSpec::new("temporary", |_ctx| async move { Ok(()) }).restart(Restart::Temporary),
+            ChildSpec::new("temporary", |_ctx| async move { Ok(()) }).restart(RestartPolicy::Never),
         )
         .build()
         .expect("valid supervisor");

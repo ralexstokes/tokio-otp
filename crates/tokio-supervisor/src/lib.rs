@@ -22,19 +22,19 @@
 //! - **[`OneForOne`](Strategy::OneForOne)** — only the failed child is
 //!   restarted. Siblings are unaffected. This is the default.
 //! - **[`OneForAll`](Strategy::OneForAll)** — all children are stopped and
-//!   restarted together. [`Temporary`](Restart::Temporary) children are still
+//!   restarted together. [`Never`](RestartPolicy::Never) children are still
 //!   drained with the group but are not respawned. Use this when children have
 //!   hard interdependencies.
 //!
 //! # Restart policies
 //!
-//! Each child has a [`Restart`] policy:
+//! Each child has a [`RestartPolicy`]:
 //!
-//! - **[`Permanent`](Restart::Permanent)** — always restarted, regardless of
+//! - **[`Always`](RestartPolicy::Always)** — always restarted, regardless of
 //!   exit status.
-//! - **[`Transient`](Restart::Transient)** (default) — restarted only on
+//! - **[`OnFailure`](RestartPolicy::OnFailure)** (default) — restarted only on
 //!   failure (`Err`, panic, or abort). A clean `Ok(())` exit is final.
-//! - **[`Temporary`](Restart::Temporary)** — never restarted. Runs at most
+//! - **[`Never`](RestartPolicy::Never)** — never restarted. Runs at most
 //!   once.
 //!
 //! Restarts are bounded by a [`RestartIntensity`] limit (default: 5 restarts
@@ -198,7 +198,7 @@ pub use error::{ControlError, RestartMonitorError, SupervisorBuildError, Supervi
 pub use event::{EventPathSegment, ExitStatusView, SupervisorEvent};
 pub use handle::SupervisorHandle;
 pub use monitor::RestartMonitor;
-pub use restart::{BackoffPolicy, Restart, RestartIntensity};
+pub use restart::{BackoffPolicy, RestartIntensity, RestartPolicy};
 pub use shutdown::{ShutdownMode, ShutdownPolicy};
 pub use snapshot::{
     ChildMembershipView, ChildSnapshot, ChildStateView, SupervisorSnapshot, SupervisorStateView,

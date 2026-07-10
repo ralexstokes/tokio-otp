@@ -22,7 +22,7 @@ From sketching a multi-venue trading system (per-venue market-data and
 execution subtrees nested under a root runtime, strategy actors as the root
 graph, per-position dynamic actors). The overall shape mapped well — nested
 supervisors as first-class children (`SupervisorBuilder::supervisor` /
-`SupervisorHandle::add_supervisor`) for venue isolation, `Restart::Permanent`
+`SupervisorHandle::add_supervisor`) for venue isolation, `RestartPolicy::Always`
 + `RestartIntensity` as a free reconnection policy for WebSocket reader
 actors, restart-stable refs across subtree restarts, `SupervisorEvent::Nested`
 for single-subscription monitoring. Gaps that surfaced:
@@ -83,7 +83,7 @@ framework feature.
   `Down { generation }`-style message.
 - **Significant children / `auto_shutdown` (OTP 24+).** "This supervisor's
   purpose is complete when child X exits cleanly — shut down the rest."
-  Today a `Transient` child exiting `Ok` just leaves a hole and the subtree
+  Today an `OnFailure` child exiting `Ok` just leaves a hole and the subtree
   idles on. Matters for pipeline-shaped subtrees (source finished → tear
   down downstream stages) and batch/job-runner use; composes with nesting
   since the parent sees a clean child exit. Related: the SPEC-noted

@@ -9,7 +9,7 @@ and a `press` that keeps jamming. Along the way we meet every knob a
 use std::time::Duration;
 
 use tokio_supervisor::{
-    BackoffPolicy, ChildSpec, Restart, RestartIntensity, ShutdownPolicy, Strategy,
+    BackoffPolicy, ChildSpec, RestartPolicy, RestartIntensity, ShutdownPolicy, Strategy,
     SupervisorBuilder,
 };
 
@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(200)).await;
         Err("paper jam".into())
     })
-    .restart(Restart::Transient)
+    .restart(RestartPolicy::OnFailure)
     .restart_intensity(
         RestartIntensity::new(3, Duration::from_secs(10))
             .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(100))),
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ctx.shutdown_token().cancelled().await;
         Ok(())
     })
-    .restart(Restart::Permanent);
+    .restart(RestartPolicy::Always);
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForOne)
@@ -66,16 +66,16 @@ Let's unpack the policies that produced that behaviour.
 
 ## Restart policies
 
-Each child has a [`Restart`] policy that decides whether an exit triggers a
+Each child has a [`RestartPolicy`] that decides whether an exit triggers a
 restart:
 
-- **`Restart::Permanent`** — always restart, even after a clean `Ok(())`
+- **`RestartPolicy::Always`** — always restart, even after a clean `Ok(())`
   exit. Right for services that should simply never stop, like the front
   desk.
-- **`Restart::Transient`** (the default) — restart only on failure (`Err`,
+- **`RestartPolicy::OnFailure`** (the default) — restart only on failure (`Err`,
   panic, or abort). A clean exit is final. Right for the press: a jam should
   be retried, but if the press decides it is done, it is done.
-- **`Restart::Temporary`** — never restart. Runs at most once; useful for
+- **`RestartPolicy::Never`** — never restart. Runs at most once; useful for
   one-shot startup jobs.
 
 ## Restart intensity and backoff
@@ -105,7 +105,7 @@ The [`Strategy`] decides who is affected when a child fails:
   front desk never notices the press jamming.
 - **`Strategy::OneForAll`** — every child is stopped and restarted together.
   Use this when children hold interdependent state, e.g. a producer/consumer
-  pair that must resynchronize from scratch. (`Temporary` children are drained
+  pair that must resynchronize from scratch. (`Never` children are drained
   with the group but not respawned.)
 
 ## Shutdown policies
@@ -165,7 +165,7 @@ We will use a higher-level version of this API in the [Dynamic
 actors](dynamic-actors.md) chapter.
 
 [`ChildSpec`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ChildSpec.html
-[`Restart`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.Restart.html
+[`RestartPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.RestartPolicy.html
 [`RestartIntensity`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.RestartIntensity.html
 [`BackoffPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.BackoffPolicy.html
 [`Strategy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.Strategy.html

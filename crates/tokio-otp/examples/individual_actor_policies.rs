@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, SupervisedActors,
 };
-use tokio_supervisor::{Restart, RestartIntensity, Strategy, SupervisorBuilder};
+use tokio_supervisor::{RestartIntensity, RestartPolicy, Strategy, SupervisorBuilder};
 
 #[derive(Clone)]
 struct Frontend {
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let graph = builder.build()?;
 
     let children = SupervisedActors::new(graph)
-        .actor_restart(&worker_ref, Restart::Transient)
+        .actor_restart(&worker_ref, RestartPolicy::OnFailure)
         .actor_restart_intensity(
             &worker_ref,
             RestartIntensity::new(5, std::time::Duration::from_secs(5)),

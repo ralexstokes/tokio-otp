@@ -4,26 +4,28 @@ use crate::error::SupervisorBuildError;
 
 /// Controls whether a child is restarted after it exits.
 ///
-/// The default is [`Transient`](Restart::Transient).
+/// The default is [`OnFailure`](RestartPolicy::OnFailure).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Restart {
-    /// Always restart the child, regardless of exit status.
-    Permanent,
+pub enum RestartPolicy {
+    /// Always restart the child, regardless of exit status. Equivalent to
+    /// OTP's `permanent`.
+    Always,
     /// Restart only on failure (`Err`, panic, or abort). A clean `Ok(())`
     /// exit is treated as intentional completion and is not restarted.
+    /// Equivalent to OTP's `transient`.
     #[default]
-    Transient,
+    OnFailure,
     /// Never restart. The child runs at most once and is not restarted after
-    /// any exit.
-    Temporary,
+    /// any exit. Equivalent to OTP's `temporary`.
+    Never,
 }
 
-impl Restart {
+impl RestartPolicy {
     pub(crate) fn should_restart(self, is_failure: bool) -> bool {
         match self {
-            Self::Permanent => true,
-            Self::Transient => is_failure,
-            Self::Temporary => false,
+            Self::Always => true,
+            Self::OnFailure => is_failure,
+            Self::Never => false,
         }
     }
 }

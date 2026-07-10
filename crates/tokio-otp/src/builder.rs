@@ -1,5 +1,7 @@
 use crate::{Graph, RunnableActorFactory};
-use tokio_supervisor::{Restart, RestartIntensity, ShutdownPolicy, Strategy, SupervisorBuilder};
+use tokio_supervisor::{
+    RestartIntensity, RestartPolicy, ShutdownPolicy, Strategy, SupervisorBuilder,
+};
 
 use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 
@@ -39,7 +41,7 @@ use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 /// let runtime = Runtime::builder()
 ///     .graph(graph.build()?)
 ///     .strategy(Strategy::OneForOne)
-///     .restart(Restart::Transient)
+///     .restart(RestartPolicy::OnFailure)
 ///     .build()?;
 /// let handle = runtime.spawn();
 ///
@@ -66,14 +68,14 @@ use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 pub struct RuntimeBuilder {
     graph: Option<Graph>,
     strategy: Strategy,
-    restart: Restart,
+    restart: RestartPolicy,
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
 }
 
 impl RuntimeBuilder {
     /// Creates a builder with default settings: [`OneForOne`](Strategy::OneForOne)
-    /// strategy, [`Transient`](Restart::Transient) restart, default shutdown
+    /// strategy, [`OnFailure`](RestartPolicy::OnFailure) restart, default shutdown
     /// policy, and no graph.
     pub fn new() -> Self {
         Self::default()
@@ -95,7 +97,7 @@ impl RuntimeBuilder {
 
     /// Sets the restart policy applied to every actor child.
     #[must_use]
-    pub fn restart(mut self, restart: Restart) -> Self {
+    pub fn restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = restart;
         self
     }

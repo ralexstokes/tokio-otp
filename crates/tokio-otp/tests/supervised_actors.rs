@@ -16,7 +16,7 @@ use tokio_otp::{
     SupervisedActors,
 };
 use tokio_supervisor::{
-    BackoffPolicy, ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy,
+    BackoffPolicy, ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, Strategy,
     SupervisorBuilder,
 };
 
@@ -99,7 +99,7 @@ async fn supervised_actors_restart_only_the_failed_actor() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .restart(Restart::Transient)
+        .restart(RestartPolicy::OnFailure)
         .build_supervisor(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("supervisor builds");
 
@@ -181,7 +181,7 @@ async fn send_waits_during_permanent_restart_window() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .actor_restart(&worker_ref, Restart::Permanent)
+        .actor_restart(&worker_ref, RestartPolicy::Always)
         .actor_restart_intensity(
             &worker_ref,
             RestartIntensity::new(10, Duration::from_secs(1))
@@ -250,7 +250,7 @@ async fn send_to_cleanly_exiting_transient_returns_actor_terminated_promptly() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .restart(Restart::Transient)
+        .restart(RestartPolicy::OnFailure)
         .build_supervisor(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("supervisor builds");
     let handle = supervisor.spawn();
@@ -339,7 +339,7 @@ async fn call_succeeds_across_restart_window() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .actor_restart(&rpc_ref, Restart::Transient)
+        .actor_restart(&rpc_ref, RestartPolicy::OnFailure)
         .actor_restart_intensity(
             &rpc_ref,
             RestartIntensity::new(10, Duration::from_secs(1))

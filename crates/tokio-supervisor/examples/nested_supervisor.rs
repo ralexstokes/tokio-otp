@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(())
             }
         })
-        .restart(Restart::Transient)
+        .restart(RestartPolicy::OnFailure)
     };
 
     let nested_supervisor = SupervisorBuilder::new().child(nested_worker).build()?;
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("metrics observed shutdown");
         Ok(())
     })
-    .restart(Restart::Permanent);
+    .restart(RestartPolicy::Always);
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForOne)

@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
     context::ChildContext,
-    restart::{Restart, RestartIntensity},
+    restart::{RestartIntensity, RestartPolicy},
     shutdown::ShutdownPolicy,
     supervisor::Supervisor,
 };
@@ -17,7 +17,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// Returning `Ok(())` signals a clean exit. Returning an error signals a
 /// failure, which may trigger a restart depending on the child's
-/// [`Restart`] policy.
+/// [`RestartPolicy`].
 pub type ChildResult = Result<(), BoxError>;
 
 pub(crate) type ChildFuture = Pin<Box<dyn Future<Output = ChildResult> + Send + 'static>>;
@@ -25,7 +25,7 @@ pub(crate) type ChildFuture = Pin<Box<dyn Future<Output = ChildResult> + Send + 
 #[derive(Clone)]
 pub(crate) struct ChildDefinition {
     pub(crate) id: String,
-    pub(crate) restart: Restart,
+    pub(crate) restart: RestartPolicy,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) kind: ChildKind,
@@ -54,7 +54,7 @@ pub struct ChildSpec {
 #[derive(Clone)]
 pub(crate) struct ChildSpecInner {
     pub(crate) id: String,
-    pub(crate) restart: Restart,
+    pub(crate) restart: RestartPolicy,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) factory: Arc<dyn ChildFactory>,
@@ -70,7 +70,7 @@ pub(crate) struct ChildSpecInner {
 #[derive(Clone)]
 pub struct SupervisorSpec {
     pub(crate) supervisor: Supervisor,
-    pub(crate) restart: Restart,
+    pub(crate) restart: RestartPolicy,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
 }
@@ -80,7 +80,7 @@ impl SupervisorSpec {
     pub fn new(supervisor: Supervisor) -> Self {
         Self {
             supervisor,
-            restart: Restart::default(),
+            restart: RestartPolicy::default(),
             restart_intensity: None,
             shutdown_policy: ShutdownPolicy::default(),
         }
@@ -88,7 +88,7 @@ impl SupervisorSpec {
 
     /// Sets the restart policy for the nested supervisor child.
     #[must_use]
-    pub fn restart(mut self, restart: Restart) -> Self {
+    pub fn restart(mut self, restart: RestartPolicy) -> Self {
         self.restart = restart;
         self
     }
@@ -162,7 +162,7 @@ impl ChildSpec {
         Self {
             inner: Arc::new(ChildSpecInner {
                 id: id.into(),
-                restart: Restart::default(),
+                restart: RestartPolicy::default(),
                 restart_intensity: None,
                 shutdown_policy: ShutdownPolicy::default(),
                 factory: make_child_factory(f),
@@ -170,9 +170,9 @@ impl ChildSpec {
         }
     }
 
-    /// Sets the restart policy for this child. See [`Restart`] for options.
+    /// Sets the restart policy for this child. See [`RestartPolicy`] for options.
     #[must_use]
-    pub fn restart(self, restart: Restart) -> Self {
+    pub fn restart(self, restart: RestartPolicy) -> Self {
         self.map_inner(|inner| inner.restart = restart)
     }
 
@@ -198,7 +198,7 @@ impl ChildSpec {
     }
 
     /// Returns the child's restart policy.
-    pub fn restart_policy(&self) -> Restart {
+    pub fn restart_policy(&self) -> RestartPolicy {
         self.inner.restart
     }
 

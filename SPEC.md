@@ -69,7 +69,7 @@ Two cross-cutting principles shape the API surface:
 - `ChildSpec::new(id, factory)` pairs a child id with an async factory
   `Fn(ChildContext) -> Future<Output = ChildResult> + Send + Sync + 'static`.
   The factory is re-invoked on every (re)start. Builder-style setters:
-  `.restart(Restart)`, `.shutdown(ShutdownPolicy)`,
+  `.restart(RestartPolicy)`, `.shutdown(ShutdownPolicy)`,
   `.restart_intensity(RestartIntensity)` (per-child override); accessors
   `id()`, `restart_policy()`, `shutdown_policy()`. The inner state is
   reference-counted: ChildSpecs are cheaply cloneable and reusable.
@@ -93,12 +93,12 @@ Two cross-cutting principles shape the API surface:
 
 ### 2.2 Policies
 
-- `Restart`: `Permanent` (always restart), `Transient` (default; restart on
-  `Err`/panic/abort, not on `Ok`), `Temporary` (never restart; runs at most
+- `RestartPolicy`: `Always` (always restart), `OnFailure` (default; restart on
+  `Err`/panic/abort, not on `Ok`), `Never` (never restart; runs at most
   once).
 - `Strategy`: `OneForOne` (default; only the failed child restarts),
   `OneForAll` (every unexpected exit stops and restarts the whole group;
-  `Temporary` children are drained with the group but not respawned; the old
+  `Never` children are drained with the group but not respawned; the old
   generation is fully drained before the new one spawns — no overlap).
 - `RestartIntensity { max_restarts: usize, within: Duration, backoff }`
   (default 5 in 30 s, no backoff; `new(max_restarts, within)` +
@@ -535,7 +535,7 @@ One method, no dedicated types:
 1. **Integrated runtime** (flagship): `Runtime::builder().graph(g)
    .strategy(…).restart(…).shutdown(…).restart_intensity(…).build()` — every
    graph actor becomes its own supervised child with uniform policies.
-   Defaults: `OneForOne`, `Transient`, default shutdown policy, default
+   Defaults: `OneForOne`, `OnFailure`, default shutdown policy, default
    intensity. `.graph()` is optional: a graph-less runtime starts empty and
    grows via `add_actor`. `build()` returns
    `Result<Runtime, SupervisorBuildError>`.
@@ -566,7 +566,7 @@ One method, no dedicated types:
     restart_intensity }) -> Result<ActorRef<A::Msg>, ControlError>` — mints
     the runnable actor from the runtime's factory, adds a supervised child
     whose id is the label, records it for stats, and returns the typed ref.
-    `DynamicActorOptions::default()` = `Transient`, default shutdown, no
+    `DynamicActorOptions::default()` = `OnFailure`, default shutdown, no
     intensity override. Removal is plain `remove_child(label)` (which also
     drops the actor from the stats set on success or on a matching removal
     timeout);
@@ -583,9 +583,9 @@ One method, no dedicated types:
 Each `RunnableActor` becomes a `ChildSpec` whose factory runs
 `run_until(child_ctx.shutdown_token().cancelled(), rebind)`:
 
-- the rebind policy is derived from the child's restart policy —
-  `Permanent → Always`, `Transient → OnFailure`, `Temporary → Never` — so
-  ref liveness always matches what the supervisor will actually do;
+- the rebind policy mirrors the child's `RestartPolicy` variant-for-variant
+  (`Always`, `OnFailure`, `Never`) — so ref liveness always matches what the
+  supervisor will actually do;
 - a drop guard on the child spec terminates the actor's binding when the
   supervisor discards the spec — the point after which no restart can happen
   (intensity exhausted, child removed, supervisor exit) — so senders fail

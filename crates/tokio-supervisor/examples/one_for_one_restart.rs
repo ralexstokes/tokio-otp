@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     })
-    .restart(Restart::Transient);
+    .restart(RestartPolicy::OnFailure);
 
     let metrics = ChildSpec::new("metrics", |ctx| async move {
         println!("metrics started in generation {}", ctx.generation());

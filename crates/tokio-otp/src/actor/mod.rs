@@ -3,7 +3,7 @@
 //!
 //! This module tree is private; its public API is re-exported flat from the
 //! crate root. The seam between the actor layer and the runtime layer —
-//! the `Restart` → `RebindPolicy` mapping and the terminate-binding drop
+//! the `RestartPolicy` → `RebindPolicy` mapping and the terminate-binding drop
 //! guard — lives in `crate::runtime` and is a crate-internal invariant.
 
 mod binding;

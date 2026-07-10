@@ -77,8 +77,8 @@ impl SupervisorSnapshotReceiverExt for watch::Receiver<crate::SupervisorSnapshot
 // Keep this list mirrored by tokio_otp::prelude; its prelude test guards drift.
 pub use crate::{
     BackoffPolicy, BoxError, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
-    ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, Restart,
-    RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy, Strategy,
+    ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, RestartIntensity,
+    RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode, ShutdownPolicy, Strategy,
     Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError, SupervisorEvent,
     SupervisorHandle, SupervisorSnapshot, SupervisorSpec, SupervisorStateView, SupervisorToken,
 };
