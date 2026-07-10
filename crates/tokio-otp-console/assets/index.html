@@ -183,7 +183,6 @@
   const MAX_LOG = 500;
   let snapshot = null;
   let actorStats = [];
-  let logEntries = [];
   const collapsedNodes = new Set();
 
   // --- WebSocket with auto-reconnect ---
@@ -458,29 +457,21 @@
   }
 
   function addLogEntry(ev) {
-    logEntries.unshift({ time: new Date(), event: ev });
-    if (logEntries.length > MAX_LOG) logEntries.length = MAX_LOG;
-    renderLog();
-  }
-
-  function renderLog() {
     var root = document.getElementById("log-entries");
-    var frag = document.createDocumentFragment();
-    logEntries.forEach(function (entry) {
-      var row = document.createElement("div");
-      row.className = "log-entry";
-      var ts = document.createElement("span");
-      ts.className = "log-ts";
-      ts.textContent = formatTime(entry.time);
-      var msg = document.createElement("span");
-      msg.className = "log-msg";
-      msg.textContent = describeEvent(entry.event);
-      row.appendChild(ts);
-      row.appendChild(msg);
-      frag.appendChild(row);
-    });
-    root.innerHTML = "";
-    root.appendChild(frag);
+    var row = document.createElement("div");
+    row.className = "log-entry";
+    var ts = document.createElement("span");
+    ts.className = "log-ts";
+    ts.textContent = formatTime(new Date());
+    var msg = document.createElement("span");
+    msg.className = "log-msg";
+    msg.textContent = describeEvent(ev);
+    row.appendChild(ts);
+    row.appendChild(msg);
+    root.insertBefore(row, root.firstChild);
+    while (root.children.length > MAX_LOG) {
+      root.removeChild(root.lastChild);
+    }
   }
 
   // --- Init ---
