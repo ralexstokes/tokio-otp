@@ -11,10 +11,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     binding::{BindingCore, BindingState, MailboxRef},
-    blocking::{
-        BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions, BlockingSpawner,
-        BlockingTaskError, SpawnBlockingError,
-    },
     error::{CallError, SendError},
     observability::{GraphObservability, MessageOperation, SendRejection},
     registry::ActorRegistry,
@@ -291,15 +287,13 @@ impl<T> fmt::Debug for Reply<T> {
 /// Provides the actor's incoming [`mailbox`](Self::recv), an optional
 /// [`registry`](Self::registry) for runtime-discovered actors, a
 /// [`shutdown_token`](Self::shutdown_token) for cooperative shutdown, and
-/// [`spawn_blocking`](Self::spawn_blocking) /
-/// [`run_blocking`](Self::run_blocking) for tracked blocking work.
+/// [`run_blocking`](Self::run_blocking) for blocking work.
 pub struct ActorContext<M> {
     pub(crate) id: Arc<str>,
     pub(crate) mailbox: mpsc::Receiver<M>,
     pub(crate) registry: Option<ActorRegistry>,
     pub(crate) myself: ActorRef<M>,
     pub(crate) shutdown: CancellationToken,
-    pub(crate) blocking: BlockingSpawner<M>,
     pub(crate) observability: GraphObservability,
 }
 
@@ -375,41 +369,49 @@ impl<M: Send + 'static> ActorContext<M> {
         message
     }
 
-    /// Spawns tracked blocking work owned by this actor.
+    /// Runs blocking work on Tokio's blocking pool and waits for its result.
     ///
-    /// If the returned handle is dropped without being awaited, non-cancelled
-    /// task failures are treated as actor failures. New work is rejected once
-    /// the actor reaches its configured blocking-task limit. Blocking closures
-    /// should check [`BlockingContext::checkpoint`] or
-    /// [`BlockingContext::is_cancelled`] regularly when graceful shutdown
-    /// matters.
-    pub fn spawn_blocking<F>(
-        &self,
-        options: BlockingOptions,
-        f: F,
-    ) -> Result<BlockingHandle, SpawnBlockingError>
+    /// The closure receives a child of this actor's shutdown token. The token
+    /// is also cancelled if the `run_blocking` future is dropped. Cancellation
+    /// is cooperative: long-running closures should check
+    /// [`CancellationToken::is_cancelled`] periodically and return promptly.
+    ///
+    /// A panic in the closure resumes on the actor task, so supervision treats
+    /// it as an ordinary actor panic. The return value is otherwise opaque to
+    /// the framework; use your own `Result` type when blocking work can fail.
+    ///
+    /// The actor's configured
+    /// [`actor_shutdown_timeout`](crate::GraphBuilder::actor_shutdown_timeout)
+    /// is the backstop for closures that ignore cancellation. Once that timeout
+    /// aborts the actor task, the blocking thread continues detached because
+    /// Tokio blocking tasks cannot be aborted after they start.
+    ///
+    /// For detached or concurrent work, clone [`myself`](Self::myself), call
+    /// [`tokio::task::spawn_blocking`] directly, and send the outcome back as a
+    /// message. The mailbox then acts as the completion mechanism; see the
+    /// [`blocking_lifecycle` example](https://github.com/ralexstokes/tokio-otp/blob/main/crates/tokio-actor/examples/blocking_lifecycle.rs).
+    pub async fn run_blocking<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(BlockingContext<M>) -> Result<(), BlockingOperationError> + Send + 'static,
+        F: FnOnce(&CancellationToken) -> R + Send + 'static,
+        R: Send + 'static,
     {
-        self.blocking.spawn_blocking(options, f)
-    }
+        let cancellation = self.shutdown.child_token();
+        let _cancel_on_drop = CancelOnDrop(cancellation.clone());
+        let joined = tokio::task::spawn_blocking(move || f(&cancellation)).await;
 
-    /// Runs tracked blocking work and waits for it to finish.
-    ///
-    /// Failures returned from this method are considered handled by the
-    /// caller and do not also fail the actor implicitly. If the blocking
-    /// closure ignores cancellation, awaiting this method remains pending until
-    /// the closure returns.
-    pub async fn run_blocking<F>(
-        &self,
-        options: BlockingOptions,
-        f: F,
-    ) -> Result<(), BlockingTaskError>
-    where
-        F: FnOnce(BlockingContext<M>) -> Result<(), BlockingOperationError> + Send + 'static,
-    {
-        let handle = self.spawn_blocking(options, f)?;
-        handle.wait().await
+        match joined {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("blocking task was cancelled: {error}"),
+        }
+    }
+}
+
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 

@@ -76,7 +76,7 @@ directly if you only need that piece.
 |-------|------|
 | [`tokio-otp`](crates/tokio-otp) | The front door: run each actor of a graph as its own supervised child, with one integrated `Runtime` supporting dynamic actors and observability. Re-exports the common types of the crates below via `tokio_otp::prelude`. |
 | [`tokio-supervisor`](crates/tokio-supervisor) | Structured supervision of async tasks: restart policies (`permanent`/`transient`/`temporary`), restart intensity limits, `one_for_one`/`one_for_all` strategies, graceful shutdown, and nested supervision trees. |
-| [`tokio-actor`](crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and blocking-task integration. |
+| [`tokio-actor`](crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and cooperative blocking work. |
 | [`tokio-otp-console`](crates/tokio-otp-console) | *(experimental)* A live web dashboard for watching a running supervision tree. |
 
 ## Getting started

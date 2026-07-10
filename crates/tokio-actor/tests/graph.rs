@@ -3,7 +3,7 @@ use std::{
     io,
     marker::PhantomData,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -15,9 +15,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, BlockingOptions, BlockingTaskFailure, CallError,
-    DrainPolicy, Graph, GraphBuildError, GraphBuilder, GraphError, LookupError, RawActor, Reply,
-    SendError, TryRecvError,
+    Actor, ActorContext, ActorRef, ActorResult, CallError, DrainPolicy, Graph, GraphBuildError,
+    GraphBuilder, GraphError, LookupError, RawActor, Reply, SendError, TryRecvError,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1026,95 +1025,6 @@ async fn graph_shutdown_aborts_uncooperative_actor_after_timeout() {
         !live.load(Ordering::Acquire),
         "uncooperative actor should be aborted before graph shutdown returns"
     );
-}
-
-#[derive(Clone)]
-struct BlockingFailure;
-
-impl RawActor for BlockingFailure {
-    type Msg = ();
-
-    async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
-        ctx.spawn_blocking(BlockingOptions::named("boom"), |_job| {
-            Err(io::Error::other("boom").into())
-        })
-        .expect("blocking task spawned");
-
-        while ctx.recv().await.is_some() {}
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn dropped_blocking_task_failures_fail_the_actor() {
-    let mut builder = GraphBuilder::new();
-    builder.actor("worker", BlockingFailure);
-    let graph = builder.build().expect("valid graph");
-
-    let result = graph
-        .run_until(tokio::time::sleep(Duration::from_secs(1)))
-        .await;
-    match result {
-        Err(GraphError::ActorFailed { actor_id, source }) => {
-            assert_eq!(actor_id, "worker");
-            let failure = source
-                .downcast_ref::<BlockingTaskFailure>()
-                .expect("blocking failure is attached");
-            assert_eq!(failure.task_name(), Some("boom"));
-        }
-        other => panic!("unexpected result: {other:?}"),
-    }
-}
-
-type SenderSlot<T> = Arc<Mutex<Option<oneshot::Sender<T>>>>;
-
-fn sender_slot<T>(sender: oneshot::Sender<T>) -> SenderSlot<T> {
-    Arc::new(Mutex::new(Some(sender)))
-}
-
-fn send_once<T>(slot: &SenderSlot<T>, value: T) {
-    if let Some(sender) = slot.lock().expect("mutex not poisoned").take() {
-        let _ = sender.send(value);
-    }
-}
-
-#[derive(Clone)]
-struct HandledBlockingFailure {
-    handled: SenderSlot<()>,
-}
-
-impl RawActor for HandledBlockingFailure {
-    type Msg = ();
-
-    async fn run(&self, mut ctx: ActorContext<()>) -> ActorResult {
-        let handle = ctx
-            .spawn_blocking(BlockingOptions::named("boom"), |_job| {
-                Err(io::Error::other("boom").into())
-            })
-            .expect("blocking task spawned");
-        handle.wait().await.expect_err("blocking task should fail");
-        send_once(&self.handled, ());
-
-        while ctx.recv().await.is_some() {}
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn awaited_blocking_task_failures_can_be_handled_locally() {
-    let (handled_tx, handled_rx) = oneshot::channel();
-    let mut builder = GraphBuilder::new();
-    builder.actor(
-        "worker",
-        HandledBlockingFailure {
-            handled: sender_slot(handled_tx),
-        },
-    );
-    let graph = builder.build().expect("valid graph");
-
-    let (stop, task) = start_graph(&graph);
-    handled_rx.await.expect("actor handled blocking failure");
-    stop_graph(stop, task).await;
 }
 
 #[tokio::test]

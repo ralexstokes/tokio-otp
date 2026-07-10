@@ -12,8 +12,6 @@ use metrics::{SharedString, counter, gauge, histogram};
 use tracing::Level;
 use tracing::{Span, debug, info, info_span, trace, warn};
 
-use crate::blocking::BlockingTaskId;
-
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn anonymous_graph_name() -> Arc<str> {
@@ -37,7 +35,6 @@ pub(crate) struct GraphObservability {
     #[cfg(feature = "metrics")]
     graph_label: SharedString,
     running_actors: Arc<AtomicUsize>,
-    running_blocking_tasks: Arc<AtomicUsize>,
 }
 
 impl GraphObservability {
@@ -47,12 +44,7 @@ impl GraphObservability {
             graph_label: SharedString::from(Arc::clone(&graph_name)),
             graph_name,
             running_actors: Arc::new(AtomicUsize::new(0)),
-            running_blocking_tasks: Arc::new(AtomicUsize::new(0)),
         }
-    }
-
-    pub(crate) fn graph_name(&self) -> &str {
-        &self.graph_name
     }
 
     pub(crate) fn graph_span(&self, actor_count: usize, mailbox_capacity: usize) -> Span {
@@ -70,29 +62,6 @@ impl GraphObservability {
             graph = %self.graph_name,
             actor_id = %actor_id,
         )
-    }
-
-    pub(crate) fn blocking_task_span(
-        &self,
-        actor_id: &str,
-        task_id: BlockingTaskId,
-        task_name: Option<&str>,
-    ) -> Span {
-        match task_name {
-            Some(task_name) => info_span!(
-                "blocking_task",
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                task_name = %task_name,
-            ),
-            None => info_span!(
-                "blocking_task",
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-            ),
-        }
     }
 
     pub(crate) fn emit_graph_started(&self, actor_count: usize, mailbox_capacity: usize) {
@@ -333,143 +302,6 @@ impl GraphObservability {
         .increment(1);
     }
 
-    pub(crate) fn emit_blocking_task_started(
-        &self,
-        actor_id: &Arc<str>,
-        task_id: BlockingTaskId,
-        task_name: Option<&str>,
-    ) {
-        let running = self.running_blocking_tasks.fetch_add(1, Ordering::AcqRel) + 1;
-
-        match task_name {
-            Some(task_name) => debug!(
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                task_name = %task_name,
-                running_blocking_tasks = running,
-                "blocking task started"
-            ),
-            None => debug!(
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                running_blocking_tasks = running,
-                "blocking task started"
-            ),
-        }
-
-        #[cfg(feature = "metrics")]
-        {
-            let actor_label = shared_label(actor_id);
-            counter!(
-                "actor_graph.blocking.started",
-                "graph" => self.graph_label(),
-                "actor_id" => actor_label,
-            )
-            .increment(1);
-            gauge!("actor_graph.blocking.running", "graph" => self.graph_label())
-                .set(running as f64);
-        }
-    }
-
-    pub(crate) fn emit_blocking_task_finished(
-        &self,
-        actor_id: &Arc<str>,
-        task_id: BlockingTaskId,
-        task_name: Option<&str>,
-        status: BlockingTaskStatus,
-        duration: Duration,
-        error: Option<&str>,
-    ) {
-        let running = self.running_blocking_tasks.fetch_sub(1, Ordering::AcqRel) - 1;
-
-        match (task_name, status, error) {
-            (Some(task_name), BlockingTaskStatus::Completed | BlockingTaskStatus::Cancelled, _) => {
-                debug!(
-                    graph = %self.graph_name,
-                    actor_id = %actor_id,
-                    task_id = %task_id,
-                    task_name = %task_name,
-                    status = status.as_str(),
-                    duration_secs = duration.as_secs_f64(),
-                    running_blocking_tasks = running,
-                    "blocking task finished"
-                )
-            }
-            (Some(task_name), _, Some(error)) => warn!(
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                task_name = %task_name,
-                status = status.as_str(),
-                error = %error,
-                duration_secs = duration.as_secs_f64(),
-                running_blocking_tasks = running,
-                "blocking task finished"
-            ),
-            (Some(task_name), _, None) => warn!(
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                task_name = %task_name,
-                status = status.as_str(),
-                duration_secs = duration.as_secs_f64(),
-                running_blocking_tasks = running,
-                "blocking task finished"
-            ),
-            (None, BlockingTaskStatus::Completed | BlockingTaskStatus::Cancelled, _) => debug!(
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                status = status.as_str(),
-                duration_secs = duration.as_secs_f64(),
-                running_blocking_tasks = running,
-                "blocking task finished"
-            ),
-            (None, _, Some(error)) => warn!(
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                status = status.as_str(),
-                error = %error,
-                duration_secs = duration.as_secs_f64(),
-                running_blocking_tasks = running,
-                "blocking task finished"
-            ),
-            (None, _, None) => warn!(
-                graph = %self.graph_name,
-                actor_id = %actor_id,
-                task_id = %task_id,
-                status = status.as_str(),
-                duration_secs = duration.as_secs_f64(),
-                running_blocking_tasks = running,
-                "blocking task finished"
-            ),
-        }
-
-        #[cfg(feature = "metrics")]
-        {
-            let actor_label = shared_label(actor_id);
-            counter!(
-                "actor_graph.blocking.completed",
-                "graph" => self.graph_label(),
-                "actor_id" => actor_label.clone(),
-                "status" => status.as_str(),
-            )
-            .increment(1);
-            gauge!("actor_graph.blocking.running", "graph" => self.graph_label())
-                .set(running as f64);
-            histogram!(
-                "actor_graph.blocking.duration",
-                "graph" => self.graph_label(),
-                "actor_id" => actor_label,
-                "status" => status.as_str(),
-            )
-            .record(duration.as_secs_f64());
-        }
-    }
-
     #[cfg(feature = "metrics")]
     pub(crate) fn start_message_timing(&self) -> Option<Instant> {
         Some(Instant::now())
@@ -638,25 +470,6 @@ impl SendRejection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BlockingTaskStatus {
-    Completed,
-    Cancelled,
-    Failed,
-    Panicked,
-}
-
-impl BlockingTaskStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-            Self::Failed => "failed",
-            Self::Panicked => "panicked",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -698,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn tracing_output_covers_graph_actor_mailbox_message_and_blocking_events() {
+    fn tracing_output_covers_graph_actor_mailbox_and_message_events() {
         let observability = GraphObservability::new(Arc::from("orders"));
         let frontend: Arc<str> = Arc::from("frontend");
         let worker: Arc<str> = Arc::from("worker");
@@ -807,37 +620,6 @@ mod tests {
         );
         assert_tracing_output(
             || {
-                observability.emit_blocking_task_started(
-                    &worker,
-                    BlockingTaskId::from_u64(7),
-                    Some("io"),
-                )
-            },
-            &[
-                "blocking task started",
-                r#""task_id":"7""#,
-                r#""task_name":"io""#,
-            ],
-        );
-        assert_tracing_output(
-            || {
-                observability.emit_blocking_task_finished(
-                    &worker,
-                    BlockingTaskId::from_u64(7),
-                    Some("io"),
-                    BlockingTaskStatus::Failed,
-                    Duration::from_millis(4),
-                    Some("boom"),
-                )
-            },
-            &[
-                "blocking task finished",
-                r#""status":"failed""#,
-                r#""error":"boom""#,
-            ],
-        );
-        assert_tracing_output(
-            || {
                 observability.emit_graph_stopped(
                     Duration::from_millis(10),
                     GraphRunStatus::Failed,
@@ -853,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn tracing_output_covers_graph_actor_and_blocking_spans() {
+    fn tracing_output_covers_graph_and_actor_spans() {
         let observability = GraphObservability::new(Arc::from("orders"));
 
         let output = capture_tracing_output_with_spans(|| {
@@ -862,13 +644,6 @@ mod tests {
 
             let actor_span = observability.actor_span("frontend");
             let _actor_guard = actor_span.enter();
-
-            let blocking_span = observability.blocking_task_span(
-                "frontend",
-                BlockingTaskId::from_u64(3),
-                Some("io"),
-            );
-            let _blocking_guard = blocking_span.enter();
 
             info!("inside spans");
         });
@@ -879,8 +654,6 @@ mod tests {
             r#""actor_count":2"#,
             r#""name":"actor""#,
             r#""actor_id":"frontend""#,
-            r#""name":"blocking_task""#,
-            r#""task_id":"3""#,
         ] {
             assert!(
                 output.contains(expected),
@@ -891,7 +664,7 @@ mod tests {
 
     #[cfg(feature = "metrics")]
     #[test]
-    fn metrics_cover_run_actor_message_mailbox_and_blocking_series() {
+    fn metrics_cover_run_actor_message_and_mailbox_series() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
@@ -931,19 +704,6 @@ mod tests {
                 MessageOperation::Send,
                 Duration::from_millis(1),
                 Some(SendRejection::NotRunning),
-            );
-            observability.emit_blocking_task_started(
-                &worker,
-                BlockingTaskId::from_u64(1),
-                Some("io"),
-            );
-            observability.emit_blocking_task_finished(
-                &worker,
-                BlockingTaskId::from_u64(1),
-                Some("io"),
-                BlockingTaskStatus::Failed,
-                Duration::from_millis(4),
-                Some("boom"),
             );
             observability.emit_actor_exited(&frontend, ActorExitStatus::Shutdown, None);
             observability.emit_mailbox_cleared(&frontend);
@@ -1028,22 +788,6 @@ mod tests {
             ],
             1,
         );
-        assert_counter(
-            &metrics,
-            "actor_graph.blocking.started",
-            &[("graph", "orders"), ("actor_id", "worker")],
-            1,
-        );
-        assert_counter(
-            &metrics,
-            "actor_graph.blocking.completed",
-            &[
-                ("graph", "orders"),
-                ("actor_id", "worker"),
-                ("status", "failed"),
-            ],
-            1,
-        );
         assert_gauge(
             &metrics,
             "actor_graph.actors.running",
@@ -1054,12 +798,6 @@ mod tests {
             &metrics,
             "actor_graph.mailbox.bound",
             &[("graph", "orders"), ("actor_id", "frontend")],
-            0.0,
-        );
-        assert_gauge(
-            &metrics,
-            "actor_graph.blocking.running",
-            &[("graph", "orders")],
             0.0,
         );
         assert_histogram_len(
@@ -1089,16 +827,6 @@ mod tests {
                 ("actor_id", "frontend"),
                 ("operation", "send"),
                 ("status", "ok"),
-            ],
-            1,
-        );
-        assert_histogram_len(
-            &metrics,
-            "actor_graph.blocking.duration",
-            &[
-                ("graph", "orders"),
-                ("actor_id", "worker"),
-                ("status", "failed"),
             ],
             1,
         );

@@ -95,11 +95,9 @@ pub mod prelude {
     // remain available only at the crate root.
     pub use tokio_actor::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
-        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
-        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, RawActor,
-        RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
-        SpawnBlockingError, Topology, TryRecvError,
+        ActorSlot, BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
+        GraphError, GraphHandle, LookupError, RawActor, RebindPolicy, RegistryError, Reply,
+        RunnableActor, RunnableActorFactory, SendError, Topology, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,

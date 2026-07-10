@@ -27,9 +27,9 @@ snapshot changes.
 
 ## Tracing And Metrics
 
-`tokio-actor` emits graph, actor, mailbox, message, and blocking-task tracing
-events. Message events include `source_actor_id` when the sender is another
-actor; external sends through an `ActorRef` have no source actor.
+`tokio-actor` emits graph, actor, mailbox, and message tracing events. Message
+events include `source_actor_id` when the sender is another actor; external
+sends through an `ActorRef` have no source actor.
 
 The old external-entry and byte-size fields are gone. Typed messages do not have a
 crate-level byte length, so input sizing belongs at the application boundary.
@@ -41,8 +41,7 @@ With the `metrics` feature, actor metrics include:
 - `actor_graph.messages.sent` / `actor_graph.messages.rejected`
 - `actor_graph.messages.received`
 - `actor_graph.mailbox.bound`
-- `actor_graph.blocking.started` / `actor_graph.blocking.completed`
-- duration histograms for graph runs, sends, and blocking tasks
+- duration histograms for graph runs and sends
 
 `tokio-supervisor` continues to emit supervisor lifecycle counters, gauges,
 and histograms.

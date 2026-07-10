@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder};
 
 enum WorkMsg {
     Process(String),
@@ -19,12 +19,17 @@ impl Actor for Worker {
     async fn handle(&mut self, message: WorkMsg, ctx: &ActorContext<WorkMsg>) -> ActorResult {
         match message {
             WorkMsg::Process(input) => {
-                ctx.run_blocking(BlockingOptions::named("uppercase"), move |job| {
-                    let output = input.to_uppercase();
-                    job.myself().try_send(WorkMsg::Finished(output))?;
-                    Ok(())
-                })
-                .await?;
+                let output = ctx
+                    .run_blocking(move |token| {
+                        if token.is_cancelled() {
+                            return None;
+                        }
+                        Some(input.to_uppercase())
+                    })
+                    .await;
+                if let Some(output) = output {
+                    ctx.myself().try_send(WorkMsg::Finished(output))?;
+                }
             }
             WorkMsg::Finished(output) => {
                 self.observed.send(output).expect("receiver alive");

@@ -54,9 +54,7 @@ pub struct GraphBuilder {
     index: HashMap<Arc<str>, usize>,
     errors: Vec<GraphBuildError>,
     mailbox_capacity: usize,
-    max_blocking_tasks_per_actor: Option<usize>,
     actor_shutdown_timeout: Duration,
-    blocking_shutdown_timeout: Duration,
 }
 
 struct Slot {
@@ -70,9 +68,7 @@ struct Slot {
 }
 
 pub(crate) const DEFAULT_MAILBOX_CAPACITY: usize = 64;
-pub(crate) const DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR: usize = 16;
 pub(crate) const DEFAULT_ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Default for GraphBuilder {
     fn default() -> Self {
@@ -91,9 +87,7 @@ impl GraphBuilder {
             index: HashMap::new(),
             errors: Vec::new(),
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
-            max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
             actor_shutdown_timeout: DEFAULT_ACTOR_SHUTDOWN_TIMEOUT,
-            blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
         }
     }
 
@@ -112,21 +106,6 @@ impl GraphBuilder {
         self
     }
 
-    /// Sets the maximum number of active blocking tasks allowed per actor.
-    ///
-    /// The default limit is 16 active tasks. New blocking work is rejected
-    /// once the actor reaches the configured limit.
-    pub fn max_blocking_tasks_per_actor(&mut self, limit: usize) -> &mut Self {
-        self.max_blocking_tasks_per_actor = Some(limit);
-        self
-    }
-
-    /// Disables the per-actor blocking task concurrency limit.
-    pub fn unbounded_blocking_tasks_per_actor(&mut self) -> &mut Self {
-        self.max_blocking_tasks_per_actor = None;
-        self
-    }
-
     /// Sets how long shutdown waits for an actor task to stop after
     /// cancellation is requested.
     ///
@@ -138,16 +117,6 @@ impl GraphBuilder {
     /// `Cancelled` actor exit.
     pub fn actor_shutdown_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.actor_shutdown_timeout = timeout;
-        self
-    }
-
-    /// Sets how long shutdown waits for blocking tasks to stop after
-    /// cancellation is requested.
-    ///
-    /// The default timeout is 5 seconds. Any blocking task still running after
-    /// the timeout is detached so the graph can terminate.
-    pub fn blocking_shutdown_timeout(&mut self, timeout: Duration) -> &mut Self {
-        self.blocking_shutdown_timeout = timeout;
         self
     }
 
@@ -276,9 +245,7 @@ impl GraphBuilder {
             actors,
             actor_index: self.index,
             mailbox_capacity: self.mailbox_capacity,
-            max_blocking_tasks_per_actor: self.max_blocking_tasks_per_actor,
             actor_shutdown_timeout: self.actor_shutdown_timeout,
-            blocking_shutdown_timeout: self.blocking_shutdown_timeout,
             state: AtomicU8::new(0),
             observability,
         }))

@@ -19,10 +19,7 @@ use tracing::Instrument;
 use crate::{
     actor::{BoxError, RawActor},
     binding::{BindingCore, BindingLifecycle, RebindPolicy},
-    builder::{
-        DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
-        DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR,
-    },
+    builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
     context::ActorRef,
     error::LookupError,
     graph::{
@@ -71,9 +68,7 @@ struct ActorSetInner {
 pub struct RunnableActorFactory {
     observability: crate::observability::GraphObservability,
     mailbox_capacity: usize,
-    max_blocking_tasks_per_actor: Option<usize>,
     actor_shutdown_timeout: std::time::Duration,
-    blocking_shutdown_timeout: std::time::Duration,
 }
 
 impl ActorSet {
@@ -94,9 +89,7 @@ impl ActorSet {
                     registry: OnceLock::new(),
                     rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
                     mailbox_capacity: graph.mailbox_capacity,
-                    max_blocking_tasks_per_actor: graph.max_blocking_tasks_per_actor,
                     actor_shutdown_timeout: graph.actor_shutdown_timeout,
-                    blocking_shutdown_timeout: graph.blocking_shutdown_timeout,
                     observability: graph.observability.clone(),
                     running: AtomicBool::new(false),
                 }),
@@ -137,9 +130,7 @@ impl ActorSet {
         RunnableActorFactory {
             observability: self.inner.graph.observability.clone(),
             mailbox_capacity: self.inner.graph.mailbox_capacity,
-            max_blocking_tasks_per_actor: self.inner.graph.max_blocking_tasks_per_actor,
             actor_shutdown_timeout: self.inner.graph.actor_shutdown_timeout,
-            blocking_shutdown_timeout: self.inner.graph.blocking_shutdown_timeout,
         }
     }
 }
@@ -171,9 +162,7 @@ struct RunnableActorInner {
     registry: OnceLock<ActorRegistry>,
     rebind_policy: std::sync::atomic::AtomicU8,
     mailbox_capacity: usize,
-    max_blocking_tasks_per_actor: Option<usize>,
     actor_shutdown_timeout: std::time::Duration,
-    blocking_shutdown_timeout: std::time::Duration,
     observability: crate::observability::GraphObservability,
     running: AtomicBool,
 }
@@ -266,8 +255,6 @@ impl RunnableActor {
                 .start(RunnerStart {
                     shutdown: actor_shutdown.clone(),
                     mailbox_capacity: self.inner.mailbox_capacity,
-                    max_blocking_tasks_per_actor: self.inner.max_blocking_tasks_per_actor,
-                    blocking_shutdown_timeout: self.inner.blocking_shutdown_timeout,
                     registry,
                     observability: self.inner.observability.clone(),
                     rebind_policy,
@@ -449,9 +436,7 @@ impl RunnableActorFactory {
         Self {
             observability: GraphObservability::new(anonymous_graph_name()),
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
-            max_blocking_tasks_per_actor: Some(DEFAULT_MAX_BLOCKING_TASKS_PER_ACTOR),
             actor_shutdown_timeout: DEFAULT_ACTOR_SHUTDOWN_TIMEOUT,
-            blocking_shutdown_timeout: DEFAULT_BLOCKING_SHUTDOWN_TIMEOUT,
         }
     }
 
@@ -473,9 +458,7 @@ impl RunnableActorFactory {
                 registry: OnceLock::new(),
                 rebind_policy: std::sync::atomic::AtomicU8::new(RebindPolicy::Never as u8),
                 mailbox_capacity: self.mailbox_capacity,
-                max_blocking_tasks_per_actor: self.max_blocking_tasks_per_actor,
                 actor_shutdown_timeout: self.actor_shutdown_timeout,
-                blocking_shutdown_timeout: self.blocking_shutdown_timeout,
                 observability: self.observability.clone(),
                 running: AtomicBool::new(false),
             }),

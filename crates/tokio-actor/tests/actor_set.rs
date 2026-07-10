@@ -15,8 +15,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_actor::{
-    ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet, BlockingOptions,
-    BoxError, GraphBuilder, LookupError, RawActor, RebindPolicy, RunnableActor, SendError,
+    ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet, BoxError,
+    GraphBuilder, LookupError, RawActor, RebindPolicy, RunnableActor, SendError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Dispatch, field::Visit};
@@ -563,71 +563,4 @@ async fn registry_evicts_actor_after_terminal_clean_exit() {
         registry.actor_ref::<()>("temporary"),
         Err(LookupError::UnknownActor { actor_id }) if actor_id == "temporary"
     ));
-}
-
-enum BlockingMsg {
-    Start,
-    FromBlocking,
-}
-
-#[derive(Clone)]
-struct BlockingSender {
-    observed: mpsc::UnboundedSender<()>,
-}
-
-impl RawActor for BlockingSender {
-    type Msg = BlockingMsg;
-
-    async fn run(&self, mut ctx: ActorContext<BlockingMsg>) -> ActorResult {
-        while let Some(message) = ctx.recv().await {
-            match message {
-                BlockingMsg::Start => {
-                    ctx.run_blocking(BlockingOptions::named("reply"), |job| {
-                        job.myself().try_send(BlockingMsg::FromBlocking)?;
-                        Ok(())
-                    })
-                    .await?;
-                }
-                BlockingMsg::FromBlocking => {
-                    self.observed.send(()).expect("receiver alive");
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn blocking_context_can_send_to_own_typed_mailbox() {
-    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let mut builder = GraphBuilder::new();
-    builder.actor(
-        "worker",
-        BlockingSender {
-            observed: observed_tx,
-        },
-    );
-    let actor_set = builder
-        .build()
-        .expect("valid graph")
-        .into_actor_set()
-        .expect("actor set");
-    let worker = single_actor(&actor_set, "worker");
-    let worker_ref = actor_set
-        .actor_ref::<BlockingMsg>("worker")
-        .expect("worker ref");
-
-    let (stop, task) = start_actor(worker);
-    worker_ref
-        .send(BlockingMsg::Start)
-        .await
-        .expect("start sent");
-    timeout(Duration::from_secs(1), observed_rx.recv())
-        .await
-        .expect("blocking reply observed")
-        .expect("reply received");
-
-    stop_actor(stop, task)
-        .await
-        .expect("worker stopped cleanly");
 }

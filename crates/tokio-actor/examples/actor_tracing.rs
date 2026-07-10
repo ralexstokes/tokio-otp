@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult, BlockingOptions, GraphBuilder};
+use tokio_actor::{Actor, ActorContext, ActorResult, GraphBuilder};
 
 #[derive(Clone)]
 struct Worker {
@@ -17,8 +17,7 @@ impl Actor for Worker {
         ctx: &ActorContext<&'static str>,
     ) -> ActorResult {
         tracing::info!(message, "worker received message");
-        ctx.run_blocking(BlockingOptions::named("trace-blocking"), |_job| Ok(()))
-            .await?;
+        ctx.run_blocking(|_token| ()).await;
         self.completed.send(()).expect("receiver alive");
         Ok(())
     }

@@ -21,7 +21,7 @@
 //! | [`RunnableActor`] | One actor plus stable binding for per-actor supervision. |
 //! | [`RawActor`] | Custom-loop typed actor definition. |
 //! | [`Actor`] | Handler-style actor definition with a provided receive loop. |
-//! | [`ActorContext`] | Mailbox, registry, blocking tasks, and shutdown token visible to one actor. |
+//! | [`ActorContext`] | Mailbox, registry, blocking work, and shutdown token visible to one actor. |
 //! | [`ActorRef`] | Cloneable stable typed mailbox sender. |
 //! | [`Reply`] | One-shot response channel carried inside request messages. |
 //!
@@ -64,7 +64,7 @@
 //! `tokio-supervisor`:
 //!
 //! - `tracing` spans and structured logs are emitted automatically for graph,
-//!   actor, mailbox, and blocking-task lifecycle.
+//!   actor, and mailbox lifecycle.
 //! - optional `metrics` counters, gauges, and histograms are available via the
 //!   `metrics` cargo feature.
 //!
@@ -73,16 +73,10 @@
 //!
 //! # Resource limits
 //!
-//! Graphs apply conservative defaults for externally-controlled work:
-//!
-//! - mailboxes default to 64 queued messages per actor
-//! - actors may run at most 16 blocking tasks concurrently by default
-//! - shutdown waits up to 5 seconds for blocking tasks to stop, then detaches
-//!   any remaining work so the graph can terminate
-//!
-//! Use [`GraphBuilder`] to tune or disable these limits for a specific graph.
-//! Blocking closures should call [`BlockingContext::checkpoint`] or otherwise
-//! observe cancellation regularly when graceful shutdown matters.
+//! Graph mailboxes default to 64 queued messages per actor. Use
+//! [`GraphBuilder`] to tune that bound for a specific graph. Blocking work run
+//! through [`ActorContext::run_blocking`] is cooperatively cancelled and uses
+//! the actor shutdown timeout as its backstop.
 //!
 //! # Quick start
 //!
@@ -235,7 +229,6 @@
 mod actor;
 mod actor_set;
 mod binding;
-mod blocking;
 mod builder;
 mod context;
 mod error;
@@ -250,21 +243,15 @@ pub mod prelude {
     pub use crate::Topology;
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-        ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
-        BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError, DrainPolicy,
-        Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle, LookupError, RawActor,
-        RebindPolicy, RegistryError, Reply, RunnableActor, RunnableActorFactory, SendError,
-        SpawnBlockingError, TryRecvError,
+        ActorSlot, BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
+        GraphError, GraphHandle, LookupError, RawActor, RebindPolicy, RegistryError, Reply,
+        RunnableActor, RunnableActorFactory, SendError, TryRecvError,
     };
 }
 
 pub use actor::{ActorResult, BoxError, RawActor};
 pub use actor_set::{ActorRunError, ActorSet, RunnableActor, RunnableActorFactory};
 pub use binding::RebindPolicy;
-pub use blocking::{
-    BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions, BlockingTaskError,
-    BlockingTaskFailure, BlockingTaskId, SpawnBlockingError,
-};
 pub use builder::{ActorSlot, GraphBuilder};
 pub use context::{ActorContext, ActorRef, Reply};
 pub use error::{CallError, GraphBuildError, GraphError, LookupError, SendError};

@@ -22,7 +22,6 @@ use crate::{
     actor::{ActorResult, RawActor},
     actor_set::ActorSet,
     binding::{BindingCore, BindingGuard, BindingLifecycle, MailboxRef, RebindPolicy},
-    blocking::{BlockingRuntime, BlockingRuntimeEvent},
     context::{ActorContext, ActorRef},
     error::{GraphError, LookupError},
     observability::{ActorExitStatus, GraphObservability, GraphRunStatus, GraphShutdownCause},
@@ -40,9 +39,7 @@ pub(crate) struct GraphInner {
     pub(crate) actors: Vec<GraphActor>,
     pub(crate) actor_index: HashMap<Arc<str>, usize>,
     pub(crate) mailbox_capacity: usize,
-    pub(crate) max_blocking_tasks_per_actor: Option<usize>,
     pub(crate) actor_shutdown_timeout: Duration,
-    pub(crate) blocking_shutdown_timeout: Duration,
     pub(crate) state: AtomicU8,
     pub(crate) observability: GraphObservability,
 }
@@ -110,8 +107,6 @@ pub(crate) struct GraphActor {
 pub(crate) struct RunnerStart {
     pub(crate) shutdown: CancellationToken,
     pub(crate) mailbox_capacity: usize,
-    pub(crate) max_blocking_tasks_per_actor: Option<usize>,
-    pub(crate) blocking_shutdown_timeout: Duration,
     pub(crate) registry: Option<ActorRegistry>,
     pub(crate) observability: GraphObservability,
     pub(crate) rebind_policy: RebindPolicy,
@@ -145,48 +140,19 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             start.rebind_policy,
         );
         let myself = ActorRef::from_core(&self.binding, Some(actor_id.clone()));
-        let mut blocking = BlockingRuntime::new(
-            actor_id.clone(),
-            myself.clone(),
-            actor_shutdown.clone(),
-            observability.clone(),
-            start.max_blocking_tasks_per_actor,
-            start.blocking_shutdown_timeout,
-        );
         let ctx = ActorContext {
             id: actor_id,
             mailbox,
             registry,
             myself,
-            shutdown: actor_shutdown.clone(),
-            blocking: blocking.spawner(),
+            shutdown: actor_shutdown,
             observability,
         };
         let actor = self.actor.clone();
 
         Box::pin(async move {
             let _bound_mailbox = bound_mailbox;
-            let actor_future = actor.run(ctx);
-            tokio::pin!(actor_future);
-
-            let mut blocking_events_open = true;
-            let result = loop {
-                tokio::select! {
-                    result = &mut actor_future => break result,
-                    maybe_event = blocking.next_event(), if blocking_events_open => {
-                        if let Some(BlockingRuntimeEvent::Completed { task_id }) = maybe_event {
-                            if let Some(failure) = blocking.reap_task(task_id).await {
-                                actor_shutdown.cancel();
-                                break Err(Box::new(failure) as crate::actor::BoxError);
-                            }
-                        } else {
-                            blocking_events_open = false;
-                        }
-                    }
-                }
-            };
-
-            blocking.finish(result).await
+            actor.run(ctx).await
         })
     }
 }
@@ -535,8 +501,6 @@ impl GraphRuntime {
             let actor_future = actor.runner.start(RunnerStart {
                 shutdown: actor_shutdown,
                 mailbox_capacity: self.inner.mailbox_capacity,
-                max_blocking_tasks_per_actor: self.inner.max_blocking_tasks_per_actor,
-                blocking_shutdown_timeout: self.inner.blocking_shutdown_timeout,
                 registry: None,
                 observability: self.inner.observability.clone(),
                 rebind_policy: RebindPolicy::Never,

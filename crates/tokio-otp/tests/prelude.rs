@@ -8,11 +8,9 @@ mod coverage_probe {
     mod actor {
         use tokio_otp::prelude::{
             Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSet,
-            ActorSlot, BlockingContext, BlockingHandle, BlockingOperationError, BlockingOptions,
-            BlockingTaskError, BlockingTaskFailure, BlockingTaskId, BoxError, CallError,
-            DrainPolicy, Graph, GraphBuildError, GraphBuilder, GraphError, GraphHandle,
-            LookupError, RawActor, RebindPolicy, RegistryError, Reply, RunnableActor,
-            RunnableActorFactory, SendError, SpawnBlockingError, Topology, TryRecvError,
+            ActorSlot, BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
+            GraphError, GraphHandle, LookupError, RawActor, RebindPolicy, RegistryError, Reply,
+            RunnableActor, RunnableActorFactory, SendError, Topology, TryRecvError,
         };
     }
 
@@ -48,15 +46,12 @@ impl Actor for BlockingWorker {
 
     async fn handle(&mut self, _message: (), ctx: &ActorContext<()>) -> ActorResult {
         let observed = self.observed.clone();
-        let handle = ctx.spawn_blocking(BlockingOptions::default(), move |blocking_ctx| {
-            blocking_ctx.checkpoint()?;
-            observed
-                .send(blocking_ctx.myself().id().to_owned())
-                .expect("test receiver dropped");
-            Ok(())
-        })?;
-
-        handle.wait().await?;
+        let actor_id = ctx.id().to_owned();
+        ctx.run_blocking(move |token| {
+            assert!(!token.is_cancelled());
+            observed.send(actor_id).expect("test receiver dropped");
+        })
+        .await;
         Ok(())
     }
 }

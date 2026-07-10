@@ -40,9 +40,8 @@ cargo run -p <crate> --example <name>
 | `ref_rebind` | Stable typed actor refs across graph reruns. |
 | `send_vs_try_send` | Waiting `send` vs fail-fast `try_send` across a restart window. |
 | `mailbox_backpressure` | Bounded mailbox back-pressure. |
-| `blocking_work` | Spawning tracked blocking tasks. |
-| `blocking_lifecycle` | Blocking task lifecycle handling. |
-| `blocking_limits` | Per-actor blocking concurrency limits. |
+| `blocking_work` | Awaiting cooperative blocking work with `run_blocking`. |
+| `blocking_lifecycle` | Detached blocking work returning results as actor messages. |
 | `graph_failures` | Error propagation from actor failures. |
 | `builder_validation` | Build-time graph validation errors. |
 | `actor_tracing` / `actor_metrics` | Observability integration. |
@@ -69,5 +68,5 @@ Things this tutorial glossed over that matter in production:
 - **Restart budgets are your circuit breakers.** Tune `RestartIntensity` so a
   persistent fault escalates to something (a parent supervisor, your process
   manager, an alert) instead of looping forever.
-- **Blocking work needs checkpoints.** Cooperative shutdown is only as
-  graceful as your `checkpoint()` calls are frequent.
+- **Blocking work needs cancellation checks.** Cooperative shutdown is only as
+  graceful as your `token.is_cancelled()` checks are frequent.

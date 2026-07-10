@@ -186,21 +186,28 @@ it cannot recover messages that were already accepted by the old run.
 
 ## Blocking Work
 
-Actors can offload blocking work through `ctx.spawn_blocking` or
-`ctx.run_blocking`. The blocking context carries a typed `myself()` ref, so a
-blocking task can report results back to the actor's own mailbox without
-serialization.
+Actors can offload blocking work through `ctx.run_blocking`. Its closure
+receives a cancellation token that follows actor shutdown and is also
+cancelled if the `run_blocking` future is dropped. Long-running closures
+should check it periodically.
 
 ```rust,ignore
-ctx.run_blocking(BlockingOptions::named("engrave"), |job| {
-    job.checkpoint()?;
-    job.myself().try_send(MyMsg::Engraved)?;
-    Ok(())
-}).await?;
+let engraved = ctx.run_blocking(move |token| {
+    if token.is_cancelled() {
+        return None;
+    }
+    Some(engrave(input))
+}).await;
 ```
 
-Defaults are conservative: mailbox capacity is 64 messages, blocking tasks
-are capped at 16 per actor, and shutdown waits up to 5 seconds for blocking
-tasks before detaching them.
+The closure can return any type, including an application-defined `Result`.
+A panic resumes on the actor task. If a closure ignores cancellation, the
+actor shutdown timeout remains the backstop; the blocking thread then runs
+detached because Tokio cannot abort blocking work after it starts.
+
+For intentionally detached or concurrent work, clone `ctx.myself()`, call
+`tokio::task::spawn_blocking` directly, and send the result back as a message.
+The `blocking_lifecycle` example demonstrates this mailbox-as-completion
+pattern.
 
 [`ActorRef`]: https://stokes.io/tokio-otp/api/tokio_actor/struct.ActorRef.html
