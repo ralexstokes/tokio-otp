@@ -184,6 +184,7 @@
 //! - `examples/graph_failures.rs` — supervisor policy around actor failures.
 //! - `examples/mailbox_backpressure.rs`, `examples/send_vs_try_send.rs` —
 //!   bounded mailboxes and send flavors.
+//! - `examples/builder_validation.rs` — build-time graph validation errors.
 //! - `examples/blocking_work.rs`, `examples/blocking_lifecycle.rs` —
 //!   cooperative and detached blocking work.
 //! - `examples/actor_metrics.rs` — the stats-sampler export pattern.

@@ -33,26 +33,24 @@ cargo run -p <crate> --example <name>
 | `tracing` | Structured logging output. |
 | `metrics` | Prometheus metrics (needs `--features metrics`). |
 
-### `tokio-actor`
-
-| Example | Shows |
-|---------|-------|
-| `ref_rebind` | Stable typed actor refs across graph reruns. |
-| `send_vs_try_send` | Waiting `send` vs fail-fast `try_send` across a restart window. |
-| `mailbox_backpressure` | Bounded mailbox back-pressure. |
-| `blocking_work` | Awaiting cooperative blocking work with `run_blocking`. |
-| `blocking_lifecycle` | Detached blocking work returning results as actor messages. |
-| `graph_failures` | Error propagation from actor failures. |
-| `builder_validation` | Build-time graph validation errors. |
-| `actor_tracing` | Structured actor and message tracing. |
-
 ### `tokio-otp`
 
 | Example | Shows |
 |---------|-------|
 | `supervised_actors` | Per-actor supervision with default policies. |
+| `topology` | A cyclic graph wired with `#[derive(Topology)]`. |
 | `individual_actor_policies` | Per-actor restart/shutdown overrides. |
-| `dynamic_actors` | Adding and removing actors at runtime. |
+| `dynamic_actors` | Adding and removing actors at runtime, refs distributed by message. |
+| `directory` | A typed, userland name-directory actor (registry replacement pattern). |
+| `drain_policy` | Draining queued actor messages during shutdown. |
+| `ref_rebind` | Stable typed actor refs across supervised restarts. |
+| `send_vs_try_send` | Waiting `send` vs fail-fast `try_send` across a restart window. |
+| `mailbox_backpressure` | Bounded mailbox back-pressure. |
+| `graph_failures` | Supervisor policy around actor failures. |
+| `builder_validation` | Build-time graph validation errors. |
+| `blocking_work` | Awaiting cooperative blocking work with `run_blocking`. |
+| `blocking_lifecycle` | Detached blocking work returning results as actor messages. |
+| `actor_tracing` | Structured actor and message tracing. |
 | `supervisor_snapshot_trace` | Observing runtime state in detail. |
 | `actor_metrics` | Pull-based actor stats and user-owned export sampling. |
 | `console` | The live web console (needs `--features console`). |

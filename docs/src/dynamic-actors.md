@@ -1,27 +1,44 @@
 # Dynamic Actors
 
-`Runtime::builder().dynamic()` starts a runtime with no actor graph. It idles
-with zero actors until `RuntimeHandle::add_actor` adds a typed actor. Each
-actor is registered in the runtime `ActorRegistry`, so actors can discover each
-other with typed lookups.
+A runtime does not need a graph at all: `Runtime::builder().build()` starts
+empty and idles until `RuntimeHandle::add_actor` adds a typed actor. Each
+added actor becomes a supervised child whose id is the actor's label, and
+`add_actor` returns the typed `ActorRef<M>` directly — there is no registry
+and no string lookup. Refs travel the way any other value does: cloned into
+actor state at construction, or delivered by message.
 
 ```rust,no_run
-use tokio_actor::{ActorContext, ActorResult, Actor};
-use tokio_otp::{DynamicActorOptions, Runtime};
+use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, Runtime};
 use tokio_supervisor::Strategy;
 
 #[derive(Clone)]
-struct FrontDesk;
+struct FrontDesk {
+    rush: Option<ActorRef<String>>,
+}
+
+enum FrontDeskMsg {
+    SetRushPress(ActorRef<String>),
+    Order(String),
+}
 
 impl Actor for FrontDesk {
-    type Msg = String;
+    type Msg = FrontDeskMsg;
 
-    async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
-        let rush = ctx
-            .registry()
-            .expect("registry installed")
-            .actor_ref::<String>("rush-press")?;
-        rush.send(order).await?;
+    async fn handle(
+        &mut self,
+        message: FrontDeskMsg,
+        _ctx: &ActorContext<FrontDeskMsg>,
+    ) -> ActorResult {
+        match message {
+            FrontDeskMsg::SetRushPress(rush) => self.rush = Some(rush),
+            FrontDeskMsg::Order(order) => {
+                self.rush
+                    .as_ref()
+                    .expect("rush press ref delivered before orders")
+                    .send(order)
+                    .await?;
+            }
+        }
         Ok(())
     }
 }
@@ -40,34 +57,56 @@ impl Actor for RushPress {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = Runtime::builder()
-        .dynamic()
-        .strategy(Strategy::OneForOne)
-        .build()?;
+    let runtime = Runtime::builder().strategy(Strategy::OneForOne).build()?;
     let handle = runtime.spawn();
 
     let orders = handle
-        .add_actor("front-desk", FrontDesk, DynamicActorOptions::default())
+        .add_actor("front-desk", FrontDesk { rush: None }, DynamicActorOptions::default())
         .await?;
     let rush = handle
         .add_actor("rush-press", RushPress, DynamicActorOptions::default())
         .await?;
 
-    orders.send("wedding invites x50".into()).await?;
+    // Distribute the ref by message — the mailbox is the discovery channel.
+    orders.send(FrontDeskMsg::SetRushPress(rush.clone())).await?;
+    orders.send(FrontDeskMsg::Order("wedding invites x50".into())).await?;
     rush.send("vip banners x2".into()).await?;
 
-    handle.remove_actor("front-desk").await?;
-    handle.remove_actor("rush-press").await?;
+    handle.remove_child("front-desk").await?;
+    handle.remove_child("rush-press").await?;
     handle.shutdown_and_wait().await?;
     Ok(())
 }
 ```
 
 `DynamicActorOptions` carries the new child's restart policy, shutdown policy,
-and optional restart intensity. Static peer lists are gone; dynamic discovery
-is explicit through `ctx.registry()`.
+and optional restart intensity. `add_actor` returns an `ActorRef<A::Msg>` for
+the new actor, and the same ref keeps working across restarts of that actor.
 
-`add_actor` returns an `ActorRef<A::Msg>` for the new actor. The same ref keeps
-working across restarts of that dynamic actor. `remove_actor` shuts the child
-down and removes the registry entry. A dynamic runtime can be reduced back to
-zero actors and will keep running until `shutdown()` is requested.
+Removal is plain supervisor child removal: `remove_child(label)` shuts the
+actor down and terminates its mailbox binding, so senders holding stale refs
+fail fast instead of waiting forever. A runtime can be reduced back to zero
+actors and keeps running until `shutdown()` is requested.
+
+## Name-based discovery, when you want it
+
+When an application genuinely wants name-based discovery — plugins looking
+each other up at runtime, say — build it as an ordinary actor. A typed
+directory is about twenty lines:
+
+```rust,ignore
+enum DirectoryMsg<M> {
+    Insert(String, ActorRef<M>),
+    Get(String, Reply<Option<ActorRef<M>>>),
+}
+
+struct Directory<M> {
+    entries: HashMap<String, ActorRef<M>>,
+}
+```
+
+Insert refs as actors are created, and `call` the directory to resolve a name
+to a typed ref. Because the directory is self-hosted, *you* choose its
+semantics — namespacing, removal, versioning — instead of inheriting a
+framework registry's. The runnable version is
+`crates/tokio-otp/examples/directory.rs`.

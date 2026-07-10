@@ -27,9 +27,9 @@ snapshot changes.
 
 ## Tracing And Stats
 
-`tokio-actor` emits graph, actor, mailbox, and message tracing events. Message
-events include `source_actor_id` when the sender is another actor; external
-sends through an `ActorRef` have no source actor.
+The actor layer emits graph, actor, mailbox, and message tracing events.
+Message events include `source_actor_id` when the sender is another actor;
+external sends through an `ActorRef` have no source actor.
 
 Every `ActorRef` exposes cumulative message counters and current mailbox usage:
 
@@ -40,11 +40,13 @@ println!("received={} queued={}/{}",
 ```
 
 Applications that need time-series export periodically sample these values and
-the supervisor snapshot. The `tokio-otp` `actor_metrics` example prints the
-result in Prometheus-shaped text without an actor-layer metrics backend.
+the supervisor snapshot — a ~10-line task you own, not a framework pipeline.
+The `tokio-otp` `actor_metrics` example prints the result in
+Prometheus-shaped text without an actor-layer metrics backend.
 
-The `metrics` feature forwards only to `tokio-supervisor`, which continues to
-emit supervisor lifecycle counters, gauges, and histograms.
+The `metrics` feature of `tokio-otp` forwards only to `tokio-supervisor`,
+which continues to emit supervisor lifecycle counters, gauges, and
+histograms.
 
 ## Web Console
 

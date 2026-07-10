@@ -9,24 +9,22 @@ a *supervisor* restart the ones that fail.
 
 ## The crates
 
-`tokio-otp` is the front door: depend on it alone, import everything through
+`tokio-otp` is the product: depend on it alone, import everything through
 `tokio_otp::prelude`, and build the common setup with `Runtime::builder()`.
-Under the hood it composes two deliberately independent crates, each also
-usable à la carte:
+It contains both the typed actor layer and the runtime that supervises it,
+built on one deliberately independent crate:
 
 | Crate | Role |
 |-------|------|
-| [`tokio-otp`](https://stokes.io/tokio-otp/api/tokio_otp/index.html) | The front door: run each actor of a graph as its own supervised child, with one integrated `Runtime`. Re-exports the crates below via its prelude. |
+| [`tokio-otp`](https://stokes.io/tokio-otp/api/tokio_otp/index.html) | Static graphs of communicating actors — typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, cooperative blocking work — with each actor running as its own supervised child under one integrated `Runtime`. |
 | [`tokio-supervisor`](https://stokes.io/tokio-otp/api/tokio_supervisor/index.html) | Structured supervision of async tasks: restart policies, restart intensity limits, graceful shutdown, and supervision trees. |
-| [`tokio-actor`](https://stokes.io/tokio-otp/api/tokio_actor/index.html) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and cooperative blocking work. |
 | [`tokio-otp-console`](https://stokes.io/tokio-otp/api/tokio_otp_console/index.html) | A live web console for watching a running supervision tree. |
 
-The lower-level crates are deliberately independent:
-
-- `tokio-supervisor` knows nothing about actors. It supervises any async task.
-- `tokio-actor` knows nothing about restarts. When an actor fails, the whole
-  graph run fails — which makes a graph a perfect *child* for a supervisor.
-- `tokio-otp` glues the two together and removes the boilerplate.
+`tokio-supervisor` knows nothing about actors — it supervises any async task,
+and is useful on its own if that is all you need. `tokio-otp` builds on it:
+actors are the unit of execution, and what an actor's exit *means* — restart,
+final completion, escalation — is always supervisor policy, never the actor's
+own concern.
 
 ## The mental model
 
@@ -39,7 +37,7 @@ If you have used Erlang/OTP or Elixir, the mapping is direct:
 | `permanent` / `transient` / `temporary` | `Restart::Permanent` / `Restart::Transient` / `Restart::Temporary` |
 | Restart intensity (`MaxR`/`MaxT`) | `RestartIntensity::new(max_restarts, within)` |
 | GenServer-ish process with a mailbox | An actor with an [`ActorContext`] |
-| Registered process name | Actor id + typed `ActorRef<M>` |
+| Registered process name | A typed `ActorRef<M>`, minted at wiring time and passed around (labels are display names, not addresses) |
 
 If you have not: don't worry. This tutorial builds everything up from scratch.
 
@@ -73,4 +71,4 @@ next](next-steps.md)).
 
 [`SupervisorBuilder`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.SupervisorBuilder.html
 [`ChildSpec`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ChildSpec.html
-[`ActorContext`]: https://stokes.io/tokio-otp/api/tokio_actor/struct.ActorContext.html
+[`ActorContext`]: https://stokes.io/tokio-otp/api/tokio_otp/struct.ActorContext.html

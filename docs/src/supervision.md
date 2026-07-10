@@ -88,8 +88,10 @@ restarts within a sliding `within` window (the default is 5 restarts within
 escalates the failure to the parent.
 
 A [`BackoffPolicy`] optionally delays each restart attempt: `Fixed`,
-`Exponential`, or `ExponentialWithJitter`. A shutdown request always wins over
-a pending restart delay.
+`Exponential`, or `JitteredExponential`. The exponential attempt count is a
+per-child consecutive-restart counter that resets once a run survives longer
+than the intensity window. A shutdown request always wins over a pending
+restart delay.
 
 Intensity can be set on the supervisor as a whole
 (`SupervisorBuilder::restart_intensity`) or overridden per child, as we did
@@ -119,8 +121,8 @@ group restart — its [`ShutdownPolicy`] governs how:
 
 One caveat inherited from Tokio itself: aborts take effect at `.await` points.
 A child stuck in a non-yielding loop cannot be preempted — isolate truly
-blocking work behind a blocking pool (as `tokio-actor` does, see the next
-chapter) or an external process.
+blocking work behind a blocking pool (as the actor layer's `run_blocking`
+does, see the next chapter) or an external process.
 
 ## Supervision trees
 

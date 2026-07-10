@@ -38,7 +38,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let handle = support::ActorTasks::start(&graph);
 
-    worker.try_send("first")?;
+    // `send` waits for the worker's mailbox to bind, so the first message
+    // deterministically occupies the single mailbox slot; `try_send` before
+    // the binding exists would fail with `ActorNotRunning`.
+    worker.send("first").await?;
     match worker.try_send("second") {
         Err(SendError::MailboxFull { actor_id }) => {
             println!("`{actor_id}` mailbox is full");

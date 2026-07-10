@@ -1,20 +1,23 @@
 # Actor Graphs
 
-`tokio-actor` models a group of async actors with typed mailboxes. Each actor
-declares one message type, and a topology mints restart-stable `ActorRef<M>`
-handles that can be stored in other actors' state.
+The actor layer of `tokio-otp` models a group of async actors with typed
+mailboxes. Each actor declares one message type, and a topology mints
+restart-stable `ActorRef<M>` handles that can be stored in other actors'
+state.
 
 There are no string-addressed sends and no byte envelope type. If the front
 desk sends orders to the press, the front desk owns an `ActorRef<Order>`.
+Actor names exist too, but only as *labels* for tracing, stats, and
+supervisor child ids — addressing is always a typed ref.
 
 The usual static graph is a struct whose fields are the actors. Deriving
 `Topology` gives that struct a `graph` method; its wiring closure receives a
 refs struct with one typed `ActorRef` per field, so cycles and forward
-references do not require string lookup.
+references do not require string lookup. Refs you need outside the graph are
+captured from the same closure:
 
 ```rust,no_run
-use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, Actor, Reply, Topology};
-use tokio_otp::Runtime;
+use tokio_otp::{ActorContext, ActorRef, ActorResult, Actor, GraphBuilder, Reply, Runtime, Topology};
 
 struct Order(String);
 struct Parcel(String);
@@ -90,17 +93,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = GraphBuilder::new();
     builder.name("print-shop");
 
-    let graph = PrintShop::graph_with(builder, |refs| PrintShop {
-        front_desk: FrontDesk {
-            press: refs.press.clone(),
-        },
-        press: Press {
-            shipping: refs.shipping.clone(),
-        },
-        shipping: Shipping::default(),
+    let mut entry_points = None;
+    let graph = PrintShop::graph_with(builder, |refs| {
+        entry_points = Some((refs.front_desk.clone(), refs.shipping.clone()));
+        PrintShop {
+            front_desk: FrontDesk {
+                press: refs.press.clone(),
+            },
+            press: Press {
+                shipping: refs.shipping.clone(),
+            },
+            shipping: Shipping::default(),
+        }
     })?;
-    let orders = graph.actor_ref::<Order>("front_desk")?;
-    let shipping = graph.actor_ref::<ShippingMsg>("shipping")?;
+    let (orders, shipping) = entry_points.expect("wiring closure ran");
 
     let handle = Runtime::builder().graph(graph).build()?.spawn();
 
@@ -122,9 +128,9 @@ for the common supervised runtime.
 ## Struct Topologies
 
 `#[derive(Topology)]` supports named-field structs whose fields implement
-`RawActor`. Field names become actor ids verbatim, so supervisor child ids,
-runtime lookups, tracing fields, and metric labels stay human-readable without
-participating in type checking. The generated `graph_with` accepts a
+`RawActor`. Field names become actor labels verbatim, so supervisor child
+ids, tracing fields, and stats stay human-readable without participating in
+type checking or message routing. The generated `graph_with` accepts a
 preconfigured `GraphBuilder` for graph name, mailbox capacity, and shutdown
 timeouts; the generated `graph` uses `GraphBuilder::new()`.
 
@@ -149,9 +155,14 @@ need explicit observability names:
 
 The direct builder still validates runtime configuration facts:
 
-- duplicate actor ids
+- duplicate actor labels
 - slots that were opened but never filled
-- empty graph names, empty actor ids, and zero mailbox capacity
+- empty graph names, empty actor labels, and zero mailbox capacity
+
+One hazard comes with cyclic wiring: mailboxes are bounded, so two actors
+that `send` to each other while both mailboxes are full deadlock permanently,
+and a `call` cycle deadlocks at depth one. Use `try_send` on feedback edges,
+and `call` only "downhill" along a DAG ordering of the graph.
 
 ## Runtime Handles
 
@@ -164,8 +175,10 @@ The direct builder still validates runtime configuration facts:
 | `call` | Sends a message carrying `Reply<T>` and awaits the reply. |
 
 Refs are bound to long-lived mailbox bindings, not one actor incarnation. A
-ref minted before `build()` keeps working across graph reruns and per-actor
-restarts under `tokio-otp`.
+ref minted at wiring time keeps working across per-actor supervised
+restarts. Delivery is at-most-once: `Ok` from `send` means the message was
+accepted by the current incarnation's mailbox, not that it will be
+processed.
 
 ## Message Loss at Shutdown and Restart
 
@@ -211,4 +224,4 @@ For intentionally detached or concurrent work, clone `ctx.myself()`, call
 The `blocking_lifecycle` example demonstrates this mailbox-as-completion
 pattern.
 
-[`ActorRef`]: https://stokes.io/tokio-otp/api/tokio_actor/struct.ActorRef.html
+[`ActorRef`]: https://stokes.io/tokio-otp/api/tokio_otp/struct.ActorRef.html

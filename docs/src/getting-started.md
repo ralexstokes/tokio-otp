@@ -12,12 +12,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-otp = { git = "https://github.com/ralexstokes/tokio-otp" }
 ```
 
-`tokio-otp` re-exports the common types of its underlying crates through
-`tokio_otp::prelude`, so a single `use tokio_otp::prelude::*;` covers every
-example in this book. The lower-level crates are also usable à la carte: the
-early chapters only exercise the supervision layer, so if that is all you
-need, you can depend on `tokio-supervisor` directly (and likewise
-`tokio-actor` for unsupervised actor graphs).
+`tokio-otp` exports its whole surface (plus the common `tokio-supervisor`
+types) through `tokio_otp::prelude`, so a single `use tokio_otp::prelude::*;`
+covers every example in this book. The early chapters only exercise the
+supervision layer, so if that is all you need, you can depend on
+`tokio-supervisor` directly — it is independent of the actor layer.
 
 ## Your first supervised task
 
@@ -72,8 +71,10 @@ A few things worth noticing:
   The restart policy decides what happens next.
 - **`spawn()` returns a [`SupervisorHandle`].** This is your control surface:
   shut the tree down, add or remove children, subscribe to lifecycle events,
-  or grab a state snapshot. `run()` is the alternative if you'd rather drive
-  the supervisor on the current task.
+  or grab a state snapshot. To drive the supervisor in the foreground, follow
+  `spawn()` with `handle.wait().await` — and note that dropping the last
+  handle clone requests graceful shutdown, so fire-and-forget operation means
+  keeping a handle alive.
 
 Run it and you'll see the heartbeat tick until the shutdown request cancels
 its token:
