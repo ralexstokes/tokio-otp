@@ -36,19 +36,6 @@ fn event_message(event: SupervisorEvent) -> Message {
 }
 
 fn stats_message(stats: Vec<ActorStatsView>) -> Message {
-    let stats = stats
-        .into_iter()
-        .map(|stats| {
-            serde_json::json!({
-                "actor_id": stats.actor_id,
-                "messages_received": stats.messages_received,
-                "messages_accepted": stats.messages_accepted,
-                "sends_rejected": stats.sends_rejected,
-                "mailbox_depth": stats.mailbox_depth,
-                "mailbox_capacity": stats.mailbox_capacity,
-            })
-        })
-        .collect::<Vec<_>>();
     Message::Text(
         serde_json::json!({ "type": "actor_stats", "data": stats })
             .to_string()

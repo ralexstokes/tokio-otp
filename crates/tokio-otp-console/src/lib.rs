@@ -41,7 +41,7 @@ use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{SupervisorEvent, SupervisorSnapshot};
 
 /// Display-oriented snapshot of one actor's message and mailbox statistics.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct ActorStatsView {
     pub actor_id: String,
     pub messages_received: u64,
