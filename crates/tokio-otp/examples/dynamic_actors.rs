@@ -1,22 +1,38 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorResult};
+use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult};
 use tokio_otp::{DynamicActorOptions, Runtime};
 use tokio_supervisor::Strategy;
 
 #[derive(Clone)]
-struct Frontend;
+struct Frontend {
+    rush: Option<ActorRef<String>>,
+}
+
+enum FrontendMsg {
+    SetRushPress(ActorRef<String>),
+    Order(String),
+}
 
 impl Actor for Frontend {
-    type Msg = String;
+    type Msg = FrontendMsg;
 
-    async fn handle(&mut self, order: String, ctx: &ActorContext<String>) -> ActorResult {
-        let rush = ctx
-            .registry()
-            .expect("registry installed")
-            .actor_ref::<String>("rush-press")?;
-        rush.send(order).await?;
+    async fn handle(
+        &mut self,
+        message: FrontendMsg,
+        _ctx: &ActorContext<FrontendMsg>,
+    ) -> ActorResult {
+        match message {
+            FrontendMsg::SetRushPress(rush) => self.rush = Some(rush),
+            FrontendMsg::Order(order) => {
+                self.rush
+                    .as_ref()
+                    .expect("rush press ref distributed before orders")
+                    .send(order)
+                    .await?;
+            }
+        }
         Ok(())
     }
 }
@@ -39,14 +55,15 @@ impl Actor for RushPress {
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
-    let runtime = Runtime::builder()
-        .dynamic()
-        .strategy(Strategy::OneForOne)
-        .build()?;
+    let runtime = Runtime::builder().strategy(Strategy::OneForOne).build()?;
     let handle = runtime.spawn();
 
     let orders = handle
-        .add_actor("front-desk", Frontend, DynamicActorOptions::default())
+        .add_actor(
+            "front-desk",
+            Frontend { rush: None },
+            DynamicActorOptions::default(),
+        )
         .await?;
     let rush = handle
         .add_actor(
@@ -58,7 +75,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await?;
 
-    orders.send("wedding invites x50".to_owned()).await?;
+    orders.send(FrontendMsg::SetRushPress(rush.clone())).await?;
+    orders
+        .send(FrontendMsg::Order("wedding invites x50".to_owned()))
+        .await?;
     let observed = observed_rx.recv().await.expect("rush job");
     assert_eq!(observed, "wedding invites x50");
     println!("rush job {observed}");
@@ -68,8 +88,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(observed, "vip banners x2");
     println!("rush job {observed}");
 
-    handle.remove_actor("front-desk").await?;
-    handle.remove_actor("rush-press").await?;
+    handle.remove_child("front-desk").await?;
+    handle.remove_child("rush-press").await?;
     handle.shutdown_and_wait().await?;
     Ok(())
 }

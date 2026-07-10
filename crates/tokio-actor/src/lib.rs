@@ -19,7 +19,7 @@
 //! | [`RunnableActor`] | One actor plus stable binding for per-actor supervision. |
 //! | [`RawActor`] | Custom-loop typed actor definition. |
 //! | [`Actor`] | Handler-style actor definition with a provided receive loop. |
-//! | [`ActorContext`] | Mailbox, registry, blocking work, and shutdown token visible to one actor. |
+//! | [`ActorContext`] | Mailbox, blocking work, and shutdown token visible to one actor. |
 //! | [`ActorRef`] | Cloneable stable typed mailbox sender. |
 //! | [`Reply`] | One-shot response channel carried inside request messages. |
 //!
@@ -238,17 +238,15 @@ mod error;
 mod graph;
 mod handler;
 mod observability;
-mod registry;
 
 pub mod prelude {
     // Keep this list mirrored by tokio_otp::prelude; its prelude test guards drift.
     #[cfg(feature = "derive")]
     pub use crate::Topology;
     pub use crate::{
-        Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSlot,
-        ActorStats, BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
-        LookupError, RawActor, RebindPolicy, RegistryError, Reply, RunnableActor,
-        RunnableActorFactory, SendError, TryRecvError,
+        Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
+        CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor, RebindPolicy,
+        Reply, RunnableActor, RunnableActorFactory, SendError, TryRecvError,
     };
 }
 
@@ -256,10 +254,9 @@ pub use actor::{ActorResult, BoxError, RawActor};
 pub use binding::{ActorStats, RebindPolicy};
 pub use builder::{ActorSlot, GraphBuilder};
 pub use context::{ActorContext, ActorRef, Reply};
-pub use error::{CallError, GraphBuildError, LookupError, SendError};
+pub use error::{CallError, GraphBuildError, SendError};
 pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};
 pub use handler::{Actor, DrainPolicy};
-pub use registry::{ActorRegistry, RegistryError};
 pub use tokio::sync::mpsc::error::TryRecvError;
 #[cfg(feature = "derive")]
 pub use tokio_actor_derive::Topology;

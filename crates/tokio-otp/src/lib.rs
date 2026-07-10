@@ -44,7 +44,7 @@
 //!
 //! | Type | Role |
 //! |------|------|
-//! | [`Runtime`] / [`RuntimeBuilder`] | Owns a supervisor and optional dynamic actor registry — the common composition. |
+//! | [`Runtime`] / [`RuntimeBuilder`] | Owns a supervisor and actor factory — the common composition. |
 //! | [`RuntimeHandle`] | Control surface for a spawned runtime (shutdown, dynamic actors, observability). |
 //! | [`SupervisedActors`] | Adapts a graph into per-actor supervised children with configurable policies. |
 //! | [`DynamicActorOptions`] | Options for runtime-added actors (restart, shutdown). |
@@ -52,9 +52,8 @@
 //! # Composition modes
 //!
 //! - **The integrated runtime** via [`Runtime::builder`]: per-actor
-//!   supervision with uniform policies, packaged with a dynamic actor
-//!   registry. Add [`RuntimeBuilder::dynamic`] to start with no actors or to
-//!   let a graph-backed runtime return to zero actors.
+//!   supervision with uniform policies and runtime actor creation. Omit
+//!   [`RuntimeBuilder::graph`] to start with no actors.
 //!
 //! - **Per-actor supervision** via [`SupervisedActors`]: each actor becomes its
 //!   own child in a supervisor, with individual restart and shutdown policies.
@@ -73,11 +72,11 @@
 //! - `examples/individual_actor_policies.rs` — per-actor restart/shutdown
 //!   overrides.
 //! - `examples/dynamic_actors.rs` — adding and removing actors at runtime.
+//! - `examples/directory.rs` — a typed, userland name directory actor.
 //! - `examples/supervisor_snapshot_trace.rs` — observing runtime state.
 //! - `examples/console.rs` — serving the web console for a supervised runtime.
 
 mod builder;
-mod error;
 mod runtime;
 mod supervised_actors;
 
@@ -92,10 +91,9 @@ pub mod prelude {
     // and harmless; console types are feature-gated and experimental, so they
     // remain available only at the crate root.
     pub use tokio_actor::{
-        Actor, ActorContext, ActorRef, ActorRegistry, ActorResult, ActorRunError, ActorSlot,
-        ActorStats, BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
-        LookupError, RawActor, RebindPolicy, RegistryError, Reply, RunnableActor,
-        RunnableActorFactory, SendError, Topology, TryRecvError,
+        Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
+        CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor, RebindPolicy,
+        Reply, RunnableActor, RunnableActorFactory, SendError, Topology, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -107,8 +105,7 @@ pub mod prelude {
     };
 
     pub use crate::{
-        DynamicActorError, DynamicActorOptions, Runtime, RuntimeBuildError, RuntimeBuilder,
-        RuntimeHandle, SupervisedActors,
+        DynamicActorOptions, Runtime, RuntimeBuilder, RuntimeHandle, SupervisedActors,
     };
 }
 
@@ -116,7 +113,6 @@ pub mod prelude {
 pub use tokio_otp_console::{ActorStatsView, Console, ConsoleBuilder, ConsoleHandle};
 
 pub use builder::RuntimeBuilder;
-pub use error::{DynamicActorError, RuntimeBuildError};
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
 pub use supervised_actors::SupervisedActors;
 pub use tokio_actor::{Actor, DrainPolicy, Topology};

@@ -56,7 +56,12 @@ impl Actor for Worker {
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");
-    let frontend = builder.actor("frontend", Frontend { worker: worker_ref });
+    let frontend = builder.actor(
+        "frontend",
+        Frontend {
+            worker: worker_ref.clone(),
+        },
+    );
     builder.define(
         worker_slot,
         Worker {
@@ -68,7 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let runtime = SupervisedActors::new(graph)
         .actor_restart_intensity(
-            "worker",
+            &worker_ref,
             RestartIntensity::new(20, Duration::from_secs(120)),
         )
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;

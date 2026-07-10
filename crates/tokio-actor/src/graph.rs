@@ -1,11 +1,9 @@
 use std::{
-    any::{Any, TypeId, type_name},
-    collections::HashMap,
     future::Future,
     io::Error as IoError,
     pin::Pin,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
@@ -26,9 +24,7 @@ use crate::{
     binding::{ActorStats, BindingCore, BindingGuard, BindingLifecycle, MailboxRef, RebindPolicy},
     builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
     context::{ActorContext, ActorRef},
-    error::LookupError,
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
-    registry::{ActorRegistry, RegistryError},
 };
 
 pub(crate) type BoxedActorFuture = Pin<Box<dyn Future<Output = ActorResult> + Send + 'static>>;
@@ -36,7 +32,6 @@ pub(crate) type BoxedActorFuture = Pin<Box<dyn Future<Output = ActorResult> + Se
 pub(crate) struct RunnerStart {
     pub(crate) shutdown: CancellationToken,
     pub(crate) mailbox_capacity: usize,
-    pub(crate) registry: Option<ActorRegistry>,
     pub(crate) observability: GraphObservability,
     pub(crate) rebind_policy: RebindPolicy,
 }
@@ -59,7 +54,6 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
     fn start(&self, start: RunnerStart) -> BoxedActorFuture {
         let actor_shutdown = start.shutdown;
         let observability = start.observability;
-        let registry = start.registry;
         let (sender, mailbox) = mpsc::channel(start.mailbox_capacity);
         let actor_id = self.binding.actor_id().clone();
         let bound_mailbox = BindingGuard::bind(
@@ -72,7 +66,6 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
         let ctx = ActorContext {
             id: actor_id,
             mailbox,
-            registry,
             myself,
             shutdown: actor_shutdown,
             observability,
@@ -114,7 +107,6 @@ pub struct Graph {
 struct GraphInner {
     name: Arc<str>,
     actors: Vec<RunnableActor>,
-    actor_index: HashMap<Arc<str>, usize>,
     observability: GraphObservability,
     mailbox_capacity: usize,
     actor_shutdown_timeout: Duration,
@@ -128,16 +120,10 @@ impl Graph {
         mailbox_capacity: usize,
         actor_shutdown_timeout: Duration,
     ) -> Self {
-        let actor_index = actors
-            .iter()
-            .enumerate()
-            .map(|(index, actor)| (actor.inner.actor_id.clone(), index))
-            .collect();
         Self {
             inner: Arc::new(GraphInner {
                 name,
                 actors,
-                actor_index,
                 observability,
                 mailbox_capacity,
                 actor_shutdown_timeout,
@@ -148,22 +134,6 @@ impl Graph {
     /// Returns the graph name used in tracing fields.
     pub fn name(&self) -> &str {
         &self.inner.name
-    }
-
-    /// Returns an individually runnable actor by label, if it exists.
-    pub fn actor(&self, label: &str) -> Option<&RunnableActor> {
-        self.inner
-            .actor_index
-            .get(label)
-            .and_then(|index| self.inner.actors.get(*index))
-    }
-
-    /// Returns a typed actor ref for a graph actor, checked at runtime.
-    pub fn actor_ref<M: Send + 'static>(&self, label: &str) -> Result<ActorRef<M>, LookupError> {
-        let actor = self.actor(label).ok_or_else(|| LookupError::UnknownActor {
-            actor_id: label.to_owned(),
-        })?;
-        actor.actor_ref()
     }
 
     /// Returns all runnable actors in graph declaration order.
@@ -207,12 +177,8 @@ pub struct RunnableActor {
 
 struct RunnableActorInner {
     actor_id: Arc<str>,
-    message_type: TypeId,
-    message_type_name: &'static str,
-    binding: Arc<dyn Any + Send + Sync>,
     binding_lifecycle: Arc<dyn BindingLifecycle>,
     runner: Arc<dyn ErasedRunner>,
-    registry: OnceLock<ActorRegistry>,
     mailbox_capacity: usize,
     actor_shutdown_timeout: Duration,
     observability: GraphObservability,
@@ -221,9 +187,6 @@ struct RunnableActorInner {
 
 pub(crate) struct RunnableActorParts {
     pub(crate) actor_id: Arc<str>,
-    pub(crate) message_type: TypeId,
-    pub(crate) message_type_name: &'static str,
-    pub(crate) binding: Arc<dyn Any + Send + Sync>,
     pub(crate) binding_lifecycle: Arc<dyn BindingLifecycle>,
     pub(crate) runner: Arc<dyn ErasedRunner>,
     pub(crate) mailbox_capacity: usize,
@@ -236,12 +199,8 @@ impl RunnableActor {
         Self {
             inner: Arc::new(RunnableActorInner {
                 actor_id: parts.actor_id,
-                message_type: parts.message_type,
-                message_type_name: parts.message_type_name,
-                binding: parts.binding,
                 binding_lifecycle: parts.binding_lifecycle,
                 runner: parts.runner,
-                registry: OnceLock::new(),
                 mailbox_capacity: parts.mailbox_capacity,
                 actor_shutdown_timeout: parts.actor_shutdown_timeout,
                 observability: parts.observability,
@@ -260,45 +219,7 @@ impl RunnableActor {
         self.inner.binding_lifecycle.stats()
     }
 
-    /// Returns a stable typed actor reference for this actor.
-    pub fn actor_ref<M: Send + 'static>(&self) -> Result<ActorRef<M>, LookupError> {
-        if self.inner.message_type != TypeId::of::<M>() {
-            return Err(LookupError::MessageTypeMismatch {
-                actor_id: self.label().to_owned(),
-                registered: self.inner.message_type_name,
-                requested: type_name::<M>(),
-            });
-        }
-
-        let Ok(binding) = self.inner.binding.clone().downcast::<BindingCore<M>>() else {
-            unreachable!("message type id already verified")
-        };
-
-        Ok(ActorRef::from_parts(
-            self.inner.actor_id.clone(),
-            binding.subscribe(),
-            binding.stats_counters(),
-            None,
-        ))
-    }
-
-    /// Registers this actor in a runtime registry.
-    pub fn register_with(&self, registry: &ActorRegistry) -> Result<(), RegistryError> {
-        registry.register_erased(
-            self.inner.actor_id.clone(),
-            self.inner.message_type,
-            self.inner.message_type_name,
-            self.inner.binding.clone(),
-            self.inner.binding_lifecycle.clone(),
-        )
-    }
-
-    /// Sets the runtime actor registry visible to this actor.
-    pub fn set_registry(&self, registry: ActorRegistry) {
-        let _ = self.inner.registry.set(registry);
-    }
-
-    /// Marks the actor's binding terminated and removes it from its registry.
+    /// Marks the actor's binding terminated.
     ///
     /// Call this when no further run will be started so senders fail fast with
     /// `ActorTerminated` instead of waiting for a rebind that will never come.
@@ -320,14 +241,12 @@ impl RunnableActor {
         let actor_shutdown = CancellationToken::new();
         let mut shutdown = std::pin::pin!(shutdown);
         let actor_span = self.inner.observability.actor_span(&actor_id);
-        let registry = self.inner.registry.get().cloned();
         let mut actor_task = AbortOnDrop::new(tokio::spawn(
             self.inner
                 .runner
                 .start(RunnerStart {
                     shutdown: actor_shutdown.clone(),
                     mailbox_capacity: self.inner.mailbox_capacity,
-                    registry,
                     observability: self.inner.observability.clone(),
                     rebind_policy: rebind,
                 })
@@ -443,12 +362,7 @@ impl RunnableActor {
     fn apply_run_disposition(&self, disposition: RunDisposition) {
         match disposition {
             RunDisposition::ExpectRebind => self.inner.binding_lifecycle.unbind(),
-            RunDisposition::Terminate => {
-                self.inner.binding_lifecycle.terminate();
-                if let Some(registry) = self.inner.registry.get() {
-                    let _ = registry.deregister(&self.inner.actor_id);
-                }
-            }
+            RunDisposition::Terminate => self.inner.binding_lifecycle.terminate(),
         }
     }
 }
@@ -508,21 +422,24 @@ impl RunnableActorFactory {
         }
     }
 
-    /// Constructs a runtime actor.
-    pub fn actor<A: RawActor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
-        let actor_id: Arc<str> = actor_id.into().into();
+    /// Constructs a runnable actor and its stable typed ref.
+    pub fn actor<A: RawActor>(
+        &self,
+        label: impl Into<String>,
+        actor: A,
+    ) -> (RunnableActor, ActorRef<A::Msg>) {
+        let actor_id: Arc<str> = label.into().into();
         let binding = Arc::new(BindingCore::<A::Msg>::new(actor_id.clone()));
-        RunnableActor::new(RunnableActorParts {
+        let actor_ref = ActorRef::from_core(&binding, None);
+        let runnable = RunnableActor::new(RunnableActorParts {
             actor_id,
-            message_type: TypeId::of::<A::Msg>(),
-            message_type_name: type_name::<A::Msg>(),
-            binding: binding.clone(),
             binding_lifecycle: binding.clone(),
             runner: Arc::new(TypedRunner { actor, binding }),
             mailbox_capacity: self.mailbox_capacity,
             actor_shutdown_timeout: self.actor_shutdown_timeout,
             observability: self.observability.clone(),
-        })
+        });
+        (runnable, actor_ref)
     }
 }
 

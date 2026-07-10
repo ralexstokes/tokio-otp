@@ -1,9 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, watch};
 use tokio_actor::{
-    ActorRef, ActorRegistry, ActorStats, RawActor, RebindPolicy, RegistryError, RunnableActor,
-    RunnableActorFactory,
+    ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
 };
 use tokio_supervisor::{
     ChildSpec, ControlError, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
@@ -11,19 +10,40 @@ use tokio_supervisor::{
     SupervisorSnapshot, SupervisorSpec,
 };
 
-use crate::error::DynamicActorError;
-
 #[derive(Clone, Debug)]
-struct DynamicRuntimeState {
-    registry: ActorRegistry,
+struct ActorRuntimeState {
     actor_factory: RunnableActorFactory,
+    actors: Arc<Mutex<Vec<RunnableActor>>>,
 }
 
-impl DynamicRuntimeState {
-    fn build_actor<A: RawActor>(&self, actor_id: impl Into<String>, actor: A) -> RunnableActor {
-        let actor = self.actor_factory.actor(actor_id, actor);
-        actor.set_registry(self.registry.clone());
-        actor
+impl ActorRuntimeState {
+    fn new(actor_factory: RunnableActorFactory, actors: Vec<RunnableActor>) -> Self {
+        Self {
+            actor_factory,
+            actors: Arc::new(Mutex::new(actors)),
+        }
+    }
+
+    fn actor_stats(&self) -> Vec<ActorStats> {
+        self.actors
+            .lock()
+            .expect("actor stats lock poisoned")
+            .iter()
+            .map(RunnableActor::stats)
+            .collect()
+    }
+
+    fn record_actor(&self, actor: RunnableActor) {
+        let mut actors = self.actors.lock().expect("actor stats lock poisoned");
+        actors.retain(|existing| existing.label() != actor.label());
+        actors.push(actor);
+    }
+
+    fn forget_actor(&self, label: &str) {
+        self.actors
+            .lock()
+            .expect("actor stats lock poisoned")
+            .retain(|actor| actor.label() != label);
     }
 }
 
@@ -49,7 +69,7 @@ impl Default for DynamicActorOptions {
 }
 
 /// Configured-but-not-yet-running runtime that owns a supervisor and its
-/// optional dynamic actor registry.
+/// actor factory.
 ///
 /// Start the runtime with [`spawn`](Self::spawn), which returns the
 /// [`RuntimeHandle`] control surface. To drive the runtime in the foreground
@@ -58,15 +78,14 @@ impl Default for DynamicActorOptions {
 /// as the explicit escape hatch to the raw [`Supervisor`].
 pub struct Runtime {
     supervisor: Supervisor,
-    dynamic: Option<Arc<DynamicRuntimeState>>,
+    actors: Arc<ActorRuntimeState>,
 }
 
 impl Runtime {
     /// Starts building a supervised actor runtime.
     ///
-    /// Provide a graph to run every graph actor as its own supervised child, or
-    /// call [`RuntimeBuilder::dynamic`](crate::RuntimeBuilder::dynamic) to
-    /// start with no actors and add them at runtime.
+    /// Provide a graph to run every graph actor as its own supervised child,
+    /// or build without one and add actors at runtime.
     ///
     /// See [`RuntimeBuilder`](crate::RuntimeBuilder) for an example.
     pub fn builder() -> crate::RuntimeBuilder {
@@ -77,31 +96,29 @@ impl Runtime {
     pub fn new(supervisor: Supervisor) -> Self {
         Self {
             supervisor,
-            dynamic: None,
+            actors: Arc::new(ActorRuntimeState::new(
+                RunnableActorFactory::new(),
+                Vec::new(),
+            )),
         }
     }
 
-    pub(crate) fn with_dynamic(
+    pub(crate) fn with_actors(
         supervisor: Supervisor,
-        registry: ActorRegistry,
         actor_factory: RunnableActorFactory,
+        actors: Vec<RunnableActor>,
     ) -> Self {
         Self {
             supervisor,
-            dynamic: Some(Arc::new(DynamicRuntimeState {
-                registry,
-                actor_factory,
-            })),
+            actors: Arc::new(ActorRuntimeState::new(actor_factory, actors)),
         }
     }
 
     /// Returns the underlying [`Supervisor`] for first-class nesting.
     ///
-    /// On a runtime built with
-    /// [`RuntimeBuilder::dynamic`](crate::RuntimeBuilder::dynamic), this
-    /// discards the dynamic actor registry: [`RuntimeHandle::add_actor`] and
-    /// [`RuntimeHandle::actor_ref`] support is lost. Keep the full runtime and
-    /// use [`spawn`](Self::spawn) if you need dynamic actor support.
+    /// This discards the actor factory, so [`RuntimeHandle::add_actor`] is not
+    /// available after converting to a raw supervisor. Keep the full runtime
+    /// and use [`spawn`](Self::spawn) if you need runtime actor creation.
     ///
     pub fn into_supervisor(self) -> Supervisor {
         self.supervisor
@@ -109,7 +126,7 @@ impl Runtime {
 
     /// Spawns the supervisor in the background and returns a combined handle.
     pub fn spawn(self) -> RuntimeHandle {
-        RuntimeHandle::new(self.supervisor.spawn(), self.dynamic)
+        RuntimeHandle::new(self.supervisor.spawn(), self.actors)
     }
 }
 
@@ -127,37 +144,17 @@ impl std::fmt::Debug for Runtime {
 #[derive(Clone)]
 pub struct RuntimeHandle {
     supervisor: SupervisorHandle,
-    dynamic: Option<Arc<DynamicRuntimeState>>,
+    actors: Arc<ActorRuntimeState>,
 }
 
 impl RuntimeHandle {
-    fn new(supervisor: SupervisorHandle, dynamic: Option<Arc<DynamicRuntimeState>>) -> Self {
-        Self {
-            supervisor,
-            dynamic,
-        }
+    fn new(supervisor: SupervisorHandle, actors: Arc<ActorRuntimeState>) -> Self {
+        Self { supervisor, actors }
     }
 
     /// Returns a clone of the underlying supervisor handle.
     pub fn supervisor_handle(&self) -> SupervisorHandle {
         self.supervisor.clone()
-    }
-
-    /// Returns a stable actor reference for a registered actor id.
-    ///
-    /// Returns [`DynamicActorError::Unsupported`] if the runtime was built
-    /// without a dynamic actor registry (see
-    /// [`RuntimeBuilder::dynamic`](crate::RuntimeBuilder::dynamic)), and
-    /// [`DynamicActorError::Lookup`] if the registry has no matching actor.
-    pub fn actor_ref<M: Send + 'static>(
-        &self,
-        actor_id: &str,
-    ) -> Result<ActorRef<M>, DynamicActorError> {
-        let dynamic = self
-            .dynamic
-            .as_ref()
-            .ok_or(DynamicActorError::Unsupported)?;
-        Ok(dynamic.registry.actor_ref(actor_id)?)
     }
 
     /// Requests a graceful shutdown of the supervisor.
@@ -189,58 +186,39 @@ impl RuntimeHandle {
         self.supervisor.supervisor(id)
     }
 
-    /// Adds a runtime actor to a supervised actor runtime.
+    /// Adds a supervised runtime actor and returns its stable typed ref.
+    ///
+    /// The actor's label is also its direct supervisor child id, so it can be
+    /// removed later with [`remove_child`](Self::remove_child).
     pub async fn add_actor<A: RawActor>(
         &self,
-        actor_id: impl Into<String>,
+        label: impl Into<String>,
         actor: A,
         options: DynamicActorOptions,
-    ) -> Result<ActorRef<A::Msg>, DynamicActorError> {
-        let dynamic = self
-            .dynamic
-            .as_ref()
-            .ok_or(DynamicActorError::Unsupported)?;
-        let actor = dynamic.build_actor(actor_id, actor);
-        let actor_ref = actor.actor_ref::<A::Msg>()?;
-
-        actor.register_with(&dynamic.registry)?;
-
+    ) -> Result<ActorRef<A::Msg>, ControlError> {
+        let (actor, actor_ref) = self.actors.actor_factory.actor(label, actor);
         let child = actor_child_spec(
-            actor,
+            actor.clone(),
             options.restart,
             options.shutdown,
             options.restart_intensity,
         );
-        if let Err(err) = self.supervisor.add_child(child).await {
-            let _ = dynamic.registry.deregister(actor_ref.id());
-            return Err(err.into());
-        }
+        self.supervisor.add_child(child).await?;
+        self.actors.record_actor(actor);
 
         Ok(actor_ref)
     }
 
     /// Removes a child from the supervisor.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
-        self.supervisor.remove_child(id).await
-    }
-
-    /// Removes a runtime-registered actor from the supervised runtime.
-    pub async fn remove_actor(&self, actor_id: &str) -> Result<(), DynamicActorError> {
-        let dynamic = self
-            .dynamic
-            .as_ref()
-            .ok_or(DynamicActorError::Unsupported)?;
-        match self.supervisor.remove_child(actor_id.to_owned()).await {
-            Ok(()) => {
-                terminate_and_deregister_if_present(&dynamic.registry, actor_id)?;
-                Ok(())
-            }
-            Err(ControlError::ShutdownTimedOut(id)) if id == actor_id => {
-                let _ = dynamic.registry.terminate_and_deregister(actor_id);
-                Err(ControlError::ShutdownTimedOut(id).into())
-            }
-            Err(err) => Err(err.into()),
+        let id = id.into();
+        let result = self.supervisor.remove_child(id.clone()).await;
+        if result.is_ok()
+            || matches!(&result, Err(ControlError::ShutdownTimedOut(actor_id)) if actor_id == &id)
+        {
+            self.actors.forget_actor(&id);
         }
+        result
     }
 
     /// Waits for the supervisor to stop.
@@ -266,14 +244,9 @@ impl RuntimeHandle {
         self.supervisor.snapshot()
     }
 
-    /// Returns point-in-time stats for all actors registered with this runtime.
-    ///
-    /// Runtimes created directly from a supervisor have no actor registry and
-    /// return an empty collection.
+    /// Returns point-in-time stats for actors created with this runtime.
     pub fn actor_stats(&self) -> Vec<ActorStats> {
-        self.dynamic
-            .as_ref()
-            .map_or_else(Vec::new, |dynamic| dynamic.registry.stats())
+        self.actors.actor_stats()
     }
 
     /// Returns a watch receiver that updates when the snapshot changes.
@@ -287,26 +260,23 @@ impl RuntimeHandle {
     /// Returns a [`ConsoleBuilder`](tokio_otp_console::ConsoleBuilder) pre-wired
     /// with this runtime's snapshot and event channels.
     pub fn console(&self) -> tokio_otp_console::ConsoleBuilder {
-        let dynamic = self.dynamic.clone();
+        let actors = self.actors.clone();
         tokio_otp_console::Console::builder()
             .snapshots(self.supervisor.subscribe_snapshots())
             .events(self.supervisor.event_sender())
             .actor_stats(move || {
-                dynamic.as_ref().map_or_else(Vec::new, |dynamic| {
-                    dynamic
-                        .registry
-                        .stats()
-                        .into_iter()
-                        .map(|stats| tokio_otp_console::ActorStatsView {
-                            actor_id: stats.actor_id,
-                            messages_received: stats.messages_received,
-                            messages_accepted: stats.messages_accepted,
-                            sends_rejected: stats.sends_rejected,
-                            mailbox_depth: stats.mailbox_depth,
-                            mailbox_capacity: stats.mailbox_capacity,
-                        })
-                        .collect()
-                })
+                actors
+                    .actor_stats()
+                    .into_iter()
+                    .map(|stats| tokio_otp_console::ActorStatsView {
+                        actor_id: stats.actor_id,
+                        messages_received: stats.messages_received,
+                        messages_accepted: stats.messages_accepted,
+                        sends_rejected: stats.sends_rejected,
+                        mailbox_depth: stats.mailbox_depth,
+                        mailbox_capacity: stats.mailbox_capacity,
+                    })
+                    .collect()
             })
     }
 }
@@ -365,16 +335,5 @@ fn rebind_policy_for_restart(restart: Restart) -> RebindPolicy {
         Restart::Permanent => RebindPolicy::Always,
         Restart::Transient => RebindPolicy::OnFailure,
         Restart::Temporary => RebindPolicy::Never,
-    }
-}
-
-fn terminate_and_deregister_if_present(
-    registry: &ActorRegistry,
-    actor_id: &str,
-) -> Result<(), RegistryError> {
-    match registry.terminate_and_deregister(actor_id) {
-        Ok(()) => Ok(()),
-        Err(RegistryError::UnknownActorId(unknown)) if unknown == actor_id => Ok(()),
-        Err(error) => Err(error),
     }
 }

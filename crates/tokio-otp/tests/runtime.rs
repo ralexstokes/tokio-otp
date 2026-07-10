@@ -2,9 +2,9 @@ use std::{future::IntoFuture, io, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{
-    ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, LookupError, RawActor, SendError,
+    ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, SendError,
 };
-use tokio_otp::{DynamicActorError, Runtime, RuntimeBuildError, SupervisedActors};
+use tokio_otp::{DynamicActorOptions, Runtime, SupervisedActors};
 use tokio_supervisor::{
     ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy, SupervisorBuilder,
     SupervisorStateView,
@@ -94,14 +94,6 @@ async fn runtime_spawn_combines_actor_refs_and_supervisor_control() {
         SupervisorStateView::Running
     );
     assert_eq!(handle.snapshot().children.len(), 1);
-    assert_eq!(
-        handle
-            .actor_ref::<String>("worker")
-            .expect("registry ref exists")
-            .id(),
-        "worker"
-    );
-
     worker_ref
         .send("hello".to_owned())
         .await
@@ -307,22 +299,6 @@ async fn runtime_spawn_wait_drives_to_completion_with_control_surface() {
 }
 
 #[tokio::test]
-async fn runtime_handle_reports_unknown_actor_lookup() {
-    let (runtime, _worker_ref) = build_runtime(Drain::<()>::new());
-
-    let handle = runtime.spawn();
-    assert!(matches!(
-        handle.actor_ref::<()>("missing"),
-        Err(DynamicActorError::Lookup(LookupError::UnknownActor { .. }))
-    ));
-
-    handle
-        .shutdown_and_wait()
-        .await
-        .expect("supervisor shut down cleanly");
-}
-
-#[tokio::test]
 async fn runtime_builder_wires_graph_into_supervised_runtime() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
@@ -340,15 +316,6 @@ async fn runtime_builder_wires_graph_into_supervised_runtime() {
         .build()
         .expect("runtime builds");
     let handle = runtime.spawn();
-
-    // The builder path enables the dynamic registry.
-    assert_eq!(
-        handle
-            .actor_ref::<String>("worker")
-            .expect("registry ref exists")
-            .id(),
-        "worker"
-    );
 
     worker_ref
         .send("built".to_owned())
@@ -476,8 +443,7 @@ async fn send_fails_after_restart_intensity_is_exhausted() {
         .await
         .expect("supervisor gave up");
 
-    // The handle (and its registry) is still alive, so the binding source has
-    // not been dropped. A rebind will never come; send must not wait for one.
+    // A rebind will never come; send must not wait for one.
     let result = timeout(Duration::from_millis(500), worker_ref.send(()))
         .await
         .expect("send resolved after the supervisor gave up");
@@ -485,11 +451,8 @@ async fn send_fails_after_restart_intensity_is_exhausted() {
 }
 
 #[test]
-fn runtime_builder_requires_a_graph() {
-    assert!(matches!(
-        Runtime::builder().build(),
-        Err(RuntimeBuildError::MissingGraph)
-    ));
+fn runtime_builder_allows_an_empty_runtime() {
+    Runtime::builder().build().expect("empty runtime builds");
 }
 
 #[tokio::test]
@@ -500,13 +463,58 @@ async fn runtime_into_supervisor_round_trips_supervisor() {
     let runtime = Runtime::new(supervisor);
     let handle = runtime.spawn();
 
-    assert!(matches!(
-        handle.actor_ref::<()>("worker"),
-        Err(DynamicActorError::Unsupported)
-    ));
-
     timeout(Duration::from_secs(1), handle.shutdown_and_wait())
         .await
         .expect("shutdown completed")
+        .expect("supervisor shut down cleanly");
+}
+
+#[tokio::test]
+async fn handle_actor_stats_track_graph_and_runtime_added_actors() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, worker_ref) = build_runtime(Observe {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    worker_ref
+        .send("count me".to_owned())
+        .await
+        .expect("message sent");
+    observed_rx.recv().await.expect("message observed");
+
+    // Graph actors are visible in the runtime's stats without any dynamic
+    // actor having been added.
+    let stats = handle.actor_stats();
+    let worker = stats
+        .iter()
+        .find(|stats| stats.actor_id == "worker")
+        .expect("graph actor reported in runtime stats");
+    assert_eq!(worker.messages_accepted, 1);
+
+    let extra = handle
+        .add_actor("extra", Drain::<()>::new(), DynamicActorOptions::default())
+        .await
+        .expect("actor added");
+    extra.send(()).await.expect("message sent");
+
+    let stats = handle.actor_stats();
+    assert_eq!(stats.len(), 2);
+    let extra_stats = stats
+        .iter()
+        .find(|stats| stats.actor_id == "extra")
+        .expect("runtime-added actor reported in runtime stats");
+    assert_eq!(extra_stats.messages_accepted, 1);
+
+    handle.remove_child("extra").await.expect("actor removed");
+    let stats = handle.actor_stats();
+    assert!(
+        stats.iter().all(|stats| stats.actor_id != "extra"),
+        "removed actor no longer reported"
+    );
+
+    handle
+        .shutdown_and_wait()
+        .await
         .expect("supervisor shut down cleanly");
 }

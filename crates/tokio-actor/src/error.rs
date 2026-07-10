@@ -53,24 +53,3 @@ pub enum CallError {
         actor_id: String,
     },
 }
-
-/// Errors returned by typed actor lookups.
-#[derive(Debug, Error, Clone, Eq, PartialEq)]
-pub enum LookupError {
-    /// No actor with the requested id exists.
-    #[error("unknown actor `{actor_id}`")]
-    UnknownActor {
-        /// Requested actor id.
-        actor_id: String,
-    },
-    /// The actor exists but has a different message type.
-    #[error("actor `{actor_id}` has message type `{registered}`, not `{requested}`")]
-    MessageTypeMismatch {
-        /// Requested actor id.
-        actor_id: String,
-        /// Message type the actor was registered with.
-        registered: &'static str,
-        /// Message type requested by the caller.
-        requested: &'static str,
-    },
-}

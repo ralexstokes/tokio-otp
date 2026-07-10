@@ -10,7 +10,6 @@ use crate::{
     binding::{ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxRef},
     error::{CallError, SendError},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
-    registry::ActorRegistry,
 };
 
 /// Cloneable, restart-stable, typed sender for an actor mailbox.
@@ -266,14 +265,12 @@ impl<T> fmt::Debug for Reply<T> {
 
 /// Runtime context passed to a graph actor each time the graph is run.
 ///
-/// Provides the actor's incoming [`mailbox`](Self::recv), an optional
-/// [`registry`](Self::registry) for runtime-discovered actors, a
+/// Provides the actor's incoming [`mailbox`](Self::recv), a
 /// [`shutdown_token`](Self::shutdown_token) for cooperative shutdown, and
 /// [`run_blocking`](Self::run_blocking) for blocking work.
 pub struct ActorContext<M> {
     pub(crate) id: Arc<str>,
     pub(crate) mailbox: mpsc::Receiver<M>,
-    pub(crate) registry: Option<ActorRegistry>,
     pub(crate) myself: ActorRef<M>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
@@ -293,11 +290,6 @@ impl<M: Send + 'static> ActorContext<M> {
     /// Returns `true` if graph shutdown has been requested.
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown.is_cancelled()
-    }
-
-    /// Returns the optional runtime actor registry.
-    pub fn registry(&self) -> Option<&ActorRegistry> {
-        self.registry.as_ref()
     }
 
     /// Returns a sender targeting this actor's own mailbox.

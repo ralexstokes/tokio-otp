@@ -1,14 +1,11 @@
 use std::collections::HashMap;
 
-use tokio_actor::{ActorRegistry, Graph};
+use tokio_actor::{ActorRef, Graph};
 use tokio_supervisor::{
     ChildSpec, Restart, RestartIntensity, ShutdownPolicy, Supervisor, SupervisorBuilder,
 };
 
-use crate::{
-    error::RuntimeBuildError,
-    runtime::{Runtime, actor_child_spec},
-};
+use crate::runtime::{Runtime, actor_child_spec};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ActorOverrides {
@@ -51,46 +48,51 @@ impl SupervisedActors {
         self
     }
 
-    /// Overrides the restart policy for one actor.
+    /// Overrides the restart policy for the actor identified by this typed ref.
     #[must_use]
-    pub fn actor_restart(mut self, actor_id: impl Into<String>, restart: Restart) -> Self {
-        self.overrides.entry(actor_id.into()).or_default().restart = Some(restart);
+    pub fn actor_restart<M>(mut self, actor: &ActorRef<M>, restart: Restart) -> Self {
+        self.overrides
+            .entry(actor.id().to_owned())
+            .or_default()
+            .restart = Some(restart);
         self
     }
 
-    /// Overrides the restart intensity for one actor.
+    /// Overrides restart intensity for the actor identified by this typed ref.
     #[must_use]
-    pub fn actor_restart_intensity(
+    pub fn actor_restart_intensity<M>(
         mut self,
-        actor_id: impl Into<String>,
+        actor: &ActorRef<M>,
         intensity: RestartIntensity,
     ) -> Self {
         self.overrides
-            .entry(actor_id.into())
+            .entry(actor.id().to_owned())
             .or_default()
             .restart_intensity = Some(intensity);
         self
     }
 
-    /// Overrides the shutdown policy for one actor.
+    /// Overrides shutdown policy for the actor identified by this typed ref.
     #[must_use]
-    pub fn actor_shutdown(mut self, actor_id: impl Into<String>, shutdown: ShutdownPolicy) -> Self {
-        self.overrides.entry(actor_id.into()).or_default().shutdown = Some(shutdown);
+    pub fn actor_shutdown<M>(mut self, actor: &ActorRef<M>, shutdown: ShutdownPolicy) -> Self {
+        self.overrides
+            .entry(actor.id().to_owned())
+            .or_default()
+            .shutdown = Some(shutdown);
         self
     }
 
     /// Builds reusable child specs.
-    pub fn build(self) -> Result<Vec<ChildSpec>, RuntimeBuildError> {
-        self.validate_overrides()?;
-        Ok(self.actor_children())
+    pub fn build(self) -> Vec<ChildSpec> {
+        self.actor_children()
     }
 
     /// Adds the actor children to a supervisor builder and returns the built supervisor.
     pub fn build_supervisor(
         self,
         builder: SupervisorBuilder,
-    ) -> Result<Supervisor, RuntimeBuildError> {
-        let children = self.build()?;
+    ) -> Result<Supervisor, tokio_supervisor::SupervisorBuildError> {
+        let children = self.build();
         let builder = children
             .into_iter()
             .fold(builder, |builder, child| builder.child(child));
@@ -100,35 +102,19 @@ impl SupervisedActors {
 
     /// Adds the actor children to a supervisor builder and packages the result
     /// into a [`Runtime`].
-    pub fn build_runtime(self, builder: SupervisorBuilder) -> Result<Runtime, RuntimeBuildError> {
-        self.validate_overrides()?;
-
-        let registry = ActorRegistry::new();
-        for actor in self.graph.actors() {
-            actor.set_registry(registry.clone());
-            actor.register_with(&registry)?;
-        }
-
+    pub fn build_runtime(
+        self,
+        builder: SupervisorBuilder,
+    ) -> Result<Runtime, tokio_supervisor::SupervisorBuildError> {
         let actor_factory = self.graph.dynamic_factory();
+        let actors = self.graph.actors().to_vec();
         let children = self.actor_children();
         let builder = children
             .into_iter()
             .fold(builder, |builder, child| builder.child(child));
         let supervisor = builder.build()?;
 
-        Ok(Runtime::with_dynamic(supervisor, registry, actor_factory))
-    }
-
-    fn validate_overrides(&self) -> Result<(), RuntimeBuildError> {
-        for actor_id in self.overrides.keys() {
-            if self.graph.actor(actor_id).is_none() {
-                return Err(RuntimeBuildError::UnknownActor {
-                    actor_id: actor_id.clone(),
-                });
-            }
-        }
-
-        Ok(())
+        Ok(Runtime::with_actors(supervisor, actor_factory, actors))
     }
 
     fn actor_children(&self) -> Vec<ChildSpec> {

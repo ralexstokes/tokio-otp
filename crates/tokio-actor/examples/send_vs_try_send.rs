@@ -32,9 +32,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let sink_ref = builder.add(OneMessageSink {
         observed: observed_tx,
     });
-    let sink_id = sink_ref.id().to_owned();
     let graph = builder.build()?;
-    let sink = graph.actor(&sink_id).expect("sink exists").clone();
+    let sink = graph.actors()[0].clone();
 
     let first_run = tokio::spawn({
         let sink = sink.clone();

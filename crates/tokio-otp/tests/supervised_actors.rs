@@ -1,6 +1,5 @@
 use std::{
     io,
-    marker::PhantomData,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -15,7 +14,7 @@ use tokio::{
 use tokio_actor::{
     ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Reply, SendError,
 };
-use tokio_otp::{RuntimeBuildError, SupervisedActors};
+use tokio_otp::SupervisedActors;
 use tokio_supervisor::{
     BackoffPolicy, ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy,
     SupervisorBuilder,
@@ -182,9 +181,9 @@ async fn send_waits_during_permanent_restart_window() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .actor_restart("worker", Restart::Permanent)
+        .actor_restart(&worker_ref, Restart::Permanent)
         .actor_restart_intensity(
-            "worker",
+            &worker_ref,
             RestartIntensity::new(10, Duration::from_secs(1))
                 .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(100))),
         )
@@ -340,9 +339,9 @@ async fn call_succeeds_across_restart_window() {
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
-        .actor_restart("rpc", Restart::Transient)
+        .actor_restart(&rpc_ref, Restart::Transient)
         .actor_restart_intensity(
-            "rpc",
+            &rpc_ref,
             RestartIntensity::new(10, Duration::from_secs(1))
                 .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(100))),
         )
@@ -381,43 +380,4 @@ async fn call_succeeds_across_restart_window() {
         .shutdown_and_wait()
         .await
         .expect("supervisor shut down cleanly");
-}
-
-struct Drain<M>(PhantomData<fn(M)>);
-
-impl<M> Drain<M> {
-    fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<M> Clone for Drain<M> {
-    fn clone(&self) -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<M: Send + 'static> RawActor for Drain<M> {
-    type Msg = M;
-
-    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
-        while ctx.recv().await.is_some() {}
-        Ok(())
-    }
-}
-
-#[test]
-fn supervised_actors_reject_unknown_actor_overrides() {
-    let mut builder = GraphBuilder::new();
-    builder.actor("worker", Drain::<()>::new());
-    let graph = builder.build().expect("valid graph");
-
-    let result = SupervisedActors::new(graph)
-        .actor_restart("missing", Restart::Permanent)
-        .build();
-
-    assert!(matches!(
-        result,
-        Err(RuntimeBuildError::UnknownActor { actor_id }) if actor_id == "missing"
-    ));
 }

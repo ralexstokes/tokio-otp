@@ -118,8 +118,7 @@ pub(crate) enum BindingState<M> {
     /// Not yet started, or between restarts where a new mailbox is expected.
     Unbound,
     Bound(MailboxRef<M>),
-    /// No restart is scheduled. A later dynamic actor re-add may bind a new
-    /// mailbox.
+    /// No restart is scheduled.
     Terminated,
 }
 

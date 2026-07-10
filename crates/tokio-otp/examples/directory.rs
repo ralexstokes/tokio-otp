@@ -1,0 +1,88 @@
+use std::{collections::HashMap, error::Error};
+
+use tokio::sync::mpsc;
+use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, GraphBuilder, Reply};
+use tokio_otp::{DynamicActorOptions, Runtime};
+
+enum DirectoryMsg<M> {
+    Insert(String, ActorRef<M>),
+    Get(String, Reply<Option<ActorRef<M>>>),
+}
+
+struct Directory<M> {
+    entries: HashMap<String, ActorRef<M>>,
+}
+
+impl<M> Clone for Directory<M> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+        }
+    }
+}
+
+impl<M: Send + 'static> Actor for Directory<M> {
+    type Msg = DirectoryMsg<M>;
+
+    async fn handle(
+        &mut self,
+        message: DirectoryMsg<M>,
+        _ctx: &ActorContext<DirectoryMsg<M>>,
+    ) -> ActorResult {
+        match message {
+            DirectoryMsg::Insert(name, actor_ref) => {
+                self.entries.insert(name, actor_ref);
+            }
+            DirectoryMsg::Get(name, reply) => reply.send(self.entries.get(&name).cloned()),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct Printer {
+    printed: mpsc::UnboundedSender<String>,
+}
+
+impl Actor for Printer {
+    type Msg = String;
+
+    async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
+        self.printed.send(message).expect("receiver alive");
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mut graph = GraphBuilder::new();
+    let directory = graph.actor(
+        "directory",
+        Directory::<String> {
+            entries: HashMap::new(),
+        },
+    );
+    let handle = Runtime::builder().graph(graph.build()?).build()?.spawn();
+
+    let (printed, mut output) = mpsc::unbounded_channel();
+    let printer = handle
+        .add_actor(
+            "printer",
+            Printer { printed },
+            DynamicActorOptions::default(),
+        )
+        .await?;
+    directory
+        .send(DirectoryMsg::Insert("receipts".to_owned(), printer))
+        .await?;
+
+    let receipts = directory
+        .call(|reply| DirectoryMsg::Get("receipts".to_owned(), reply))
+        .await?
+        .expect("receipts printer registered");
+    receipts.send("order #42".to_owned()).await?;
+    println!("{}", output.recv().await.expect("printed receipt"));
+
+    handle.shutdown_and_wait().await?;
+    Ok(())
+}

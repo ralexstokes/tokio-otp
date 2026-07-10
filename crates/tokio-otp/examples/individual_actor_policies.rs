@@ -56,7 +56,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");
-    let frontend = builder.actor("frontend", Frontend { worker: worker_ref });
+    let frontend = builder.actor(
+        "frontend",
+        Frontend {
+            worker: worker_ref.clone(),
+        },
+    );
     builder.define(
         worker_slot,
         Worker {
@@ -68,12 +73,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let graph = builder.build()?;
 
     let children = SupervisedActors::new(graph)
-        .actor_restart("worker", Restart::Transient)
+        .actor_restart(&worker_ref, Restart::Transient)
         .actor_restart_intensity(
-            "worker",
+            &worker_ref,
             RestartIntensity::new(5, std::time::Duration::from_secs(5)),
         )
-        .build()?;
+        .build();
     let supervisor = children
         .into_iter()
         .fold(

@@ -110,27 +110,26 @@ async fn derived_topology_runs_cyclic_pipeline() {
     let (acks_tx, mut acks_rx) = mpsc::unbounded_channel();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-    let graph = Pipeline::graph(|refs| Pipeline {
-        frontend: Frontend {
-            parser: refs.parser.clone(),
-            acks: acks_tx.clone(),
-        },
-        parser: Parser {
-            frontend: refs.frontend.clone(),
-            sink: refs.sink.clone(),
-        },
-        sink: Sink {
-            out: out_tx.clone(),
-        },
+    let mut frontend = None;
+    let graph = Pipeline::graph(|refs| {
+        frontend = Some(refs.frontend.clone());
+        Pipeline {
+            frontend: Frontend {
+                parser: refs.parser.clone(),
+                acks: acks_tx.clone(),
+            },
+            parser: Parser {
+                frontend: refs.frontend.clone(),
+                sink: refs.sink.clone(),
+            },
+            sink: Sink {
+                out: out_tx.clone(),
+            },
+        }
     })
     .expect("valid graph");
 
-    assert!(graph.actor_ref::<ParserMsg>("parser").is_ok());
-    assert!(graph.actor_ref::<FrontendMsg>("frontend").is_ok());
-
-    let frontend = graph
-        .actor_ref::<FrontendMsg>("frontend")
-        .expect("frontend ref");
+    let frontend = frontend.expect("topology closure captured frontend ref");
     let (stop, tasks) = start_graph(&graph);
 
     frontend
@@ -157,9 +156,7 @@ async fn add_names_actor_after_its_type() {
     assert_eq!(first.id(), "Sink");
     assert_eq!(second.id(), "Sink-2");
 
-    let graph = builder.build().expect("valid graph");
-    assert!(graph.actor_ref::<SinkMsg>("Sink").is_ok());
-    assert!(graph.actor_ref::<SinkMsg>("Sink-2").is_ok());
+    builder.build().expect("valid graph");
 }
 
 #[test]
@@ -233,11 +230,15 @@ async fn graph_with_applies_builder_config() {
     builder.mailbox_capacity(1);
     builder.actor_shutdown_timeout(Duration::from_millis(50));
 
-    let graph = ParkGraph::graph_with(builder, |_| ParkGraph { park: Park })
-        .expect("configured graph builds");
+    let mut park = None;
+    let graph = ParkGraph::graph_with(builder, |refs| {
+        park = Some(refs.park.clone());
+        ParkGraph { park: Park }
+    })
+    .expect("configured graph builds");
     assert_eq!(graph.name(), "configured");
 
-    let park = graph.actor_ref::<()>("park").expect("park ref");
+    let park = park.expect("topology closure captured park ref");
     let (stop, tasks) = start_graph(&graph);
 
     park.send(()).await.expect("first message fits");

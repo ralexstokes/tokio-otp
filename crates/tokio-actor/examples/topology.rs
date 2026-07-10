@@ -77,18 +77,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (acked_tx, mut acked_rx) = mpsc::unbounded_channel();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
-    let graph = Pipeline::graph(|refs| Pipeline {
-        frontend: Frontend {
-            parser: refs.parser.clone(),
-            acked: acked_tx,
-        },
-        parser: Parser {
-            frontend: refs.frontend.clone(),
-            sink: refs.sink.clone(),
-        },
-        sink: Sink { out: out_tx },
+    let mut frontend = None;
+    let graph = Pipeline::graph(|refs| {
+        frontend = Some(refs.frontend.clone());
+        Pipeline {
+            frontend: Frontend {
+                parser: refs.parser.clone(),
+                acked: acked_tx,
+            },
+            parser: Parser {
+                frontend: refs.frontend.clone(),
+                sink: refs.sink.clone(),
+            },
+            sink: Sink { out: out_tx },
+        }
     })?;
-    let frontend = graph.actor_ref::<FrontendMsg>("frontend")?;
+    let frontend = frontend.expect("topology closure captured frontend ref");
     let handle = support::ActorTasks::start(&graph);
 
     frontend.send(FrontendMsg::Feed("hello".to_owned())).await?;

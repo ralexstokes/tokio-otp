@@ -60,7 +60,6 @@ pub struct GraphBuilder {
 struct Slot {
     actor_id: Arc<str>,
     message_type: TypeId,
-    message_type_name: &'static str,
     binding: Arc<dyn Any + Send + Sync>,
     binding_lifecycle: Arc<dyn BindingLifecycle>,
     runner: Option<Arc<dyn ErasedRunner>>,
@@ -124,7 +123,7 @@ impl GraphBuilder {
     /// This enables cyclic wiring: create all refs first, hand them to actor
     /// constructors, then consume each [`ActorSlot`] with [`define`](Self::define).
     /// The name is fixed when the slot is opened because it is used as the
-    /// actor id in observability and runtime lookups.
+    /// actor label in observability.
     pub fn slot<M: Send + 'static>(&mut self, actor_id: &str) -> (ActorSlot<M>, ActorRef<M>) {
         match self.push_slot::<M>(actor_id) {
             Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
@@ -229,9 +228,6 @@ impl GraphBuilder {
             };
             actors.push(RunnableActor::new(RunnableActorParts {
                 actor_id: slot.actor_id,
-                message_type: slot.message_type,
-                message_type_name: slot.message_type_name,
-                binding: slot.binding,
                 binding_lifecycle: slot.binding_lifecycle,
                 runner,
                 mailbox_capacity: self.mailbox_capacity,
@@ -272,7 +268,6 @@ impl GraphBuilder {
         self.slots.push(Slot {
             actor_id,
             message_type: TypeId::of::<M>(),
-            message_type_name: type_name::<M>(),
             binding: core.clone(),
             binding_lifecycle: core,
             runner: None,

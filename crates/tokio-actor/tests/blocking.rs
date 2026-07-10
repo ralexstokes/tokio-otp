@@ -271,7 +271,7 @@ async fn blocking_panic_propagates_as_actor_panic() {
     builder.actor("worker", Panics);
     let graph = builder.build().expect("valid graph");
 
-    let actor = graph.actor("worker").expect("worker exists").clone();
+    let actor = graph.actors()[0].clone();
     let result = timeout(
         Duration::from_secs(1),
         tokio::spawn(async move { actor.run_until(pending::<()>(), RebindPolicy::Never).await }),

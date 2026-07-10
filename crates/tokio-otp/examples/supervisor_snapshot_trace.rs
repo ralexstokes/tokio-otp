@@ -58,7 +58,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (processed_tx, mut processed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");
-    let frontend = builder.actor("frontend", Frontend { worker: worker_ref });
+    let frontend = builder.actor(
+        "frontend",
+        Frontend {
+            worker: worker_ref.clone(),
+        },
+    );
     builder.define(
         worker_slot,
         Worker {
@@ -70,7 +75,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let graph = builder.build()?;
 
     let runtime = SupervisedActors::new(graph)
-        .actor_restart_intensity("worker", RestartIntensity::new(2, Duration::from_secs(1)))
+        .actor_restart_intensity(
+            &worker_ref,
+            RestartIntensity::new(2, Duration::from_secs(1)),
+        )
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))?;
     let handle = runtime.spawn();
     let mut events = handle.subscribe();
