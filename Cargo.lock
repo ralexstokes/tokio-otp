@@ -1288,9 +1288,11 @@ name = "tokio-otp-console"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "serde_json",
  "tokio",
  "tokio-supervisor",
+ "tokio-tungstenite",
  "tracing",
 ]
 

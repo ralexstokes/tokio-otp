@@ -18,6 +18,7 @@ name = "tokio-otp"
 
 [workspace.dependencies]
 axum = "0.8"
+futures-util = "0.3"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 metrics-util = { version = "0.20", features = ["debugging"] }
@@ -33,6 +34,7 @@ tokio-otp = { path = "crates/tokio-otp" }
 tokio-otp-derive = { path = "crates/tokio-otp-derive" }
 tokio-otp-console = { path = "crates/tokio-otp-console" }
 tokio-supervisor = { path = "crates/tokio-supervisor" }
+tokio-tungstenite = "0.29"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tracing = "0.1.44"
 trybuild = "1.0"
