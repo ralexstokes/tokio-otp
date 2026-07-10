@@ -5,8 +5,8 @@ Erlang/OTP-like functionality for the `tokio` ecosystem, organized as a Cargo wo
 ## Structure
 
 * `crates/tokio-supervisor` — structured task supervision (supervision trees, restart strategies)
-* `crates/tokio-actor` — static typed actor graphs with restart-stable actor refs
-* `crates/tokio-otp` — umbrella crate tying supervision and actors into an OTP-style runtime
+* `crates/tokio-otp` — the product crate: typed actor graphs (private `actor/` module tree, API re-exported flat) plus the OTP-style runtime that supervises them
+* `crates/tokio-otp-derive` — `#[derive(Topology)]` proc macro, re-exported by `tokio-otp` under the default `derive` feature
 * `crates/tokio-otp-console` — [experimental] web-based dashboard for supervisor trees (axum + WebSocket)
 * `docs/` — mdBook tutorial (`just build-book` / `just serve-book`)
 * `nix/crane-checks.nix` + `flake.nix` — authoritative CI check definitions

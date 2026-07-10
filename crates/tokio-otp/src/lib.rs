@@ -37,8 +37,8 @@
 //! ```
 //!
 //! See [`RuntimeBuilder`] for a complete example. The [`prelude`] re-exports
-//! the common types of the underlying `tokio-actor` and `tokio-supervisor`
-//! crates, which remain independently usable à la carte.
+//! this crate's whole surface plus the common types of `tokio-supervisor`,
+//! which remains independently usable for supervision without actors.
 //!
 //! # Core types
 //!
@@ -47,7 +47,13 @@
 //! | [`Runtime`] / [`RuntimeBuilder`] | Owns a supervisor and actor factory — the common composition. |
 //! | [`RuntimeHandle`] | Control surface for a spawned runtime (shutdown, dynamic actors, observability). |
 //! | [`SupervisedActors`] | Adapts a graph into per-actor supervised children with configurable policies. |
-//! | [`DynamicActorOptions`] | Options for runtime-added actors (restart, shutdown). |
+//! | [`GraphBuilder`] / [`Graph`] | Constructs and validates the actor graph; wiring plus runnable actors. |
+//! | [`Actor`] | Handler-style actor definition with a provided receive loop. |
+//! | [`RawActor`] | Custom-loop typed actor definition (the escape hatch). |
+//! | [`ActorRef`] | Cloneable, restart-stable, typed mailbox sender. |
+//! | [`ActorContext`] | Mailbox, blocking work, and shutdown token visible to one actor. |
+//! | [`Reply`] | One-shot response channel carried inside request messages. |
+//! | [`RunnableActor`] | One actor plus stable binding — the unit of execution. |
 //!
 //! # Composition modes
 //!
@@ -60,40 +66,161 @@
 //!   Use [`build_runtime`](SupervisedActors::build_runtime) for the integrated
 //!   [`Runtime`] or [`build`](SupervisedActors::build) for raw child specs.
 //!
-//! Fate-sharing is selected with [`Strategy::OneForAll`] or supervision-tree
-//! shape; graphs themselves are not execution units.
+//! Fate-sharing is selected with [`Strategy::OneForAll`](tokio_supervisor::Strategy::OneForAll)
+//! or supervision-tree shape; graphs themselves are not execution units.
+//!
+//! # Delivery contract: at-most-once
+//!
+//! Mailboxes are incarnation-owned: each actor run binds a fresh mailbox, and
+//! messages accepted by a dead incarnation are lost with it. Delivery is
+//! therefore **at-most-once**, with loss windows at restart and shutdown.
+//! Stronger guarantees (acknowledgements, redelivery) are user protocol built
+//! on [`ActorRef::call`] and [`Reply`], not transport features.
+//!
+//! [`ActorContext::recv`] is fail-fast during shutdown: it returns `None` as
+//! soon as shutdown is requested, even when messages are still queued. Actors
+//! that must finish queued work before stopping implement [`Actor`] with
+//! [`DrainPolicy::Drain`], or drain by hand with [`ActorContext::try_recv`].
+//!
+//! Restarts also lose queued messages: a restarted actor binds a fresh
+//! mailbox, so messages queued behind a poison message are dropped with the
+//! old one. This is deliberate — a mailbox that survived restarts would
+//! redeliver the poison message that caused the crash, converting one
+//! failure into a restart loop. [`ActorRef::send`] rides through restart
+//! windows when a rebind is expected, and restart resets actor state to the
+//! wiring-time value (`Clone` is the reset mechanism; see [`Actor`]).
+//!
+//! # Static topologies
+//!
+//! For cyclic actor graphs, derive [`Topology`] on a named-field struct whose
+//! fields are the actors. The wiring closure receives typed refs for every
+//! field before any actor is constructed; see the [`Topology`] docs for the
+//! full contract, and mind the bounded-mailbox cycle hazard documented on
+//! [`GraphBuilder`].
+//!
+//! # Hand-driving actors
+//!
+//! Supervision through [`Runtime`] is the normal host, but the execution
+//! surface is public: each [`RunnableActor`] can be driven directly with
+//! [`run_until`](RunnableActor::run_until), which is how tests (and hosts
+//! with their own supervision story) run actors.
+//!
+//! ```
+//! use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, RebindPolicy, Reply};
+//! use tokio_util::sync::CancellationToken;
+//!
+//! enum CounterMsg {
+//!     Add(u64),
+//!     Total(Reply<u64>),
+//! }
+//!
+//! #[derive(Clone)]
+//! struct Counter {
+//!     total: u64,
+//! }
+//!
+//! impl Actor for Counter {
+//!     type Msg = CounterMsg;
+//!
+//!     async fn handle(
+//!         &mut self,
+//!         message: CounterMsg,
+//!         _ctx: &ActorContext<CounterMsg>,
+//!     ) -> ActorResult {
+//!         match message {
+//!             CounterMsg::Add(n) => self.total += n,
+//!             CounterMsg::Total(reply) => reply.send(self.total),
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut builder = GraphBuilder::new();
+//! builder.name("example");
+//! let counter = builder.add(Counter { total: 0 });
+//! let graph = builder.build().expect("valid graph");
+//!
+//! let actor = graph.actors()[0].clone();
+//! let stop = CancellationToken::new();
+//! let run = tokio::spawn({
+//!     let stop = stop.clone();
+//!     async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await }
+//! });
+//!
+//! counter.send(CounterMsg::Add(2)).await.expect("send succeeded");
+//! counter.send(CounterMsg::Add(3)).await.expect("send succeeded");
+//! assert_eq!(counter.call(CounterMsg::Total).await?, 5);
+//!
+//! stop.cancel();
+//! run.await??;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Observability
+//!
+//! `tracing` spans and structured logs are emitted automatically for
+//! supervisor, actor, and mailbox lifecycle. Pull-based message counters and
+//! live mailbox usage are available through [`ActorRef::stats`] and
+//! [`RuntimeHandle::actor_stats`]; exporting time-series is a user-side
+//! sampler task over those surfaces (see `examples/actor_metrics.rs`).
+//! Install subscribers and samplers at the application boundary, not inside
+//! the library.
 //!
 //! # Examples
 //!
 //! - `examples/supervised_actors.rs` — per-actor supervision with default
 //!   policies.
+//! - `examples/topology.rs` — a cyclic graph wired with `#[derive(Topology)]`.
 //! - `examples/drain_policy.rs` — draining queued actor messages during
 //!   shutdown.
 //! - `examples/individual_actor_policies.rs` — per-actor restart/shutdown
 //!   overrides.
 //! - `examples/dynamic_actors.rs` — adding and removing actors at runtime.
 //! - `examples/directory.rs` — a typed, userland name directory actor.
-//! - `examples/supervisor_snapshot_trace.rs` — observing runtime state.
-//! - `examples/console.rs` — serving the web console for a supervised runtime.
+//! - `examples/ref_rebind.rs` — refs riding through supervised restarts.
+//! - `examples/graph_failures.rs` — supervisor policy around actor failures.
+//! - `examples/mailbox_backpressure.rs`, `examples/send_vs_try_send.rs` —
+//!   bounded mailboxes and send flavors.
+//! - `examples/blocking_work.rs`, `examples/blocking_lifecycle.rs` —
+//!   cooperative and detached blocking work.
+//! - `examples/actor_metrics.rs` — the stats-sampler export pattern.
+//! - `examples/actor_tracing.rs`, `examples/supervisor_snapshot_trace.rs` —
+//!   tracing and snapshot observability.
+//! - `examples/console.rs` — serving the web console for a supervised
+//!   runtime.
+//!
+//! # Cargo features
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
+//! | `metrics` | no | Forwards to `tokio-supervisor/metrics` lifecycle metrics. |
+//! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
 
+mod actor;
 mod builder;
 mod runtime;
 mod supervised_actors;
 
 /// Common imports for `tokio-otp` consumers.
 ///
-/// Re-exports the documented union of the `tokio-actor` and
-/// `tokio-supervisor` preludes, except the conflicts documented below, plus
-/// this crate's runtime types.
+/// Re-exports this crate's actor and runtime surface plus the documented
+/// `tokio-supervisor` prelude, except the conflicts documented below.
 pub mod prelude {
-    // Exclusions: tokio_supervisor::BoxError is the same type as the
-    // tokio_actor alias exported here, so omitting the duplicate is permanent
-    // and harmless; console types are feature-gated and experimental, so they
-    // remain available only at the crate root.
-    pub use tokio_actor::{
+    // Exclusions: tokio_supervisor::BoxError is the same type as the alias
+    // exported here, so omitting the duplicate is permanent and harmless;
+    // console types are feature-gated and experimental, so they remain
+    // available only at the crate root.
+    #[cfg(feature = "derive")]
+    pub use crate::Topology;
+    pub use crate::{
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
-        CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor, RebindPolicy,
-        Reply, RunnableActor, RunnableActorFactory, SendError, Topology, TryRecvError,
+        CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
+        RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
+        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -103,16 +230,19 @@ pub mod prelude {
         SupervisorHandle, SupervisorSnapshot, SupervisorSpec, SupervisorStateView, SupervisorToken,
         prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
     };
-
-    pub use crate::{
-        DynamicActorOptions, Runtime, RuntimeBuilder, RuntimeHandle, SupervisedActors,
-    };
 }
 
 #[cfg(feature = "console")]
 pub use tokio_otp_console::{ActorStatsView, Console, ConsoleBuilder, ConsoleHandle};
+#[cfg(feature = "derive")]
+pub use tokio_otp_derive::Topology;
 
+pub use actor::{
+    Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
+    CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor, RebindPolicy, Reply,
+    RunnableActor, RunnableActorFactory, SendError,
+};
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
 pub use supervised_actors::SupervisedActors;
-pub use tokio_actor::{Actor, DrainPolicy, Topology};
+pub use tokio::sync::mpsc::error::TryRecvError;

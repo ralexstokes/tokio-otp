@@ -1,4 +1,4 @@
-use tokio_actor::{Graph, RunnableActorFactory};
+use crate::{Graph, RunnableActorFactory};
 use tokio_supervisor::{Restart, RestartIntensity, ShutdownPolicy, Strategy, SupervisorBuilder};
 
 use crate::{runtime::Runtime, supervised_actors::SupervisedActors};

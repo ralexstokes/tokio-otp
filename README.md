@@ -8,8 +8,8 @@ The core idea is the one that has kept telecom switches running for decades:
 organize your program into small, isolated tasks and let a *supervisor*
 restart the ones that fail.
 
-One dependency is the front door — `tokio-otp` re-exports everything you
-need through its prelude:
+One dependency is all you need — `tokio-otp` exports everything through
+its prelude:
 
 ```toml
 [dependencies]
@@ -65,18 +65,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 The full runnable version is
 [`crates/tokio-otp/examples/supervised_actors.rs`](crates/tokio-otp/examples/supervised_actors.rs).
 
-## The crates, à la carte
+## The crates
 
-`tokio-otp` is a thin composition layer over two deliberately independent
-crates: `tokio-supervisor` knows nothing about actors, and `tokio-actor`
-knows nothing about restarts. Each is useful on its own — depend on one
-directly if you only need that piece.
+`tokio-otp` is the product: typed actor graphs plus the runtime that
+supervises them, in one crate. `tokio-supervisor` underneath is deliberately
+independent — it knows nothing about actors and is useful on its own for
+supervising plain async tasks.
 
 | Crate | Role |
 |-------|------|
-| [`tokio-otp`](crates/tokio-otp) | The front door: run each actor of a graph as its own supervised child, with one integrated `Runtime` supporting dynamic actors and observability. Re-exports the common types of the crates below via `tokio_otp::prelude`. |
+| [`tokio-otp`](crates/tokio-otp) | The front door: static graphs of communicating actors — typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, cooperative blocking work — with each actor running as its own supervised child under one integrated `Runtime` supporting dynamic actors and observability. |
 | [`tokio-supervisor`](crates/tokio-supervisor) | Structured supervision of async tasks: restart policies (`permanent`/`transient`/`temporary`), restart intensity limits, `one_for_one`/`one_for_all` strategies, graceful shutdown, and nested supervision trees. |
-| [`tokio-actor`](crates/tokio-actor) | Static graphs of communicating actors: typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, and cooperative blocking work. |
+| [`tokio-otp-derive`](crates/tokio-otp-derive) | `#[derive(Topology)]` for wiring cyclic actor graphs; re-exported by `tokio-otp` under the default `derive` feature. |
 | [`tokio-otp-console`](crates/tokio-otp-console) | *(experimental)* A live web dashboard for watching a running supervision tree. |
 
 ## Getting started

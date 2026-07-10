@@ -1,15 +1,13 @@
 [workspace]
 default-members = [
     "crates/tokio-supervisor",
-    "crates/tokio-actor",
-    "crates/tokio-actor-derive",
+    "crates/tokio-otp-derive",
     "crates/tokio-otp",
     "crates/tokio-otp-console",
 ]
 members = [
     "crates/tokio-supervisor",
-    "crates/tokio-actor",
-    "crates/tokio-actor-derive",
+    "crates/tokio-otp-derive",
     "crates/tokio-otp",
     "crates/tokio-otp-console",
 ]
@@ -31,8 +29,8 @@ slab = "0.4"
 syn = "2.0"
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
-tokio-actor = { path = "crates/tokio-actor" }
-tokio-actor-derive = { path = "crates/tokio-actor-derive" }
+tokio-otp = { path = "crates/tokio-otp" }
+tokio-otp-derive = { path = "crates/tokio-otp-derive" }
 tokio-otp-console = { path = "crates/tokio-otp-console" }
 tokio-supervisor = { path = "crates/tokio-supervisor" }
 tokio-util = { version = "0.7.18", features = ["rt"] }

@@ -11,10 +11,10 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::{sleep, timeout},
 };
-use tokio_actor::{
+use tokio_otp::{
     ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Reply, SendError,
+    SupervisedActors,
 };
-use tokio_otp::SupervisedActors;
 use tokio_supervisor::{
     BackoffPolicy, ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy,
     SupervisorBuilder,

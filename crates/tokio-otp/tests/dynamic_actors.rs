@@ -1,11 +1,13 @@
 use std::{future::pending, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{ActorContext, ActorRef, ActorResult, GraphBuilder, RawActor, SendError};
-use tokio_otp::{DynamicActorOptions, Runtime, SupervisedActors};
+use tokio_otp::{
+    ActorContext, ActorRef, ActorResult, DynamicActorOptions, GraphBuilder, RawActor, Runtime,
+    SendError, SupervisedActors,
+};
 use tokio_supervisor::{ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder};
 
-fn build_runtime(graph: tokio_actor::Graph) -> Runtime {
+fn build_runtime(graph: tokio_otp::Graph) -> Runtime {
     SupervisedActors::new(graph)
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
         .expect("runtime builds")

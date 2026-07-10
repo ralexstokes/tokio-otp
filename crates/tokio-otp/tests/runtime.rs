@@ -10,10 +10,10 @@ use std::{
 };
 
 use tokio::{sync::mpsc, time::timeout};
-use tokio_actor::{
-    Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Reply, SendError,
+use tokio_otp::{
+    Actor, ActorContext, ActorRef, ActorResult, BoxError, DynamicActorOptions, GraphBuilder,
+    RawActor, Reply, Runtime, SendError, SupervisedActors,
 };
-use tokio_otp::{DynamicActorOptions, Runtime, SupervisedActors};
 use tokio_supervisor::{
     ChildStateView, ExitStatusView, Restart, RestartIntensity, Strategy, SupervisorBuilder,
     SupervisorStateView,

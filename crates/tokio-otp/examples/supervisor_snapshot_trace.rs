@@ -9,8 +9,9 @@ use std::{
 };
 
 use tokio::sync::mpsc;
-use tokio_actor::{Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder};
-use tokio_otp::SupervisedActors;
+use tokio_otp::{
+    Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, SupervisedActors,
+};
 use tokio_supervisor::{RestartIntensity, Strategy, SupervisorBuilder};
 
 #[derive(Clone)]

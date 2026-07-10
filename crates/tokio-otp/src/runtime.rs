@@ -1,9 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use crate::{ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory};
 use tokio::sync::{broadcast, watch};
-use tokio_actor::{
-    ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
-};
 use tokio_supervisor::{
     ChildSpec, ControlError, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
     ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,

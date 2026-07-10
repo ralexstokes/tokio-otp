@@ -1258,29 +1258,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-actor"
-version = "0.1.0"
-dependencies = [
- "thiserror",
- "tokio",
- "tokio-actor-derive",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "trybuild",
-]
-
-[[package]]
-name = "tokio-actor-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
- "tokio-actor",
-]
-
-[[package]]
 name = "tokio-macros"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1297,10 +1274,13 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "tokio",
- "tokio-actor",
  "tokio-otp-console",
+ "tokio-otp-derive",
  "tokio-supervisor",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "trybuild",
 ]
 
 [[package]]
@@ -1312,6 +1292,16 @@ dependencies = [
  "tokio",
  "tokio-supervisor",
  "tracing",
+]
+
+[[package]]
+name = "tokio-otp-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "tokio-otp",
 ]
 
 [[package]]

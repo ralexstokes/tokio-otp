@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tokio_actor::{ActorRef, Graph};
+use crate::{ActorRef, Graph};
 use tokio_supervisor::{
     ChildSpec, Restart, RestartIntensity, ShutdownPolicy, Supervisor, SupervisorBuilder,
 };
@@ -126,7 +126,7 @@ impl SupervisedActors {
             .collect()
     }
 
-    fn actor_child(&self, actor: tokio_actor::RunnableActor) -> ChildSpec {
+    fn actor_child(&self, actor: crate::RunnableActor) -> ChildSpec {
         let overrides = self
             .overrides
             .get(actor.label())
