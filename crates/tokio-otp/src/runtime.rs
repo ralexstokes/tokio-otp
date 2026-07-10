@@ -97,6 +97,10 @@ pub trait SupervisorHandleExt: sealed::Sealed {
     /// [`RuntimeHandle::actor_stats`] or the console, even when this is the
     /// root handle returned by [`RuntimeHandle::supervisor_handle`]. Use
     /// [`RuntimeHandle::add_actor`] when runtime stats visibility matters.
+    ///
+    /// If adding fails, the actor's binding is left intact so the call can be
+    /// retried with the same actor; senders on its ref keep waiting until an
+    /// add succeeds.
     fn add_actor(
         &self,
         actor: RunnableActor,
