@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -34,7 +38,20 @@ fn snapshot(child_state: ChildStateView) -> SupervisorSnapshot {
     }
 }
 
-async fn spawn_console() -> (
+fn actor_stats() -> Vec<ActorStatsView> {
+    vec![ActorStatsView {
+        actor_id: "worker".into(),
+        messages_received: 11,
+        messages_accepted: 10,
+        sends_rejected: 1,
+        mailbox_depth: 3,
+        mailbox_capacity: 32,
+    }]
+}
+
+async fn spawn_console_with_stats(
+    stats: impl Fn() -> Vec<ActorStatsView> + Send + Sync + 'static,
+) -> (
     ConsoleHandle,
     watch::Sender<SupervisorSnapshot>,
     broadcast::Sender<SupervisorEvent>,
@@ -44,16 +61,7 @@ async fn spawn_console() -> (
     let handle = Console::builder()
         .snapshots(snapshot_rx)
         .events(event_tx.clone())
-        .actor_stats(|| {
-            vec![ActorStatsView {
-                actor_id: "worker".into(),
-                messages_received: 11,
-                messages_accepted: 10,
-                sends_rejected: 1,
-                mailbox_depth: 3,
-                mailbox_capacity: 32,
-            }]
-        })
+        .actor_stats(stats)
         .bind(([127, 0, 0, 1], 0))
         .build()
         .spawn()
@@ -61,6 +69,14 @@ async fn spawn_console() -> (
         .expect("failed to spawn console");
 
     (handle, snapshot_tx, event_tx)
+}
+
+async fn spawn_console() -> (
+    ConsoleHandle,
+    watch::Sender<SupervisorSnapshot>,
+    broadcast::Sender<SupervisorEvent>,
+) {
+    spawn_console_with_stats(actor_stats).await
 }
 
 async fn connect(addr: SocketAddr) -> TestWebSocket {
@@ -146,6 +162,38 @@ async fn ws_sends_snapshot_then_stats_on_connect() {
             "mailbox_capacity": 32,
         }])
     );
+}
+
+#[tokio::test]
+async fn ws_skips_unchanged_stats() {
+    let stats = Arc::new(Mutex::new(actor_stats()));
+    let stats_source = Arc::clone(&stats);
+    let (handle, _snapshot_tx, _event_tx) = spawn_console_with_stats(move || {
+        stats_source
+            .lock()
+            .expect("actor stats mutex poisoned")
+            .clone()
+    })
+    .await;
+    let mut socket = connect(handle.local_addr()).await;
+    read_handshake(&mut socket).await;
+
+    let unchanged = timeout(Duration::from_millis(2500), socket.next()).await;
+    assert!(
+        unchanged.is_err(),
+        "received an unexpected frame for unchanged actor stats: {unchanged:?}"
+    );
+
+    stats
+        .lock()
+        .expect("actor stats mutex poisoned")
+        .first_mut()
+        .expect("actor stats fixture was empty")
+        .mailbox_depth += 1;
+
+    let frame = read_json(&mut socket).await;
+    assert_eq!(frame["type"], "actor_stats");
+    assert_eq!(frame["data"][0]["mailbox_depth"], 4);
 }
 
 #[tokio::test]

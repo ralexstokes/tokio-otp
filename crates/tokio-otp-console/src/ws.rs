@@ -35,7 +35,7 @@ fn event_message(event: SupervisorEvent) -> Message {
     )
 }
 
-fn stats_message(stats: Vec<ActorStatsView>) -> Message {
+fn stats_message(stats: &[ActorStatsView]) -> Message {
     Message::Text(
         serde_json::json!({ "type": "actor_stats", "data": stats })
             .to_string()
@@ -55,8 +55,21 @@ async fn send_event(socket: &mut WebSocket, event: SupervisorEvent) -> bool {
     socket.send(event_message(event)).await.is_ok()
 }
 
-async fn send_stats(socket: &mut WebSocket, state: &AppState) -> bool {
-    socket.send(stats_message((state.stats)())).await.is_ok()
+async fn send_stats(
+    socket: &mut WebSocket,
+    state: &AppState,
+    last_sent: &mut Vec<ActorStatsView>,
+) -> bool {
+    let stats = (state.stats)();
+    if stats == *last_sent {
+        return true;
+    }
+
+    if socket.send(stats_message(&stats)).await.is_err() {
+        return false;
+    }
+    *last_sent = stats;
+    true
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
@@ -67,7 +80,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     if !send_snapshot(&mut socket, &mut snapshots).await {
         return;
     }
-    if !send_stats(&mut socket, &state).await {
+    let mut last_sent_stats = (state.stats)();
+    if socket.send(stats_message(&last_sent_stats)).await.is_err() {
         return;
     }
 
@@ -100,7 +114,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 }
             }
             _ = stats_tick.tick() => {
-                if !send_stats(&mut socket, &state).await {
+                if !send_stats(&mut socket, &state, &mut last_sent_stats).await {
                     break;
                 }
             }
