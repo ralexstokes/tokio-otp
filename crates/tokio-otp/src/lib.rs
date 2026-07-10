@@ -190,6 +190,8 @@
 //! - `examples/actor_metrics.rs` — the stats-sampler export pattern.
 //! - `examples/actor_tracing.rs`, `examples/supervisor_snapshot_trace.rs` —
 //!   tracing and snapshot observability.
+//! - `examples/json_edge.rs` — decoding byte-oriented JSON frames into typed
+//!   actor messages (requires `serde`).
 //! - `examples/console.rs` — serving the web console for a supervised
 //!   runtime.
 //!
@@ -200,9 +202,12 @@
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Forwards to `tokio-supervisor/metrics` lifecycle metrics. |
 //! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
+//! | `serde` | no | JSON helpers for typed messages at byte boundaries. |
 
 mod actor;
 mod builder;
+#[cfg(feature = "serde")]
+pub mod codec;
 mod runtime;
 mod supervised_actors;
 
@@ -223,6 +228,8 @@ pub mod prelude {
         RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
         RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, TryRecvError,
     };
+    #[cfg(feature = "serde")]
+    pub use crate::{CodecError, decode, decode_and_send, encode};
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
         ChildStateView, ControlError, EventPathSegment, ExitStatusView, RestartIntensity,
@@ -233,6 +240,8 @@ pub mod prelude {
     };
 }
 
+#[cfg(feature = "serde")]
+pub use codec::{CodecError, decode, decode_and_send, encode};
 #[cfg(feature = "console")]
 pub use tokio_otp_console::{ActorStatsView, Console, ConsoleBuilder, ConsoleHandle};
 #[cfg(feature = "derive")]
