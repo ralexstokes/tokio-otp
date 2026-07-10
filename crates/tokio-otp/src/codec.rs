@@ -4,6 +4,10 @@
 //! This module is available with the `serde` feature. It deliberately handles
 //! only serialization and delivery; framing bytes from a socket, file, or IPC
 //! stream remains the responsibility of the application.
+//!
+//! Use [`codec::decode`](decode) and [`codec::encode`](encode) for pure JSON
+//! conversion, or [`codec::decode_and_send`](decode_and_send) to deliver a
+//! decoded message directly to an actor.
 
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -13,8 +17,7 @@ use crate::{ActorRef, SendError};
 /// An error while translating or delivering a message at a byte boundary.
 #[derive(Debug, Error)]
 pub enum CodecError {
-    /// The bytes were not valid JSON for the requested type, or the value
-    /// could not be represented as JSON.
+    /// The bytes were not valid JSON for the requested message type.
     #[error("JSON codec error: {0}")]
     Json(#[from] serde_json::Error),
     /// A decoded message could not be delivered to its actor.
@@ -23,19 +26,19 @@ pub enum CodecError {
 }
 
 /// Decodes one JSON value from bytes into a typed message.
-pub fn decode<M>(bytes: impl AsRef<[u8]>) -> Result<M, CodecError>
+pub fn decode<M>(bytes: impl AsRef<[u8]>) -> Result<M, serde_json::Error>
 where
     M: DeserializeOwned,
 {
-    Ok(serde_json::from_slice(bytes.as_ref())?)
+    serde_json::from_slice(bytes.as_ref())
 }
 
 /// Encodes a typed message as a JSON byte vector.
-pub fn encode<M>(message: &M) -> Result<Vec<u8>, CodecError>
+pub fn encode<M>(message: &M) -> Result<Vec<u8>, serde_json::Error>
 where
     M: Serialize + ?Sized,
 {
-    Ok(serde_json::to_vec(message)?)
+    serde_json::to_vec(message)
 }
 
 /// Decodes one JSON value and sends the typed message to an actor.
@@ -94,7 +97,13 @@ mod tests {
 
     #[test]
     fn reports_invalid_json() {
-        let error = decode::<Message>(b"not json").unwrap_err();
+        assert!(decode::<Message>(b"not json").is_err());
+    }
+
+    #[tokio::test]
+    async fn reports_invalid_json_when_sending() {
+        let actor = ActorRef::<Message>::detached(Arc::from("sink"));
+        let error = decode_and_send(&actor, b"not json").await.unwrap_err();
 
         assert!(matches!(error, CodecError::Json(_)));
     }

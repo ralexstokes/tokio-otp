@@ -3,7 +3,7 @@
 use std::io::{BufRead, Cursor};
 
 use serde::Deserialize;
-use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, Runtime, decode_and_send};
+use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, Runtime, codec};
 
 #[derive(Deserialize)]
 struct Order {
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for frame in Cursor::new(input).split(b'\n') {
         let frame = frame?;
         if !frame.is_empty() {
-            decode_and_send(&printer, frame).await?;
+            codec::decode_and_send(&printer, frame).await?;
         }
     }
 

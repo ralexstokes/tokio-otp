@@ -202,7 +202,7 @@
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Forwards to `tokio-supervisor/metrics` lifecycle metrics. |
 //! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
-//! | `serde` | no | JSON helpers for typed messages at byte boundaries. |
+//! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries. |
 
 mod actor;
 mod builder;
@@ -222,14 +222,14 @@ pub mod prelude {
     // available only at the crate root.
     #[cfg(feature = "derive")]
     pub use crate::Topology;
+    #[cfg(feature = "serde")]
+    pub use crate::codec;
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
         CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
         RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
         RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, TryRecvError,
     };
-    #[cfg(feature = "serde")]
-    pub use crate::{CodecError, decode, decode_and_send, encode};
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
         ChildStateView, ControlError, EventPathSegment, ExitStatusView, RestartIntensity,
@@ -240,8 +240,6 @@ pub mod prelude {
     };
 }
 
-#[cfg(feature = "serde")]
-pub use codec::{CodecError, decode, decode_and_send, encode};
 #[cfg(feature = "console")]
 pub use tokio_otp_console::{ActorStatsView, Console, ConsoleBuilder, ConsoleHandle};
 #[cfg(feature = "derive")]
