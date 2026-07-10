@@ -23,7 +23,8 @@ mod coverage_probe {
             RestartIntensity, RestartMonitor, RestartMonitorError, ShutdownMode, ShutdownPolicy,
             Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
             SupervisorEvent, SupervisorEventReceiverExt as _, SupervisorHandle, SupervisorSnapshot,
-            SupervisorSnapshotReceiverExt as _, SupervisorStateView, SupervisorToken,
+            SupervisorSnapshotReceiverExt as _, SupervisorSpec, SupervisorStateView,
+            SupervisorToken,
         };
     }
 

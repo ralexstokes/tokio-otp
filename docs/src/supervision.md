@@ -124,9 +124,8 @@ chapter) or an external process.
 
 ## Supervision trees
 
-A supervisor can itself be a child. [`Supervisor::into_child_spec`] converts a
-built supervisor into a `ChildSpec`, giving each subsystem its own restart
-budget while failures that exhaust it escalate to the parent:
+A supervisor is a first-class child kind, giving each subsystem its own
+restart budget while failures that exhaust it escalate to the parent:
 
 ```rust,ignore
 let pressroom = SupervisorBuilder::new()
@@ -134,7 +133,7 @@ let pressroom = SupervisorBuilder::new()
     .build()?;
 
 let shop = SupervisorBuilder::new()
-    .child(pressroom.into_child_spec("pressroom"))
+    .supervisor("pressroom", pressroom)
     .child(front_desk)
     .build()?;
 ```
@@ -152,8 +151,9 @@ through the handle:
 handle.add_child(ChildSpec::new("night-shift-press", factory)).await?;
 handle.remove_child("night-shift-press").await?;
 
-// Target a nested supervisor by path:
-handle.add_child_at(["pressroom"], child).await?;
+// Control a nested supervisor through its restart-stable handle:
+let pressroom = handle.supervisor("pressroom").expect("configured above");
+pressroom.add_child(child).await?;
 ```
 
 Supervisors can start empty or have their last child removed. At zero children
@@ -168,4 +168,3 @@ actors](dynamic-actors.md) chapter.
 [`BackoffPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.BackoffPolicy.html
 [`Strategy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.Strategy.html
 [`ShutdownPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ShutdownPolicy.html
-[`Supervisor::into_child_spec`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.Supervisor.html#method.into_child_spec

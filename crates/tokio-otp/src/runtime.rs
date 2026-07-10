@@ -8,7 +8,7 @@ use tokio_actor::{
 use tokio_supervisor::{
     ChildSpec, ControlError, Restart, RestartIntensity, RestartMonitor, RestartMonitorError,
     ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,
-    SupervisorSnapshot,
+    SupervisorSnapshot, SupervisorSpec,
 };
 
 use crate::error::DynamicActorError;
@@ -95,8 +95,7 @@ impl Runtime {
         }
     }
 
-    /// Returns the underlying [`Supervisor`], for example for nesting via
-    /// [`Supervisor::into_child_spec`].
+    /// Returns the underlying [`Supervisor`] for first-class nesting.
     ///
     /// On a runtime built with
     /// [`RuntimeBuilder::dynamic`](crate::RuntimeBuilder::dynamic), this
@@ -176,6 +175,20 @@ impl RuntimeHandle {
         self.supervisor.add_child(child).await
     }
 
+    /// Adds a nested supervisor at runtime.
+    pub async fn add_supervisor(
+        &self,
+        id: impl Into<String>,
+        supervisor: impl Into<SupervisorSpec>,
+    ) -> Result<(), ControlError> {
+        self.supervisor.add_supervisor(id, supervisor).await
+    }
+
+    /// Returns the stable handle for a direct nested supervisor.
+    pub fn supervisor(&self, id: &str) -> Option<SupervisorHandle> {
+        self.supervisor.supervisor(id)
+    }
+
     /// Adds a runtime actor to a supervised actor runtime.
     pub async fn add_actor<A: RawActor>(
         &self,
@@ -206,15 +219,6 @@ impl RuntimeHandle {
         Ok(actor_ref)
     }
 
-    /// Adds a child to a nested supervisor identified by `path`.
-    pub async fn add_child_at<I, S>(&self, path: I, child: ChildSpec) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.supervisor.add_child_at(path, child).await
-    }
-
     /// Removes a child from the supervisor.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         self.supervisor.remove_child(id).await
@@ -237,19 +241,6 @@ impl RuntimeHandle {
             }
             Err(err) => Err(err.into()),
         }
-    }
-
-    /// Removes a child from a nested supervisor identified by `path`.
-    pub async fn remove_child_at<I, S>(
-        &self,
-        path: I,
-        id: impl Into<String>,
-    ) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.supervisor.remove_child_at(path, id).await
     }
 
     /// Waits for the supervisor to stop.

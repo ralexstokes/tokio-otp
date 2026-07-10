@@ -1,7 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use crate::{
-    child::ChildSpec,
+    child::{ChildDefinition, ChildSpec, SupervisorSpec},
     error::SupervisorBuildError,
     restart::RestartIntensity,
     strategy::Strategy,
@@ -29,7 +29,7 @@ use crate::{
 pub struct SupervisorBuilder {
     strategy: Strategy,
     restart_intensity: RestartIntensity,
-    children: Vec<ChildSpec>,
+    children: Vec<ChildDefinition>,
     control_channel_capacity: usize,
     event_channel_capacity: usize,
 }
@@ -75,7 +75,23 @@ impl SupervisorBuilder {
     /// they are added.
     #[must_use]
     pub fn child(mut self, child: ChildSpec) -> Self {
-        self.children.push(child);
+        self.children.push(child.into_definition());
+        self
+    }
+
+    /// Appends a nested supervisor child.
+    ///
+    /// Pass a [`Supervisor`](crate::Supervisor) for the standard policies, or
+    /// a [`SupervisorSpec`] to customize its restart, shutdown, or restart
+    /// intensity policy.
+    #[must_use]
+    pub fn supervisor(
+        mut self,
+        id: impl Into<String>,
+        supervisor: impl Into<SupervisorSpec>,
+    ) -> Self {
+        self.children
+            .push(ChildDefinition::supervisor(id.into(), supervisor.into()));
         self
     }
 
@@ -120,29 +136,23 @@ impl SupervisorBuilder {
 
         let mut ids = HashSet::new();
         for child in &self.children {
-            if child.id().is_empty() {
+            if child.id.is_empty() {
                 return Err(SupervisorBuildError::InvalidConfig(
                     "child id must not be empty",
                 ));
             }
-            if let Some(restart_intensity) = child.restart_intensity_override() {
+            if let Some(restart_intensity) = child.restart_intensity {
                 restart_intensity.validate()?;
             }
-            if !ids.insert(child.id()) {
-                return Err(SupervisorBuildError::DuplicateChildId(
-                    child.id().to_owned(),
-                ));
+            if !ids.insert(child.id.as_str()) {
+                return Err(SupervisorBuildError::DuplicateChildId(child.id.clone()));
             }
         }
 
         Ok(Supervisor::new(SupervisorConfig {
             strategy: self.strategy,
             restart_intensity: self.restart_intensity,
-            children: self
-                .children
-                .into_iter()
-                .map(|child| Arc::clone(&child.inner))
-                .collect(),
+            children: self.children,
             control_channel_capacity: self.control_channel_capacity,
             event_channel_capacity: self.event_channel_capacity,
         }))

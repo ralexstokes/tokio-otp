@@ -4,6 +4,7 @@ use crate::{
     context::ChildContext,
     restart::{Restart, RestartIntensity},
     shutdown::ShutdownPolicy,
+    supervisor::Supervisor,
 };
 
 /// A type-erased, thread-safe error type used as the `Err` half of
@@ -20,6 +21,21 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub type ChildResult = Result<(), BoxError>;
 
 pub(crate) type ChildFuture = Pin<Box<dyn Future<Output = ChildResult> + Send + 'static>>;
+
+#[derive(Clone)]
+pub(crate) struct ChildDefinition {
+    pub(crate) id: String,
+    pub(crate) restart: Restart,
+    pub(crate) restart_intensity: Option<RestartIntensity>,
+    pub(crate) shutdown_policy: ShutdownPolicy,
+    pub(crate) kind: ChildKind,
+}
+
+#[derive(Clone)]
+pub(crate) enum ChildKind {
+    Task(Arc<dyn ChildFactory>),
+    Supervisor(Supervisor),
+}
 
 /// Specification for a supervised child task.
 ///
@@ -42,6 +58,60 @@ pub(crate) struct ChildSpecInner {
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) factory: Arc<dyn ChildFactory>,
+}
+
+/// Policies for a nested supervisor child.
+///
+/// Passing a [`Supervisor`] directly to
+/// [`SupervisorBuilder::supervisor`](crate::SupervisorBuilder::supervisor) or
+/// [`SupervisorHandle::add_supervisor`](crate::SupervisorHandle::add_supervisor)
+/// uses these defaults. Wrap it in `SupervisorSpec` to customize the same
+/// restart, shutdown, and intensity policies available on [`ChildSpec`].
+#[derive(Clone)]
+pub struct SupervisorSpec {
+    pub(crate) supervisor: Supervisor,
+    pub(crate) restart: Restart,
+    pub(crate) restart_intensity: Option<RestartIntensity>,
+    pub(crate) shutdown_policy: ShutdownPolicy,
+}
+
+impl SupervisorSpec {
+    /// Creates nested-supervisor policies with the standard defaults.
+    pub fn new(supervisor: Supervisor) -> Self {
+        Self {
+            supervisor,
+            restart: Restart::default(),
+            restart_intensity: None,
+            shutdown_policy: ShutdownPolicy::default(),
+        }
+    }
+
+    /// Sets the restart policy for the nested supervisor child.
+    #[must_use]
+    pub fn restart(mut self, restart: Restart) -> Self {
+        self.restart = restart;
+        self
+    }
+
+    /// Sets the shutdown policy for the nested supervisor child.
+    #[must_use]
+    pub fn shutdown(mut self, policy: ShutdownPolicy) -> Self {
+        self.shutdown_policy = policy;
+        self
+    }
+
+    /// Overrides the parent supervisor's restart intensity for this child.
+    #[must_use]
+    pub fn restart_intensity(mut self, intensity: RestartIntensity) -> Self {
+        self.restart_intensity = Some(intensity);
+        self
+    }
+}
+
+impl From<Supervisor> for SupervisorSpec {
+    fn from(supervisor: Supervisor) -> Self {
+        Self::new(supervisor)
+    }
 }
 
 pub(crate) trait ChildFactory: Send + Sync + 'static {
@@ -139,5 +209,27 @@ impl ChildSpec {
     /// Returns the child's shutdown policy.
     pub fn shutdown_policy(&self) -> ShutdownPolicy {
         self.inner.shutdown_policy
+    }
+
+    pub(crate) fn into_definition(self) -> ChildDefinition {
+        ChildDefinition {
+            id: self.inner.id.clone(),
+            restart: self.inner.restart,
+            restart_intensity: self.inner.restart_intensity,
+            shutdown_policy: self.inner.shutdown_policy,
+            kind: ChildKind::Task(self.inner.factory.clone()),
+        }
+    }
+}
+
+impl ChildDefinition {
+    pub(crate) fn supervisor(id: String, spec: SupervisorSpec) -> Self {
+        Self {
+            id,
+            restart: spec.restart,
+            restart_intensity: spec.restart_intensity,
+            shutdown_policy: spec.shutdown_policy,
+            kind: ChildKind::Supervisor(spec.supervisor),
+        }
     }
 }

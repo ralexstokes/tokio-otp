@@ -47,51 +47,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForOne)
-        .child(nested_supervisor.into_child_spec("nested-pipeline"))
         .child(metrics)
         .build()?;
 
     let handle = supervisor.spawn();
-    let mut events = handle.subscribe();
-
-    let mut saw_nested_restart = false;
-    let mut metrics_generation_zero = false;
+    handle
+        .add_supervisor("nested-pipeline", nested_supervisor)
+        .await?;
+    let nested_handle = handle
+        .supervisor("nested-pipeline")
+        .expect("newly added nested supervisor has a stable handle");
+    let mut nested_events = nested_handle.subscribe();
 
     loop {
-        let event = timeout(Duration::from_secs(2), events.recv()).await??;
-        println!("event: {event:?}");
-
-        match event {
-            SupervisorEvent::ChildStarted { id, generation }
-                if id == "metrics" && generation == 0 =>
-            {
-                metrics_generation_zero = true;
-            }
-            SupervisorEvent::Nested {
-                id,
-                generation,
-                event,
-            } if id == "nested-pipeline"
-                && generation == 0
-                && matches!(
-                    *event,
-                    SupervisorEvent::ChildRestarted {
-                        ref id,
-                        old_generation: 0,
-                        new_generation: 1,
-                    } if id == "nested-worker"
-                ) =>
-            {
-                saw_nested_restart = true;
-            }
-            _ => {}
-        }
-
-        if saw_nested_restart && metrics_generation_zero {
+        let event = timeout(Duration::from_secs(2), nested_events.recv()).await??;
+        println!("nested event: {event:?}");
+        if matches!(
+            event,
+            SupervisorEvent::ChildRestarted {
+                ref id,
+                old_generation: 0,
+                new_generation: 1,
+            } if id == "nested-worker"
+        ) {
             break;
         }
     }
 
+    let metrics = handle
+        .snapshot()
+        .child("metrics")
+        .expect("metrics remains present")
+        .clone();
+    assert_eq!(metrics.generation, 0);
     println!("nested subtree recovered internally without restarting outer siblings");
 
     handle.shutdown();

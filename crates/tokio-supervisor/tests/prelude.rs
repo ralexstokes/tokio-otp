@@ -98,7 +98,7 @@ async fn prelude_snapshot_helpers_walk_nested_children() {
             })
             .shutdown(ShutdownPolicy::cooperative(Duration::from_millis(25))),
         )
-        .child(nested.into_child_spec("nested"))
+        .supervisor("nested", nested)
         .build()
         .expect("valid outer supervisor")
         .spawn();

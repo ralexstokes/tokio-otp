@@ -1,42 +1,32 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{Instrument, info_span};
 
 use crate::{
-    child::{ChildResult, ChildSpec, ChildSpecInner},
+    child::{ChildDefinition, ChildKind, ChildResult},
     context::ChildContext,
     error::SupervisorError,
-    event::forward_nested_event,
+    event::{EventSink, SupervisorEvent},
     handle::{
-        NestedControlRegistry, NestedControlScope, SupervisorCommand, SupervisorHandle,
-        SupervisorHandleInit, current_nested_control_scope,
+        NestedChannels, NestedHandles, StableSupervisorChannels, SupervisorCommand,
+        SupervisorHandle, SupervisorHandleInit, empty_nested_channels, empty_nested_handles,
     },
-    observability::{
-        SupervisorObservability, format_path, strategy_label, supervisor_name_for_path,
-    },
+    observability::{format_path, strategy_label, supervisor_name_for_path},
     restart::RestartIntensity,
     runtime::SupervisorRuntime,
     snapshot::{
-        ChildMembershipView, ChildSnapshot, ChildStateView, SupervisorSnapshot,
-        SupervisorStateView, forward_nested_snapshot,
+        ChildMembershipView, ChildSnapshot, ChildStateView, SnapshotCell, SupervisorSnapshot,
+        SupervisorStateView,
     },
     strategy::Strategy,
 };
 
-/// A configured supervisor, ready to be spawned.
+/// A configured supervisor, ready to be spawned or nested as a first-class
+/// supervisor child.
 ///
-/// Construct one via [`SupervisorBuilder`](crate::SupervisorBuilder). Then
-/// either:
-///
-/// - Call [`spawn`](Self::spawn) to run it as a background Tokio task and get
-///   a [`SupervisorHandle`](crate::SupervisorHandle).
-/// - Call [`into_child_spec`](Self::into_child_spec) to nest this supervisor
-///   as a child of another supervisor.
-///
-/// Cloning a `Supervisor` produces an independent copy that can be started
-/// separately. The clone shares the same child specs (which are
-/// reference-counted) but runs its own supervision tree.
+/// Cloning a `Supervisor` produces an independent configuration that can be
+/// started separately.
 #[derive(Clone)]
 pub struct Supervisor {
     pub(crate) config: SupervisorConfig,
@@ -46,9 +36,29 @@ pub struct Supervisor {
 pub(crate) struct SupervisorConfig {
     pub(crate) strategy: Strategy,
     pub(crate) restart_intensity: RestartIntensity,
-    pub(crate) children: Vec<Arc<ChildSpecInner>>,
+    pub(crate) children: Vec<ChildDefinition>,
     pub(crate) control_channel_capacity: usize,
     pub(crate) event_channel_capacity: usize,
+}
+
+/// Explicit connection from one nested supervisor incarnation to its parent.
+#[derive(Clone)]
+pub(crate) struct ParentLink {
+    pub(crate) event_sink: EventSink,
+    pub(crate) snapshot_cell: SnapshotCell,
+    pub(crate) id: String,
+    pub(crate) generation: u64,
+}
+
+impl ParentLink {
+    pub(crate) fn publish_snapshot(&self, snapshot: SupervisorSnapshot) {
+        self.snapshot_cell.forward(snapshot, self.generation);
+    }
+
+    pub(crate) fn forward_event(&self, event: SupervisorEvent) {
+        self.event_sink
+            .forward(self.id.clone(), self.generation, event);
+    }
 }
 
 impl Supervisor {
@@ -59,14 +69,7 @@ impl Supervisor {
     /// Spawns the supervisor as a background Tokio task and returns a handle
     /// for control and observation.
     pub fn spawn(self) -> SupervisorHandle {
-        self.spawn_with_control(Arc::new(NestedControlRegistry::default()), Vec::new())
-    }
-
-    fn spawn_with_control(
-        self,
-        registry: Arc<NestedControlRegistry>,
-        path_prefix: Vec<String>,
-    ) -> SupervisorHandle {
+        let (nested_handles, nested_channels) = prepare_nested_channels(&self.config);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (command_tx, command_rx) = mpsc::channel(self.config.control_channel_capacity);
         let (done_tx, done_rx) = watch::channel(None);
@@ -75,8 +78,7 @@ impl Supervisor {
         let task_done_tx = done_tx.clone();
         let task_events_tx = events_tx.clone();
         let task_snapshots_tx = snapshots_tx.clone();
-        let task_registry = Arc::clone(&registry);
-        let task_path_prefix = path_prefix.clone();
+        let task_nested_handles = nested_handles.clone();
 
         let join_handle = tokio::spawn(async move {
             let result = self
@@ -85,8 +87,10 @@ impl Supervisor {
                     task_events_tx,
                     task_snapshots_tx,
                     command_rx,
-                    task_registry,
-                    task_path_prefix,
+                    task_nested_handles,
+                    nested_channels,
+                    Vec::new(),
+                    None,
                 )
                 .await;
             let _ = task_done_tx.send(Some(result.clone()));
@@ -96,8 +100,7 @@ impl Supervisor {
         SupervisorHandle::new(SupervisorHandleInit {
             shutdown_tx,
             command_tx,
-            registry,
-            path_prefix,
+            nested_handles,
             done_tx,
             done_rx,
             events_tx,
@@ -106,27 +109,79 @@ impl Supervisor {
         })
     }
 
-    /// Adapts this supervisor into a restartable child of another supervisor.
-    ///
-    /// The returned child forwards parent cancellation into a graceful shutdown of
-    /// the nested supervisor. Apply outer restart and shutdown policies to the
-    /// returned [`ChildSpec`] as needed.
-    pub fn into_child_spec(self, id: impl Into<String>) -> ChildSpec {
-        let supervisor = self;
-        ChildSpec::new(id, move |ctx| supervisor.clone().run_as_child(ctx))
+    pub(crate) async fn run_as_child(
+        self,
+        ctx: ChildContext,
+        parent_link: ParentLink,
+        channels: Arc<StableSupervisorChannels>,
+        path: Vec<String>,
+    ) -> ChildResult {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (command_tx, command_rx) = mpsc::channel(self.config.control_channel_capacity);
+        let (done_tx, done_rx) = watch::channel(None);
+        let events_tx = channels.events();
+        let snapshots_tx = channels.snapshots();
+        let nested_handles = channels.nested_handles();
+        let nested_channels = channels.nested_channels();
+        let generation = ctx.generation();
+        let task_done_tx = done_tx.clone();
+
+        let join_handle = tokio::spawn(async move {
+            let result = self
+                .run_with_channels(
+                    shutdown_rx,
+                    events_tx,
+                    snapshots_tx,
+                    command_rx,
+                    nested_handles,
+                    nested_channels,
+                    path,
+                    Some(parent_link),
+                )
+                .await;
+            let _ = task_done_tx.send(Some(result.clone()));
+            result
+        });
+
+        let binding = channels.bind(generation, shutdown_tx.clone(), command_tx, done_rx);
+        tokio::pin!(join_handle);
+        let mut shutdown_requested = false;
+
+        let result = loop {
+            tokio::select! {
+                result = &mut join_handle => {
+                    break match result {
+                        Ok(result) => result,
+                        Err(error) => Err(SupervisorError::Internal(format!(
+                            "nested supervisor task failed to join: {error}"
+                        ))),
+                    };
+                }
+                _ = ctx.shutdown_token().cancelled(), if !shutdown_requested => {
+                    shutdown_requested = true;
+                    let _ = shutdown_tx.send(true);
+                }
+            }
+        };
+
+        drop(binding);
+        result.map_err(|error| Box::new(error) as crate::BoxError)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_with_channels(
         self,
         shutdown_rx: watch::Receiver<bool>,
-        events_tx: broadcast::Sender<crate::event::SupervisorEvent>,
+        events_tx: broadcast::Sender<SupervisorEvent>,
         snapshots_tx: watch::Sender<SupervisorSnapshot>,
         command_rx: mpsc::Receiver<SupervisorCommand>,
-        registry: Arc<NestedControlRegistry>,
-        path_prefix: Vec<String>,
+        nested_handles: NestedHandles,
+        nested_channels: NestedChannels,
+        path: Vec<String>,
+        parent_link: Option<ParentLink>,
     ) -> Result<(), SupervisorError> {
-        let supervisor_name = supervisor_name_for_path(&path_prefix).to_owned();
-        let supervisor_path = format_path(&path_prefix);
+        let supervisor_name = supervisor_name_for_path(&path).to_owned();
+        let supervisor_path = format_path(&path);
         let strategy = strategy_label(self.config.strategy);
         let mut runtime = SupervisorRuntime::new(
             self.config,
@@ -134,8 +189,10 @@ impl Supervisor {
             events_tx,
             snapshots_tx,
             command_rx,
-            registry,
-            path_prefix,
+            nested_handles,
+            nested_channels,
+            path,
+            parent_link,
         );
         runtime
             .run()
@@ -148,45 +205,14 @@ impl Supervisor {
             .await
     }
 
-    async fn run_as_child(self, ctx: ChildContext) -> ChildResult {
-        let child_id = ctx.id().to_owned();
-        let control_scope = current_nested_control_scope().unwrap_or_else(|| {
-            NestedControlScope::new(
-                Arc::new(NestedControlRegistry::default()),
-                vec![child_id.clone()],
-            )
-        });
-        let child_path = control_scope.child_path();
-        let handle = self.spawn_with_control(control_scope.registry(), child_path.clone());
-        let _registration = control_scope.register(handle.control_endpoint());
-        let mut events_rx = handle.subscribe();
-        let mut snapshots_rx = handle.subscribe_snapshots();
-        let initial_snapshot = handle.snapshot();
-        let observability = SupervisorObservability::new(child_path, initial_snapshot.strategy);
-        forward_nested_snapshot(initial_snapshot);
-        let wait = handle.wait();
-        tokio::pin!(wait);
-        let mut shutdown_requested = false;
-
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut wait => {
-                    drain_nested_events(&mut events_rx);
-                    return map_nested_supervisor_result(result);
-                }
-                maybe_event = events_rx.recv() => {
-                    handle_nested_event(&observability, maybe_event);
-                }
-                changed = snapshots_rx.changed() => {
-                    forward_nested_snapshot_change(&snapshots_rx, changed);
-                }
-                _ = ctx.shutdown_token().cancelled(), if !shutdown_requested => {
-                    shutdown_requested = true;
-                    handle.shutdown();
-                }
-            }
-        }
+    pub(crate) fn stable_channels(&self) -> Arc<StableSupervisorChannels> {
+        let (nested_handles, nested_channels) = prepare_nested_channels(&self.config);
+        StableSupervisorChannels::new(
+            initial_snapshot(&self.config),
+            self.config.event_channel_capacity,
+            nested_handles,
+            nested_channels,
+        )
     }
 }
 
@@ -196,55 +222,34 @@ impl std::fmt::Debug for Supervisor {
     }
 }
 
-fn map_nested_supervisor_result(result: Result<(), SupervisorError>) -> ChildResult {
-    match result {
-        Ok(()) => Ok(()),
-        Err(err) => Err(Box::new(err)),
-    }
-}
+fn prepare_nested_channels(config: &SupervisorConfig) -> (NestedHandles, NestedChannels) {
+    let handles = empty_nested_handles();
+    let channels = empty_nested_channels();
+    let mut prepared_handles = HashMap::new();
+    let mut prepared_channels = HashMap::new();
 
-fn handle_nested_event(
-    observability: &SupervisorObservability,
-    maybe_event: Result<crate::event::SupervisorEvent, broadcast::error::RecvError>,
-) {
-    match maybe_event {
-        Ok(event) => forward_nested_event(event),
-        Err(broadcast::error::RecvError::Lagged(dropped)) => {
-            observability.emit_nested_event_forwarding_lag(dropped);
-        }
-        Err(broadcast::error::RecvError::Closed) => {}
-    }
-}
-
-fn forward_nested_snapshot_change(
-    snapshots_rx: &watch::Receiver<SupervisorSnapshot>,
-    changed: Result<(), watch::error::RecvError>,
-) {
-    if changed.is_ok() {
-        forward_nested_snapshot(snapshots_rx.borrow().clone());
-    }
-}
-
-fn drain_nested_events(events_rx: &mut broadcast::Receiver<crate::event::SupervisorEvent>) {
-    loop {
-        match events_rx.try_recv() {
-            Ok(event) => forward_nested_event(event),
-            Err(broadcast::error::TryRecvError::Lagged(_)) => {}
-            Err(broadcast::error::TryRecvError::Empty)
-            | Err(broadcast::error::TryRecvError::Closed) => break,
+    for child in &config.children {
+        if let ChildKind::Supervisor(supervisor) = &child.kind {
+            let stable = supervisor.stable_channels();
+            prepared_handles.insert(child.id.clone(), stable.handle());
+            prepared_channels.insert(child.id.clone(), stable);
         }
     }
+
+    *handles.lock().expect("nested handle map poisoned") = prepared_handles;
+    *channels.lock().expect("nested channel map poisoned") = prepared_channels;
+    (handles, channels)
 }
 
-fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot {
+pub(crate) fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot {
     SupervisorSnapshot {
         state: SupervisorStateView::Running,
         strategy: config.strategy,
         children: config
             .children
             .iter()
-            .map(|spec| ChildSnapshot {
-                id: spec.id.clone(),
+            .map(|child| ChildSnapshot {
+                id: child.id.clone(),
                 generation: 0,
                 state: ChildStateView::Starting,
                 membership: ChildMembershipView::Active,

@@ -229,7 +229,7 @@ async fn root_snapshot_includes_nested_supervisor_tree() {
             ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
-        .child(nested.into_child_spec("nested"))
+        .supervisor("nested", nested)
         .build()
         .expect("valid outer supervisor");
 

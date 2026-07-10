@@ -3,14 +3,16 @@ use std::sync::Arc;
 use tokio::{task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::{child::ChildSpecInner, restart::RestartIntensity, runtime::intensity::RestartTracker};
+use crate::{
+    child::ChildDefinition, restart::RestartIntensity, runtime::intensity::RestartTracker,
+};
 
 /// Mutable per-child state managed by the supervisor runtime.
 ///
 /// Tracks the child's current lifecycle state, its restart history, and the
 /// handles needed to cancel or abort the running Tokio task.
 pub(crate) struct ChildRuntime {
-    pub(crate) spec: Arc<ChildSpecInner>,
+    pub(crate) definition: Arc<ChildDefinition>,
     pub(crate) restart_tracker: RestartTracker,
     pub(crate) generation: u64,
     pub(crate) state: RuntimeChildState,
@@ -36,12 +38,14 @@ impl RuntimeChildState {
 
 impl ChildRuntime {
     pub(crate) fn new(
-        spec: Arc<ChildSpecInner>,
+        definition: Arc<ChildDefinition>,
         default_restart_intensity: RestartIntensity,
     ) -> Self {
-        let restart_intensity = spec.restart_intensity.unwrap_or(default_restart_intensity);
+        let restart_intensity = definition
+            .restart_intensity
+            .unwrap_or(default_restart_intensity);
         Self {
-            spec,
+            definition,
             restart_tracker: RestartTracker::new(restart_intensity),
             generation: 0,
             state: RuntimeChildState::Stopped,

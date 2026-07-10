@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    future::Future,
     sync::{Arc, Mutex},
 };
 
@@ -10,7 +9,7 @@ use tokio::{
 };
 
 use crate::{
-    child::ChildSpec,
+    child::{ChildSpec, SupervisorSpec},
     error::{ControlError, RestartMonitorError, SupervisorError},
     event::SupervisorEvent,
     monitor::RestartMonitor,
@@ -37,6 +36,19 @@ impl ControlEndpoint {
             .await
     }
 
+    async fn add_supervisor(
+        &self,
+        id: String,
+        supervisor: SupervisorSpec,
+    ) -> Result<(), ControlError> {
+        self.send(|reply| SupervisorCommand::AddSupervisor {
+            id,
+            supervisor: Box::new(supervisor),
+            reply,
+        })
+        .await
+    }
+
     async fn send(
         &self,
         command: impl FnOnce(oneshot::Sender<Result<(), ControlError>>) -> SupervisorCommand,
@@ -50,93 +62,145 @@ impl ControlEndpoint {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct NestedControlRegistry {
-    endpoints: Mutex<HashMap<Vec<String>, ControlEndpoint>>,
+#[derive(Clone)]
+struct IncarnationBinding {
+    generation: u64,
+    shutdown_tx: watch::Sender<bool>,
+    control: ControlEndpoint,
+    done_rx: DoneReceiver,
 }
 
-impl NestedControlRegistry {
-    fn insert(&self, path: Vec<String>, endpoint: ControlEndpoint) {
-        self.endpoints
-            .lock()
-            .expect("nested control registry mutex poisoned")
-            .insert(path, endpoint);
+pub(crate) type NestedHandles = Arc<Mutex<HashMap<String, SupervisorHandle>>>;
+pub(crate) type NestedChannels = Arc<Mutex<HashMap<String, Arc<StableSupervisorChannels>>>>;
+
+pub(crate) struct StableSupervisorChannels {
+    binding: Mutex<Option<IncarnationBinding>>,
+    events_tx: broadcast::Sender<SupervisorEvent>,
+    snapshots_tx: watch::Sender<SupervisorSnapshot>,
+    nested_handles: NestedHandles,
+    nested_channels: NestedChannels,
+}
+
+impl StableSupervisorChannels {
+    pub(crate) fn new(
+        initial_snapshot: SupervisorSnapshot,
+        event_capacity: usize,
+        nested_handles: NestedHandles,
+        nested_channels: NestedChannels,
+    ) -> Arc<Self> {
+        let (events_tx, _) = broadcast::channel(event_capacity);
+        let (snapshots_tx, _) = watch::channel(initial_snapshot);
+        Arc::new(Self {
+            binding: Mutex::new(None),
+            events_tx,
+            snapshots_tx,
+            nested_handles,
+            nested_channels,
+        })
     }
 
-    fn remove(&self, path: &[String]) {
-        self.endpoints
-            .lock()
-            .expect("nested control registry mutex poisoned")
-            .remove(path);
+    pub(crate) fn handle(self: &Arc<Self>) -> SupervisorHandle {
+        SupervisorHandle {
+            kind: HandleKind::Stable(Arc::clone(self)),
+        }
     }
 
-    fn get(&self, path: &[String]) -> Option<ControlEndpoint> {
-        self.endpoints
+    pub(crate) fn bind(
+        self: &Arc<Self>,
+        generation: u64,
+        shutdown_tx: watch::Sender<bool>,
+        command_tx: mpsc::Sender<SupervisorCommand>,
+        done_rx: DoneReceiver,
+    ) -> StableBindingGuard {
+        *self.binding.lock().expect("stable control slot poisoned") = Some(IncarnationBinding {
+            generation,
+            shutdown_tx,
+            control: ControlEndpoint { command_tx },
+            done_rx,
+        });
+        StableBindingGuard {
+            channels: Arc::clone(self),
+            generation,
+        }
+    }
+
+    fn binding(&self) -> Option<IncarnationBinding> {
+        self.binding
             .lock()
-            .expect("nested control registry mutex poisoned")
-            .get(path)
-            .cloned()
+            .expect("stable control slot poisoned")
+            .clone()
+    }
+
+    pub(crate) fn events(&self) -> broadcast::Sender<SupervisorEvent> {
+        self.events_tx.clone()
+    }
+
+    pub(crate) fn snapshots(&self) -> watch::Sender<SupervisorSnapshot> {
+        self.snapshots_tx.clone()
+    }
+
+    pub(crate) fn nested_handles(&self) -> NestedHandles {
+        Arc::clone(&self.nested_handles)
+    }
+
+    pub(crate) fn nested_channels(&self) -> NestedChannels {
+        Arc::clone(&self.nested_channels)
+    }
+}
+
+pub(crate) struct StableBindingGuard {
+    channels: Arc<StableSupervisorChannels>,
+    generation: u64,
+}
+
+impl Drop for StableBindingGuard {
+    fn drop(&mut self) {
+        let mut binding = self
+            .channels
+            .binding
+            .lock()
+            .expect("stable control slot poisoned");
+        if binding
+            .as_ref()
+            .is_some_and(|binding| binding.generation == self.generation)
+            && let Some(binding) = binding.take()
+        {
+            let _ = binding.shutdown_tx.send(true);
+        }
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct NestedControlScope {
-    registry: Arc<NestedControlRegistry>,
-    child_path: Vec<String>,
+struct RootHandle {
+    shutdown_tx: watch::Sender<bool>,
+    command_tx: mpsc::Sender<SupervisorCommand>,
+    done_rx: DoneReceiver,
+    events_tx: broadcast::Sender<SupervisorEvent>,
+    snapshots_rx: watch::Receiver<SupervisorSnapshot>,
+    nested_handles: NestedHandles,
+    join_state: Arc<Mutex<Option<(SupervisorJoinHandle, DoneSender)>>>,
 }
 
-impl NestedControlScope {
-    pub(crate) fn new(registry: Arc<NestedControlRegistry>, child_path: Vec<String>) -> Self {
-        Self {
-            registry,
-            child_path,
+#[derive(Clone)]
+enum HandleKind {
+    Root(RootHandle),
+    Stable(Arc<StableSupervisorChannels>),
+}
+
+pub(crate) fn empty_nested_handles() -> NestedHandles {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn empty_nested_channels() -> NestedChannels {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+impl RootHandle {
+    fn control_endpoint(&self) -> ControlEndpoint {
+        ControlEndpoint {
+            command_tx: self.command_tx.clone(),
         }
     }
-
-    pub(crate) fn registry(&self) -> Arc<NestedControlRegistry> {
-        Arc::clone(&self.registry)
-    }
-
-    pub(crate) fn child_path(&self) -> Vec<String> {
-        self.child_path.clone()
-    }
-
-    pub(crate) fn register(&self, endpoint: ControlEndpoint) -> NestedControlRegistration {
-        self.registry.insert(self.child_path.clone(), endpoint);
-        NestedControlRegistration {
-            registry: Arc::clone(&self.registry),
-            child_path: self.child_path.clone(),
-        }
-    }
-}
-
-pub(crate) struct NestedControlRegistration {
-    registry: Arc<NestedControlRegistry>,
-    child_path: Vec<String>,
-}
-
-impl Drop for NestedControlRegistration {
-    fn drop(&mut self) {
-        self.registry.remove(&self.child_path);
-    }
-}
-
-tokio::task_local! {
-    static NESTED_CONTROL_SCOPE: NestedControlScope;
-}
-
-pub(crate) async fn with_nested_control_scope<Fut>(
-    scope: NestedControlScope,
-    future: Fut,
-) -> Fut::Output
-where
-    Fut: Future,
-{
-    NESTED_CONTROL_SCOPE.scope(scope, future).await
-}
-
-pub(crate) fn current_nested_control_scope() -> Option<NestedControlScope> {
-    NESTED_CONTROL_SCOPE.try_with(Clone::clone).ok()
 }
 
 pub(crate) enum SupervisorCommand {
@@ -148,13 +212,17 @@ pub(crate) enum SupervisorCommand {
         id: String,
         reply: oneshot::Sender<Result<(), ControlError>>,
     },
+    AddSupervisor {
+        id: String,
+        supervisor: Box<SupervisorSpec>,
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
 }
 
 pub(crate) struct SupervisorHandleInit {
     pub(crate) shutdown_tx: watch::Sender<bool>,
     pub(crate) command_tx: mpsc::Sender<SupervisorCommand>,
-    pub(crate) registry: Arc<NestedControlRegistry>,
-    pub(crate) path_prefix: Vec<String>,
+    pub(crate) nested_handles: NestedHandles,
     pub(crate) done_tx: DoneSender,
     pub(crate) done_rx: DoneReceiver,
     pub(crate) events_tx: broadcast::Sender<SupervisorEvent>,
@@ -184,27 +252,21 @@ pub(crate) struct SupervisorHandleInit {
 /// joined its child tasks.
 #[derive(Clone)]
 pub struct SupervisorHandle {
-    shutdown_tx: watch::Sender<bool>,
-    command_tx: mpsc::Sender<SupervisorCommand>,
-    registry: Arc<NestedControlRegistry>,
-    path_prefix: Vec<String>,
-    done_rx: DoneReceiver,
-    events_tx: broadcast::Sender<SupervisorEvent>,
-    snapshots_rx: watch::Receiver<SupervisorSnapshot>,
-    join_state: Arc<Mutex<Option<(SupervisorJoinHandle, DoneSender)>>>,
+    kind: HandleKind,
 }
 
 impl SupervisorHandle {
     pub(crate) fn new(init: SupervisorHandleInit) -> Self {
         Self {
-            shutdown_tx: init.shutdown_tx,
-            command_tx: init.command_tx,
-            registry: init.registry,
-            path_prefix: init.path_prefix,
-            done_rx: init.done_rx,
-            events_tx: init.events_tx,
-            snapshots_rx: init.snapshots_rx,
-            join_state: Arc::new(Mutex::new(Some((init.join_handle, init.done_tx)))),
+            kind: HandleKind::Root(RootHandle {
+                shutdown_tx: init.shutdown_tx,
+                command_tx: init.command_tx,
+                done_rx: init.done_rx,
+                events_tx: init.events_tx,
+                snapshots_rx: init.snapshots_rx,
+                nested_handles: init.nested_handles,
+                join_state: Arc::new(Mutex::new(Some((init.join_handle, init.done_tx)))),
+            }),
         }
     }
 
@@ -216,7 +278,16 @@ impl SupervisorHandle {
     ///
     /// Calling `shutdown` multiple times is harmless.
     pub fn shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
+        match &self.kind {
+            HandleKind::Root(root) => {
+                let _ = root.shutdown_tx.send(true);
+            }
+            HandleKind::Stable(stable) => {
+                if let Some(binding) = stable.binding() {
+                    let _ = binding.shutdown_tx.send(true);
+                }
+            }
+        }
     }
 
     /// Requests a graceful shutdown and waits for the supervisor to fully stop.
@@ -229,24 +300,19 @@ impl SupervisorHandle {
     ///
     /// Waits if the control channel is full.
     pub async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
-        self.control_endpoint().add_child(child).await
+        self.control_endpoint()?.add_child(child).await
     }
 
-    /// Adds a child to a nested supervisor identified by `path`.
-    ///
-    /// `path` is an iterable of child ids that form the route from this
-    /// supervisor down to the target nested supervisor. An empty path targets
-    /// this supervisor directly.
-    pub async fn add_child_at<I, S>(&self, path: I, child: ChildSpec) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        if let Some(endpoint) = self.endpoint_for_relative_path(path)? {
-            endpoint.add_child(child).await
-        } else {
-            self.add_child(child).await
-        }
+    /// Adds a nested supervisor at runtime with restart-stable observation and
+    /// control channels.
+    pub async fn add_supervisor(
+        &self,
+        id: impl Into<String>,
+        supervisor: impl Into<SupervisorSpec>,
+    ) -> Result<(), ControlError> {
+        self.control_endpoint()?
+            .add_supervisor(id.into(), supervisor.into())
+            .await
     }
 
     /// Removes a child by id from this supervisor.
@@ -255,26 +321,16 @@ impl SupervisorHandle {
     /// before being removed. Removing the last child is valid; the supervisor
     /// continues idling until shutdown or until another child is added.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
-        self.control_endpoint().remove_child(id.into()).await
+        self.control_endpoint()?.remove_child(id.into()).await
     }
 
-    /// Removes a child from a nested supervisor identified by `path`.
-    ///
-    /// See [`add_child_at`](Self::add_child_at) for the meaning of `path`.
-    pub async fn remove_child_at<I, S>(
-        &self,
-        path: I,
-        id: impl Into<String>,
-    ) -> Result<(), ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        if let Some(endpoint) = self.endpoint_for_relative_path(path)? {
-            endpoint.remove_child(id.into()).await
-        } else {
-            self.remove_child(id).await
-        }
+    /// Returns the restart-stable handle for a direct nested supervisor.
+    pub fn supervisor(&self, id: &str) -> Option<SupervisorHandle> {
+        self.nested_handles()
+            .lock()
+            .expect("nested handle map poisoned")
+            .get(id)
+            .cloned()
     }
 
     /// Waits for the supervisor to stop.
@@ -284,17 +340,29 @@ impl SupervisorHandle {
     /// same result via a shared watch channel. A successful return means the
     /// runtime has finished draining and joining supervised child tasks.
     pub async fn wait(&self) -> Result<(), SupervisorError> {
-        if let Some(result) = self.done_rx.borrow().clone() {
-            return result;
-        }
+        let (mut done_rx, join) = match &self.kind {
+            HandleKind::Root(root) => {
+                if let Some(result) = root.done_rx.borrow().clone() {
+                    return result;
+                }
+                let join = root
+                    .join_state
+                    .lock()
+                    .expect("join_state mutex poisoned")
+                    .take();
+                (root.done_rx.clone(), join)
+            }
+            HandleKind::Stable(stable) => {
+                let binding = stable.binding().ok_or_else(|| {
+                    SupervisorError::Internal(
+                        "nested supervisor incarnation is unavailable".to_owned(),
+                    )
+                })?;
+                (binding.done_rx, None)
+            }
+        };
 
-        let join_state = self
-            .join_state
-            .lock()
-            .expect("join_state mutex poisoned")
-            .take();
-
-        if let Some((join_handle, done_tx)) = join_state {
+        if let Some((join_handle, done_tx)) = join {
             let result = match join_handle.await {
                 Ok(result) => result,
                 Err(err) => Err(SupervisorError::Internal(format!(
@@ -305,7 +373,9 @@ impl SupervisorHandle {
             return result;
         }
 
-        let mut done_rx = self.done_rx.clone();
+        if let Some(result) = done_rx.borrow().clone() {
+            return result;
+        }
         done_rx
             .wait_for(|value| value.is_some())
             .await
@@ -336,19 +406,18 @@ impl SupervisorHandle {
         id: impl Into<String>,
     ) -> Result<RestartMonitor, RestartMonitorError> {
         let id = id.into();
-        let snapshot = self.snapshots_rx.borrow();
+        let snapshots_rx = self.snapshots_rx();
+        let snapshot = snapshots_rx.borrow();
         let child = snapshot
             .child(&id)
             .ok_or_else(|| RestartMonitorError::UnknownChild(id.clone()))?;
         if child.membership == ChildMembershipView::Removing {
             return Err(RestartMonitorError::ChildRemoved(id));
         }
+        let generation = child.generation;
+        drop(snapshot);
 
-        Ok(RestartMonitor::new(
-            id,
-            child.generation,
-            self.snapshots_rx.clone(),
-        ))
+        Ok(RestartMonitor::new(id, generation, snapshots_rx))
     }
 
     /// Returns a new receiver for supervisor lifecycle events.
@@ -358,12 +427,12 @@ impl SupervisorHandle {
     /// [`event_channel_capacity`](crate::SupervisorBuilder::event_channel_capacity),
     /// it will receive a `Lagged` error and skip missed events.
     pub fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
-        self.events_tx.subscribe()
+        self.events_tx().subscribe()
     }
 
     /// Returns a clone of the latest [`SupervisorSnapshot`].
     pub fn snapshot(&self) -> SupervisorSnapshot {
-        self.snapshots_rx.borrow().clone()
+        self.snapshots_rx().borrow().clone()
     }
 
     /// Returns the broadcast sender for supervisor lifecycle events.
@@ -372,7 +441,7 @@ impl SupervisorHandle {
     /// (e.g. one per WebSocket connection) by calling
     /// [`broadcast::Sender::subscribe`] on the returned sender.
     pub fn event_sender(&self) -> broadcast::Sender<SupervisorEvent> {
-        self.events_tx.clone()
+        self.events_tx()
     }
 
     /// Returns a watch receiver that is updated each time the supervisor's
@@ -408,47 +477,37 @@ impl SupervisorHandle {
     /// # }
     /// ```
     pub fn subscribe_snapshots(&self) -> watch::Receiver<SupervisorSnapshot> {
-        self.snapshots_rx.clone()
+        self.snapshots_rx()
     }
 
-    pub(crate) fn control_endpoint(&self) -> ControlEndpoint {
-        ControlEndpoint {
-            command_tx: self.command_tx.clone(),
+    fn control_endpoint(&self) -> Result<ControlEndpoint, ControlError> {
+        match &self.kind {
+            HandleKind::Root(root) => Ok(root.control_endpoint()),
+            HandleKind::Stable(stable) => stable
+                .binding()
+                .map(|binding| binding.control)
+                .ok_or(ControlError::Unavailable),
         }
     }
 
-    fn endpoint_for_relative_path<I, S>(
-        &self,
-        path: I,
-    ) -> Result<Option<ControlEndpoint>, ControlError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let path = collect_path(path);
-        if path.is_empty() {
-            Ok(None)
-        } else {
-            self.endpoint_for_path(&path).map(Some)
+    fn events_tx(&self) -> broadcast::Sender<SupervisorEvent> {
+        match &self.kind {
+            HandleKind::Root(root) => root.events_tx.clone(),
+            HandleKind::Stable(stable) => stable.events(),
         }
     }
 
-    fn endpoint_for_path(&self, relative_path: &[String]) -> Result<ControlEndpoint, ControlError> {
-        let mut absolute_path = self.path_prefix.clone();
-        absolute_path.extend(relative_path.iter().cloned());
-
-        self.registry
-            .get(&absolute_path)
-            .ok_or_else(|| ControlError::UnknownChildId(absolute_path.join(".")))
+    fn snapshots_rx(&self) -> watch::Receiver<SupervisorSnapshot> {
+        match &self.kind {
+            HandleKind::Root(root) => root.snapshots_rx.clone(),
+            HandleKind::Stable(stable) => stable.snapshots_tx.subscribe(),
+        }
     }
-}
 
-fn collect_path<I, S>(path: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    path.into_iter()
-        .map(|segment| segment.as_ref().to_owned())
-        .collect()
+    fn nested_handles(&self) -> NestedHandles {
+        match &self.kind {
+            HandleKind::Root(root) => Arc::clone(&root.nested_handles),
+            HandleKind::Stable(stable) => stable.nested_handles(),
+        }
+    }
 }

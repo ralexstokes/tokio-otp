@@ -71,11 +71,11 @@
 //! [`SupervisorHandle`]:
 //!
 //! - [`add_child`](SupervisorHandle::add_child) /
-//!   [`remove_child`](SupervisorHandle::remove_child) target the root
+//!   [`remove_child`](SupervisorHandle::remove_child) target that handle's
 //!   supervisor.
-//! - [`add_child_at`](SupervisorHandle::add_child_at) /
-//!   [`remove_child_at`](SupervisorHandle::remove_child_at) target a nested
-//!   supervisor by path.
+//! - [`add_supervisor`](SupervisorHandle::add_supervisor) adds a first-class
+//!   nested supervisor; [`supervisor`](SupervisorHandle::supervisor) returns
+//!   its restart-stable handle.
 //!
 //! Control operations wait when the control channel is full.
 //!
@@ -84,18 +84,17 @@
 //!
 //! # Nested supervisors
 //!
-//! A [`Supervisor`] can be converted into a [`ChildSpec`] via
-//! [`into_child_spec`](Supervisor::into_child_spec), allowing it to be
-//! supervised as a child of another supervisor. The nested supervisor:
+//! A [`Supervisor`] is added as a first-class child with
+//! [`SupervisorBuilder::supervisor`] or
+//! [`SupervisorHandle::add_supervisor`]. The nested supervisor:
 //!
 //! - Forwards lifecycle events to the parent as
 //!   [`SupervisorEvent::Nested`] wrappers.
 //! - Publishes its snapshot into the parent's
 //!   [`ChildSnapshot::supervisor`] field.
-//! - Participates in the parent's control-plane registry, so
-//!   [`add_child_at`](SupervisorHandle::add_child_at) can reach any depth.
-//! - Is restarted by the parent according to the outer [`ChildSpec`]'s
-//!   restart and shutdown policies.
+//! - Has a restart-stable direct handle whose subscriptions and snapshots
+//!   survive nested restarts.
+//! - Is restarted by the parent according to its [`SupervisorSpec`] policies.
 //!
 //! # Observability
 //!
@@ -193,7 +192,7 @@ mod strategy;
 mod supervisor;
 
 pub use builder::SupervisorBuilder;
-pub use child::{BoxError, ChildResult, ChildSpec};
+pub use child::{BoxError, ChildResult, ChildSpec, SupervisorSpec};
 pub use context::{ChildContext, SupervisorToken};
 pub use error::{ControlError, RestartMonitorError, SupervisorBuildError, SupervisorError};
 pub use event::{EventPathSegment, ExitStatusView, SupervisorEvent};

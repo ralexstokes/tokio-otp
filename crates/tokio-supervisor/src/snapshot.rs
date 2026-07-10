@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -48,9 +47,8 @@ pub struct ChildSnapshot {
     /// Time remaining until the next scheduled restart, if a backoff delay is
     /// pending.
     pub next_restart_in: Option<Duration>,
-    /// If this child is itself a nested supervisor (created via
-    /// [`Supervisor::into_child_spec`](crate::Supervisor::into_child_spec)),
-    /// this contains its recursive snapshot.
+    /// If this child is a first-class nested supervisor, this contains its
+    /// recursive snapshot.
     pub supervisor: Option<Box<SupervisorSnapshot>>,
 }
 
@@ -197,32 +195,29 @@ impl NestedSnapshotState {
 }
 
 #[derive(Clone)]
-pub(crate) struct NestedSnapshotForwarder {
+pub(crate) struct SnapshotCell {
     notifications: mpsc::Sender<NestedSnapshotNotification>,
     state: NestedSnapshotState,
     parent_key: usize,
     parent_instance: u64,
-    generation: u64,
 }
 
-impl NestedSnapshotForwarder {
+impl SnapshotCell {
     pub(crate) fn new(
         notifications: mpsc::Sender<NestedSnapshotNotification>,
         state: NestedSnapshotState,
         parent_key: usize,
         parent_instance: u64,
-        generation: u64,
     ) -> Self {
         Self {
             notifications,
             state,
             parent_key,
             parent_instance,
-            generation,
         }
     }
 
-    fn forward(&self, snapshot: SupervisorSnapshot) {
+    pub(crate) fn forward(&self, snapshot: SupervisorSnapshot, generation: u64) {
         self.state.replace(snapshot);
         if !self.state.try_queue() {
             return;
@@ -231,7 +226,7 @@ impl NestedSnapshotForwarder {
         let notification = NestedSnapshotNotification {
             parent_key: self.parent_key,
             parent_instance: self.parent_instance,
-            generation: self.generation,
+            generation,
         };
 
         match self.notifications.try_send(notification) {
@@ -250,24 +245,4 @@ impl NestedSnapshotForwarder {
             }
         }
     }
-}
-
-tokio::task_local! {
-    static NESTED_SNAPSHOT_FORWARDER: NestedSnapshotForwarder;
-}
-
-pub(crate) async fn with_nested_snapshot_forwarder<Fut>(
-    forwarder: NestedSnapshotForwarder,
-    future: Fut,
-) -> Fut::Output
-where
-    Fut: Future,
-{
-    NESTED_SNAPSHOT_FORWARDER.scope(forwarder, future).await
-}
-
-pub(crate) fn forward_nested_snapshot(snapshot: SupervisorSnapshot) {
-    let _ = NESTED_SNAPSHOT_FORWARDER.try_with(|forwarder| {
-        forwarder.forward(snapshot);
-    });
 }

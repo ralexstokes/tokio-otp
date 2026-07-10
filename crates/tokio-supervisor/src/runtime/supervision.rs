@@ -14,9 +14,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
 use crate::{
+    child::{ChildDefinition, ChildKind, SupervisorSpec},
     error::{ControlError, SupervisorError},
-    event::{ExitStatusView, SupervisorEvent},
-    handle::{NestedControlRegistry, SupervisorCommand},
+    event::{ExitStatusView, NestedEventNotification, SupervisorEvent},
+    handle::{NestedChannels, NestedHandles, StableSupervisorChannels, SupervisorCommand},
     observability::{SupervisorObservability, format_child_path},
     restart::{Restart, RestartIntensity},
     snapshot::{
@@ -24,7 +25,7 @@ use crate::{
         NestedSnapshotState, SupervisorSnapshot, SupervisorStateView,
     },
     strategy::Strategy,
-    supervisor::SupervisorConfig,
+    supervisor::{ParentLink, SupervisorConfig},
 };
 
 use super::{
@@ -86,6 +87,7 @@ pub(crate) struct ChildEntry {
     last_exit: Option<ExitStatusView>,
     pub(crate) nested_snapshot: Option<SupervisorSnapshot>,
     pub(crate) nested_snapshot_state: Option<NestedSnapshotState>,
+    pub(crate) nested_channels: Option<Arc<StableSupervisorChannels>>,
     pub(crate) membership: MembershipState,
 }
 
@@ -93,7 +95,8 @@ impl ChildEntry {
     fn new(
         id: String,
         formatted_path: String,
-        spec: Arc<crate::child::ChildSpecInner>,
+        definition: Arc<ChildDefinition>,
+        nested_channels: Option<Arc<StableSupervisorChannels>>,
         default_restart_intensity: RestartIntensity,
         instance: u64,
     ) -> Self {
@@ -101,10 +104,11 @@ impl ChildEntry {
             id,
             formatted_path,
             instance,
-            runtime: ChildRuntime::new(spec, default_restart_intensity),
+            runtime: ChildRuntime::new(definition, default_restart_intensity),
             last_exit: None,
             nested_snapshot: None,
             nested_snapshot_state: None,
+            nested_channels,
             membership: MembershipState::Active,
         }
     }
@@ -114,9 +118,9 @@ impl ChildEntry {
 pub(crate) struct RuntimeMeta {
     pub(crate) strategy: Strategy,
     pub(crate) default_restart_intensity: RestartIntensity,
-    pub(crate) registry: Arc<NestedControlRegistry>,
     pub(crate) path_prefix: Vec<String>,
     pub(crate) observability: SupervisorObservability,
+    pub(crate) parent_link: Option<ParentLink>,
 }
 
 /// Core state machine that drives the supervisor's select loop.
@@ -155,6 +159,10 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) snapshots: watch::Sender<SupervisorSnapshot>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
     pub(crate) command_rx: mpsc::Receiver<SupervisorCommand>,
+    pub(crate) nested_handles: NestedHandles,
+    pub(crate) nested_channels: NestedChannels,
+    pub(crate) nested_event_tx: mpsc::Sender<NestedEventNotification>,
+    pub(crate) nested_event_rx: mpsc::Receiver<NestedEventNotification>,
     pub(crate) nested_snapshot_tx: mpsc::Sender<NestedSnapshotNotification>,
     pub(crate) nested_snapshot_rx: mpsc::Receiver<NestedSnapshotNotification>,
     pub(crate) commands_open: bool,
@@ -163,14 +171,17 @@ pub(crate) struct SupervisorRuntime {
 }
 
 impl SupervisorRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: SupervisorConfig,
         shutdown_rx: watch::Receiver<bool>,
         events: broadcast::Sender<SupervisorEvent>,
         snapshots: watch::Sender<SupervisorSnapshot>,
         command_rx: mpsc::Receiver<SupervisorCommand>,
-        registry: Arc<NestedControlRegistry>,
+        nested_handles: NestedHandles,
+        nested_channels: NestedChannels,
         path_prefix: Vec<String>,
+        parent_link: Option<ParentLink>,
     ) -> Self {
         let default_restart_intensity = config.restart_intensity;
         let observability = SupervisorObservability::new(path_prefix.clone(), config.strategy);
@@ -182,10 +193,16 @@ impl SupervisorRuntime {
         for spec in config.children {
             let id = spec.id.clone();
             let formatted_path = format_child_path(&path_prefix, &id);
+            let child_nested_channels = nested_channels
+                .lock()
+                .expect("nested channel map poisoned")
+                .get(&id)
+                .cloned();
             let key = children.insert(ChildEntry::new(
                 id.clone(),
                 formatted_path,
-                spec,
+                Arc::new(spec),
+                child_nested_channels,
                 default_restart_intensity,
                 next_child_instance,
             ));
@@ -197,14 +214,15 @@ impl SupervisorRuntime {
             .control_channel_capacity
             .max(config.event_channel_capacity);
         let (nested_snapshot_tx, nested_snapshot_rx) = mpsc::channel(nested_snapshot_capacity);
+        let (nested_event_tx, nested_event_rx) = mpsc::channel(config.event_channel_capacity);
 
         Self {
             meta: RuntimeMeta {
                 strategy: config.strategy,
                 default_restart_intensity,
-                registry,
                 path_prefix,
                 observability,
+                parent_link,
             },
             state: SupervisorState::Running,
             group_token: CancellationToken::new(),
@@ -219,6 +237,10 @@ impl SupervisorRuntime {
             snapshots,
             shutdown_rx,
             command_rx,
+            nested_handles,
+            nested_channels,
+            nested_event_tx,
+            nested_event_rx,
             nested_snapshot_tx,
             nested_snapshot_rx,
             commands_open: true,
@@ -228,6 +250,7 @@ impl SupervisorRuntime {
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), SupervisorError> {
+        self.publish_snapshot();
         self.send_event(SupervisorEvent::SupervisorStarted);
         let initial_children = self.child_order.clone();
         for key in initial_children {
@@ -260,6 +283,11 @@ impl SupervisorRuntime {
                         self.handle_nested_snapshot(update);
                     }
                 }
+                event = self.nested_event_rx.recv() => {
+                    if let Some(event) = event {
+                        self.handle_nested_event(event);
+                    }
+                }
                 maybe = self.join_set.join_next_with_id(), if !self.join_set.is_empty() => {
                     let Some(joined) = maybe else { continue };
                     self.handle_joined_child(joined).await?;
@@ -278,6 +306,13 @@ impl SupervisorRuntime {
             }
             SupervisorCommand::RemoveChild { id, reply } => {
                 let _ = reply.send(self.remove_child(id).await);
+            }
+            SupervisorCommand::AddSupervisor {
+                id,
+                supervisor,
+                reply,
+            } => {
+                let _ = reply.send(self.add_supervisor(id, *supervisor));
             }
         }
     }
@@ -303,10 +338,12 @@ impl SupervisorRuntime {
         }
 
         let formatted_path = format_child_path(&self.meta.path_prefix, &id);
+        let definition = Arc::new(child.into_definition());
         let key = self.children.insert(ChildEntry::new(
             id.clone(),
             formatted_path,
-            Arc::clone(&child.inner),
+            definition,
+            None,
             self.meta.default_restart_intensity,
             self.next_child_instance,
         ));
@@ -319,6 +356,67 @@ impl SupervisorRuntime {
             self.child_order.retain(|&existing| existing != key);
             self.children.remove(key);
             return Err(map_supervisor_error_to_control(err));
+        }
+
+        Ok(())
+    }
+
+    fn add_supervisor(
+        &mut self,
+        id: String,
+        supervisor: SupervisorSpec,
+    ) -> Result<(), ControlError> {
+        if self.state == SupervisorState::Stopping {
+            return Err(ControlError::SupervisorStopping);
+        }
+        if id.is_empty() {
+            return Err(ControlError::InvalidConfig("child id must not be empty"));
+        }
+        if let Some(intensity) = supervisor.restart_intensity {
+            intensity
+                .validate()
+                .map_err(|error| map_build_error_to_control(&id, error))?;
+        }
+        if self.children_by_id.contains_key(&id) {
+            return Err(ControlError::DuplicateChildId(id));
+        }
+
+        let stable = supervisor.supervisor.stable_channels();
+        let definition = Arc::new(ChildDefinition::supervisor(id.clone(), supervisor));
+        let formatted_path = format_child_path(&self.meta.path_prefix, &id);
+        let key = self.children.insert(ChildEntry::new(
+            id.clone(),
+            formatted_path,
+            definition,
+            Some(Arc::clone(&stable)),
+            self.meta.default_restart_intensity,
+            self.next_child_instance,
+        ));
+        self.next_child_instance = self.next_child_instance.saturating_add(1);
+        self.children_by_id.insert(id.clone(), key);
+        self.child_order.push(key);
+        self.nested_handles
+            .lock()
+            .expect("nested handle map poisoned")
+            .insert(id.clone(), stable.handle());
+        self.nested_channels
+            .lock()
+            .expect("nested channel map poisoned")
+            .insert(id.clone(), stable);
+
+        if let Err(error) = self.spawn_child(key) {
+            self.children_by_id.remove(&id);
+            self.child_order.retain(|&existing| existing != key);
+            self.children.remove(key);
+            self.nested_handles
+                .lock()
+                .expect("nested handle map poisoned")
+                .remove(&id);
+            self.nested_channels
+                .lock()
+                .expect("nested channel map poisoned")
+                .remove(&id);
+            return Err(map_supervisor_error_to_control(error));
         }
 
         Ok(())
@@ -347,6 +445,26 @@ impl SupervisorRuntime {
         self.publish_snapshot();
     }
 
+    fn handle_nested_event(&mut self, notification: NestedEventNotification) {
+        let Some(entry) = self.children.get_mut(notification.parent_key) else {
+            return;
+        };
+        if entry.instance != notification.parent_instance
+            || entry.runtime.generation != notification.generation
+        {
+            return;
+        }
+
+        if let Some(state) = entry.nested_snapshot_state.as_ref() {
+            entry.nested_snapshot = state.latest();
+        }
+        self.send_event(SupervisorEvent::Nested {
+            id: notification.id,
+            generation: notification.generation,
+            event: Box::new(notification.event),
+        });
+    }
+
     async fn remove_child(&mut self, id: String) -> Result<(), ControlError> {
         if self.state == SupervisorState::Stopping {
             return Err(ControlError::SupervisorStopping);
@@ -369,8 +487,8 @@ impl SupervisorRuntime {
                 entry.runtime.state = RuntimeChildState::Stopping;
             }
             (
-                entry.runtime.spec.shutdown_policy.mode,
-                entry.runtime.spec.shutdown_policy.grace,
+                entry.runtime.definition.shutdown_policy.mode,
+                entry.runtime.definition.shutdown_policy.grace,
                 active,
                 was_running,
             )
@@ -546,6 +664,16 @@ impl SupervisorRuntime {
         }
         self.children_by_id.remove(&entry.id);
         self.child_order.retain(|&existing| existing != key);
+        if matches!(&entry.runtime.definition.kind, ChildKind::Supervisor(_)) {
+            self.nested_handles
+                .lock()
+                .expect("nested handle map poisoned")
+                .remove(&entry.id);
+            self.nested_channels
+                .lock()
+                .expect("nested channel map poisoned")
+                .remove(&entry.id);
+        }
         self.send_event(SupervisorEvent::ChildRemoved { id: entry.id });
     }
 
@@ -567,7 +695,7 @@ impl SupervisorRuntime {
             return Ok(());
         }
 
-        let restart_policy = self.children[classified.key].runtime.spec.restart;
+        let restart_policy = self.children[classified.key].runtime.definition.restart;
 
         if restart_policy.should_restart(classified.status.is_failure()) {
             match self.meta.strategy {
@@ -717,7 +845,7 @@ impl SupervisorRuntime {
         for key in keys {
             let entry = &self.children[key];
             if entry.membership != MembershipState::Active
-                || matches!(entry.runtime.spec.restart, Restart::Temporary)
+                || matches!(entry.runtime.definition.restart, Restart::Temporary)
             {
                 continue;
             }
@@ -834,11 +962,18 @@ impl SupervisorRuntime {
         self.meta
             .observability
             .emit_event(&event, self.running_child_count(), child_path);
-        let _ = self.events.send(event);
+        let _ = self.events.send(event.clone());
+        if let Some(parent_link) = self.meta.parent_link.as_ref() {
+            parent_link.forward_event(event);
+        }
     }
 
     pub(crate) fn publish_snapshot(&self) {
-        let _ = self.snapshots.send_replace(self.snapshot_view());
+        let snapshot = self.snapshot_view();
+        let _ = self.snapshots.send_replace(snapshot.clone());
+        if let Some(parent_link) = self.meta.parent_link.as_ref() {
+            parent_link.publish_snapshot(snapshot);
+        }
     }
 
     fn snapshot_view(&self) -> SupervisorSnapshot {

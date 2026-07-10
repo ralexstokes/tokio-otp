@@ -54,30 +54,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }))
         .build()?;
 
-    handle.add_child(nested.into_child_spec("nested")).await?;
+    handle.add_supervisor("nested", nested).await?;
     wait_for_nested_supervisor_started(&mut events, "nested").await?;
     wait_for_nested_child_started(&mut events, "nested", "seed").await?;
     println!("nested supervisor added at runtime");
 
-    handle
-        .add_child_at(
-            ["nested"],
-            ChildSpec::new("nested-cache", |ctx| async move {
-                println!("nested-cache started in generation {}", ctx.generation());
+    let nested = handle
+        .supervisor("nested")
+        .expect("nested supervisor handle should be available");
+    nested
+        .add_child(ChildSpec::new("nested-cache", |ctx| async move {
+            println!("nested-cache started in generation {}", ctx.generation());
 
-                loop {
-                    tokio::select! {
-                        _ = ctx.shutdown_token().cancelled() => {
-                            println!("nested-cache received removal/shutdown");
-                            return Ok(());
-                        }
-                        _ = sleep(Duration::from_millis(50)) => {
-                            println!("nested-cache tick");
-                        }
+            loop {
+                tokio::select! {
+                    _ = ctx.shutdown_token().cancelled() => {
+                        println!("nested-cache received removal/shutdown");
+                        return Ok(());
+                    }
+                    _ = sleep(Duration::from_millis(50)) => {
+                        println!("nested-cache tick");
                     }
                 }
-            }),
-        )
+            }
+        }))
         .await?;
 
     wait_for_nested_child_started(&mut events, "nested", "nested-cache").await?;
@@ -86,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Let the child do visible work before demonstrating runtime removal.
     sleep(Duration::from_millis(150)).await;
 
-    handle.remove_child_at(["nested"], "nested-cache").await?;
+    nested.remove_child("nested-cache").await?;
     wait_for_nested_child_removed(&mut events, "nested", "nested-cache").await?;
     println!("nested-cache removed from nested supervisor");
 

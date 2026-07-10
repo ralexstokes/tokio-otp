@@ -1,13 +1,14 @@
 use crate::{
+    child::ChildKind,
     context::{ChildContext, SupervisorToken},
     error::SupervisorError,
-    event::{NestedEventForwarder, SupervisorEvent, with_nested_event_forwarder},
-    handle::{NestedControlScope, with_nested_control_scope},
+    event::{EventSink, SupervisorEvent},
     runtime::{
         child_runtime::RuntimeChildState,
         supervision::{ChildEnvelope, SupervisorRuntime, TaskMeta},
     },
-    snapshot::{NestedSnapshotForwarder, with_nested_snapshot_forwarder},
+    snapshot::{NestedSnapshotState, SnapshotCell},
+    supervisor::ParentLink,
 };
 use tracing::{Instrument, info_span};
 
@@ -20,11 +21,12 @@ impl SupervisorRuntime {
             child_id,
             generation,
             old_generation,
-            factory,
+            kind,
             ctx,
             counted_before,
             instance,
             snapshot_state,
+            nested_channels,
         ) = {
             let entry = self.children.get_mut(key).ok_or_else(|| {
                 SupervisorError::Internal(format!("missing child slot for key {key}"))
@@ -54,8 +56,14 @@ impl SupervisorRuntime {
             child.state = RuntimeChildState::Starting;
             child.next_restart_deadline = None;
             entry.nested_snapshot = None;
-            let snapshot_state = crate::snapshot::NestedSnapshotState::default();
-            entry.nested_snapshot_state = Some(snapshot_state.clone());
+            let snapshot_state = if matches!(&child.definition.kind, ChildKind::Supervisor(_)) {
+                let state = NestedSnapshotState::default();
+                entry.nested_snapshot_state = Some(state.clone());
+                Some(state)
+            } else {
+                entry.nested_snapshot_state = None;
+                None
+            };
 
             let child_id = entry.id.clone();
             let ctx = ChildContext::new(
@@ -64,30 +72,56 @@ impl SupervisorRuntime {
                 child_token,
                 SupervisorToken::new(self.group_token.clone()),
             );
-            let factory = child.spec.factory.clone();
+            let kind = child.definition.kind.clone();
+            let nested_channels = entry.nested_channels.clone();
 
             (
                 child_id,
                 generation,
                 old_generation,
-                factory,
+                kind,
                 ctx,
                 counted_before,
                 instance,
                 snapshot_state,
+                nested_channels,
             )
         };
-        let forwarder =
-            NestedEventForwarder::new(self.events.clone(), child_id.clone(), generation);
-        let snapshot_forwarder = NestedSnapshotForwarder::new(
-            self.nested_snapshot_tx.clone(),
-            snapshot_state,
-            key,
-            instance,
-            generation,
-        );
-        let control_scope =
-            NestedControlScope::new(self.meta.registry.clone(), self.child_path(key));
+        let child_path_segments = self.child_path(key);
+        let nested_run = if matches!(&kind, ChildKind::Supervisor(_)) {
+            let channels = nested_channels.ok_or_else(|| {
+                SupervisorError::Internal(format!(
+                    "missing stable channels for nested supervisor {child_id}"
+                ))
+            })?;
+            let snapshot_state = snapshot_state.ok_or_else(|| {
+                SupervisorError::Internal(format!(
+                    "missing snapshot cell for nested supervisor {child_id}"
+                ))
+            })?;
+            Some((
+                ParentLink {
+                    event_sink: EventSink::new(
+                        self.nested_event_tx.clone(),
+                        key,
+                        instance,
+                        self.meta.observability.clone(),
+                    ),
+                    snapshot_cell: SnapshotCell::new(
+                        self.nested_snapshot_tx.clone(),
+                        snapshot_state,
+                        key,
+                        instance,
+                    ),
+                    id: child_id.clone(),
+                    generation,
+                },
+                channels,
+                child_path_segments,
+            ))
+        } else {
+            None
+        };
         let child_path = self.meta.observability.child_path(&child_id);
         let supervisor_name = self.meta.observability.supervisor_name().to_owned();
         let supervisor_path = self.meta.observability.supervisor_path().to_owned();
@@ -102,14 +136,16 @@ impl SupervisorRuntime {
 
         let abort_handle = self.join_set.spawn(
             async move {
-                let result = with_nested_control_scope(control_scope, async move {
-                    with_nested_snapshot_forwarder(snapshot_forwarder, async move {
-                        let future = factory.make(ctx);
-                        with_nested_event_forwarder(forwarder, future).await
-                    })
-                    .await
-                })
-                .await;
+                let result = match kind {
+                    ChildKind::Task(factory) => factory.make(ctx).await,
+                    ChildKind::Supervisor(supervisor) => {
+                        let (parent_link, channels, child_path_segments) =
+                            nested_run.expect("nested run state validated before spawn");
+                        supervisor
+                            .run_as_child(ctx, parent_link, channels, child_path_segments)
+                            .await
+                    }
+                };
                 ChildEnvelope {
                     key,
                     instance,

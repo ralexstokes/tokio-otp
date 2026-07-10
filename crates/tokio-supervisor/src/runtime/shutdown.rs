@@ -76,8 +76,8 @@ impl SupervisorRuntime {
                 continue;
             }
 
-            let grace = child.runtime.spec.shutdown_policy.grace;
-            match child.runtime.spec.shutdown_policy.mode {
+            let grace = child.runtime.definition.shutdown_policy.grace;
+            match child.runtime.definition.shutdown_policy.mode {
                 ShutdownMode::Abort => {}
                 ShutdownMode::Cooperative | ShutdownMode::CooperativeThenAbort => {
                     max_grace = Some(max_grace.map_or(grace, |current| current.max(grace)));
@@ -86,7 +86,10 @@ impl SupervisorRuntime {
         }
 
         abort_matching_children(&self.children, |child| {
-            matches!(child.runtime.spec.shutdown_policy.mode, ShutdownMode::Abort)
+            matches!(
+                child.runtime.definition.shutdown_policy.mode,
+                ShutdownMode::Abort
+            )
         });
         tokio::task::yield_now().await;
         self.drain_ready_joins().await?;
@@ -182,7 +185,7 @@ fn cooperative_timeout_names(children: &Slab<ChildEntry>) -> String {
         child.membership != MembershipState::Removed
             && child.runtime.state.is_active()
             && matches!(
-                child.runtime.spec.shutdown_policy.mode,
+                child.runtime.definition.shutdown_policy.mode,
                 ShutdownMode::Cooperative
             )
     })

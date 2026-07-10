@@ -1,6 +1,8 @@
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+
+use crate::observability::SupervisorObservability;
 
 /// Snapshot of how a child task exited.
 ///
@@ -145,47 +147,49 @@ impl SupervisorEvent {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct NestedEventForwarder {
-    events: broadcast::Sender<SupervisorEvent>,
-    parent_id: String,
-    generation: u64,
+pub(crate) struct NestedEventNotification {
+    pub(crate) parent_key: usize,
+    pub(crate) parent_instance: u64,
+    pub(crate) id: String,
+    pub(crate) generation: u64,
+    pub(crate) event: SupervisorEvent,
 }
 
-impl NestedEventForwarder {
+#[derive(Clone)]
+pub(crate) struct EventSink {
+    notifications: mpsc::Sender<NestedEventNotification>,
+    parent_key: usize,
+    parent_instance: u64,
+    observability: SupervisorObservability,
+}
+
+impl EventSink {
     pub(crate) fn new(
-        events: broadcast::Sender<SupervisorEvent>,
-        parent_id: String,
-        generation: u64,
+        notifications: mpsc::Sender<NestedEventNotification>,
+        parent_key: usize,
+        parent_instance: u64,
+        observability: SupervisorObservability,
     ) -> Self {
         Self {
-            events,
-            parent_id,
-            generation,
+            notifications,
+            parent_key,
+            parent_instance,
+            observability,
         }
     }
-}
 
-tokio::task_local! {
-    static NESTED_EVENT_FORWARDER: NestedEventForwarder;
-}
-
-pub(crate) async fn with_nested_event_forwarder<Fut>(
-    forwarder: NestedEventForwarder,
-    future: Fut,
-) -> Fut::Output
-where
-    Fut: Future,
-{
-    NESTED_EVENT_FORWARDER.scope(forwarder, future).await
-}
-
-pub(crate) fn forward_nested_event(event: SupervisorEvent) {
-    let _ = NESTED_EVENT_FORWARDER.try_with(|forwarder| {
-        let _ = forwarder.events.send(SupervisorEvent::Nested {
-            id: forwarder.parent_id.clone(),
-            generation: forwarder.generation,
-            event: Box::new(event),
-        });
-    });
+    pub(crate) fn forward(&self, id: String, generation: u64, event: SupervisorEvent) {
+        let notification = NestedEventNotification {
+            parent_key: self.parent_key,
+            parent_instance: self.parent_instance,
+            id,
+            generation,
+            event,
+        };
+        if let Err(error) = self.notifications.try_send(notification)
+            && matches!(error, mpsc::error::TrySendError::Full(_))
+        {
+            self.observability.emit_nested_event_forwarding_lag(1);
+        }
+    }
 }
