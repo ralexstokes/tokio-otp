@@ -202,7 +202,7 @@
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Forwards to `tokio-supervisor/metrics` lifecycle metrics. |
 //! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
-//! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries. |
+//! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries; serialization for topology metadata. |
 
 mod actor;
 mod builder;
@@ -210,6 +210,7 @@ mod builder;
 pub mod codec;
 mod runtime;
 mod supervised_actors;
+mod topology;
 
 /// Common imports for `tokio-otp` consumers.
 ///
@@ -228,7 +229,8 @@ pub mod prelude {
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
         CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
         RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
-        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, TryRecvError,
+        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, TopologyEdge, TopologyMetadata,
+        TopologyNode, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -254,3 +256,4 @@ pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
 pub use supervised_actors::SupervisedActors;
 pub use tokio::sync::mpsc::error::TryRecvError;
+pub use topology::{TopologyEdge, TopologyMetadata, TopologyNode};
