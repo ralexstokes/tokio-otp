@@ -109,6 +109,16 @@ impl<M> ActorRef<M> {
     /// no restart scheduled, or when the binding source has been dropped.
     ///
     /// Cancelling this future while it is waiting drops the message.
+    ///
+    /// # Delivery contract
+    ///
+    /// Delivery is **at-most-once**. `Ok` means the message was accepted by
+    /// the current incarnation's mailbox, not that it will be processed:
+    /// mailboxes are incarnation-owned, so messages accepted by an
+    /// incarnation that stops before reading them are lost with it. The loss
+    /// windows are restart and shutdown. Stronger guarantees
+    /// (acknowledgements, redelivery) are user protocol built with
+    /// [`call`](Self::call) and [`Reply`], not transport features.
     pub async fn send(&self, message: M) -> Result<(), SendError> {
         let mut binding = self.binding.clone();
         let mut message = message;

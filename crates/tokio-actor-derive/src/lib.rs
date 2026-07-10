@@ -91,12 +91,20 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, spanned::Spanned};
 /// # }
 /// ```
 ///
-/// # Actor ids
+/// # Cycles and bounded mailboxes
 ///
-/// Field names become actor ids verbatim. The id is what
-/// `Graph::actor_ref::<M>("frontend")` looks up, and it appears in tracing
-/// fields, metric labels, and supervisor child ids — renaming a field renames
-/// all of those, but never affects type checking.
+/// The derive makes cyclic wiring easy, but mailboxes stay bounded, so
+/// cycles inherit the deadlock hazard: two actors that `send` to each other
+/// while both mailboxes are full wait forever, and a `call` cycle deadlocks
+/// at depth one. Use `try_send` on feedback edges, and `call` only
+/// "downhill" along a DAG ordering of the topology.
+///
+/// # Actor labels
+///
+/// Field names become actor labels verbatim. Labels are display names, not
+/// addresses: they appear in tracing fields, actor stats, and supervisor
+/// child ids — renaming a field renames all of those, but never affects
+/// type checking or message routing.
 ///
 /// # Visibility
 ///

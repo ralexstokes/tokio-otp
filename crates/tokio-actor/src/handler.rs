@@ -6,7 +6,18 @@ use crate::{
 };
 
 /// How the provided [`Actor`] receive loop treats messages still
-/// queued when graph shutdown is requested.
+/// queued when shutdown is requested.
+///
+/// # Start and shutdown are concurrent
+///
+/// Actors do not start or stop in sequence. At startup, supervised actors
+/// spawn in declaration order but initialize concurrently with no readiness
+/// gating; dependency ordering self-resolves because sends wait for the
+/// target's mailbox to bind. At shutdown, every sibling is cancelled at the
+/// same time under one shared grace deadline. A draining actor can therefore
+/// observe a [`SendError`](crate::SendError) from a sibling that has already
+/// stopped; drain handlers must tolerate that (skip or log the failed send)
+/// rather than propagate it, or the error fails the draining actor itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum DrainPolicy {
@@ -21,10 +32,11 @@ pub enum DrainPolicy {
     /// Close the mailbox to new sends, handle every message already queued,
     /// then stop.
     ///
-    /// The drain is bounded by the same shutdown backstops as any actor run:
+    /// The drain is not separately time-bounded; the surrounding shutdown
+    /// backstop applies:
     /// [`GraphBuilder::actor_shutdown_timeout`](crate::GraphBuilder::actor_shutdown_timeout)
-    /// in graph-run mode, or the supervisor child shutdown policy when a
-    /// runnable actor is hosted under `tokio-supervisor`.
+    /// for the actor run itself, and the supervisor child shutdown policy
+    /// when the actor is hosted under `tokio-supervisor`.
     Drain,
 }
 
@@ -36,6 +48,18 @@ pub enum DrainPolicy {
 ///
 /// Hand-writing [`RawActor::run`] remains the escape hatch for actors that need
 /// custom loop control.
+///
+/// # Restart resets state
+///
+/// Every run clones the wiring-time actor value before calling any hook:
+/// `Clone` is the reset mechanism, so a supervised restart starts from the
+/// actor's initial state, not the state at the crash. Acquire
+/// per-incarnation resources (connections, files, sessions) in
+/// [`on_start`](Self::on_start) — the OTP `init` idiom — where a failure is
+/// an ordinary restartable failure. State that must survive restarts belongs
+/// behind shared handles (an `Arc`, a database, another actor's
+/// [`ActorRef`](crate::ActorRef)): cloning shares those instead of resetting
+/// them.
 pub trait Actor: Clone + Send + Sync + 'static {
     /// The message type this handler receives.
     type Msg: Send + 'static;
@@ -51,6 +75,10 @@ pub trait Actor: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = ActorResult> + Send;
 
     /// Runs once before the first message of each actor run.
+    ///
+    /// This is the place to acquire per-incarnation resources; an error here
+    /// fails the run like a [`handle`](Self::handle) error, so under
+    /// supervision it is an ordinary restartable failure.
     fn on_start(
         &mut self,
         _ctx: &ActorContext<Self::Msg>,

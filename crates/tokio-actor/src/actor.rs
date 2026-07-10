@@ -19,7 +19,9 @@ pub type ActorResult = Result<(), BoxError>;
 ///
 /// Implementors can use
 /// `async fn run(&self, ctx: ActorContext<Self::Msg>) -> ActorResult` in their
-/// trait impls. The actor value is cloned for each graph run.
+/// trait impls. The actor value is cloned for each run, so a restart resets
+/// state to the wiring-time value; per-incarnation resources are acquired
+/// inside [`run`](Self::run).
 ///
 /// This trait is deliberately not implemented for plain closures: an actor is
 /// a named type that implements `RawActor`, which keeps the message type visible

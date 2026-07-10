@@ -47,6 +47,17 @@ impl<M> ActorSlot<M> {
 /// so refs can be captured by other actors' state. Cyclic graphs use
 /// [`slot`](Self::slot) to create refs first and [`define`](Self::define) to
 /// fill the slots once actor values have been wired.
+///
+/// # Bounded mailboxes and cycles
+///
+/// Every mailbox is bounded ([`mailbox_capacity`](Self::mailbox_capacity)),
+/// so backpressure propagates through [`send`](ActorRef::send). In a cyclic
+/// graph this can deadlock: two actors that `send` to each other while both
+/// mailboxes are full wait forever, and a [`call`](ActorRef::call) cycle
+/// deadlocks at depth one because the callee cannot answer while the caller
+/// awaits the reply. Idioms: use [`try_send`](ActorRef::try_send) on
+/// feedback edges, and `call` only "downhill" along a DAG ordering of the
+/// graph.
 pub struct GraphBuilder {
     builder_id: u64,
     name: Option<String>,

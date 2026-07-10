@@ -1,8 +1,17 @@
-use std::{future::IntoFuture, io, marker::PhantomData, time::Duration};
+use std::{
+    future::IntoFuture,
+    io,
+    marker::PhantomData,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_actor::{
-    ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, SendError,
+    Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Reply, SendError,
 };
 use tokio_otp::{DynamicActorOptions, Runtime, SupervisedActors};
 use tokio_supervisor::{
@@ -448,6 +457,106 @@ async fn send_fails_after_restart_intensity_is_exhausted() {
         .await
         .expect("send resolved after the supervisor gave up");
     assert!(matches!(result, Err(SendError::ActorTerminated { .. })));
+}
+
+enum CounterMsg {
+    Add(u32),
+    Total(Reply<u32>),
+    Crash,
+}
+
+#[derive(Clone)]
+struct ResettingCounter {
+    total: u32,
+    on_starts: Arc<AtomicUsize>,
+}
+
+impl Actor for ResettingCounter {
+    type Msg = CounterMsg;
+
+    async fn on_start(&mut self, _ctx: &ActorContext<CounterMsg>) -> ActorResult {
+        self.on_starts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn handle(
+        &mut self,
+        message: CounterMsg,
+        _ctx: &ActorContext<CounterMsg>,
+    ) -> ActorResult {
+        match message {
+            CounterMsg::Add(n) => {
+                self.total += n;
+                Ok(())
+            }
+            CounterMsg::Total(reply) => {
+                reply.send(self.total);
+                Ok(())
+            }
+            CounterMsg::Crash => Err("deliberate crash".into()),
+        }
+    }
+}
+
+/// D10: `Clone` is the reset mechanism — a supervised restart clones the
+/// wiring-time actor value, so the new incarnation starts from initial
+/// state, and `on_start` runs once per incarnation.
+#[tokio::test]
+async fn supervised_restart_resets_actor_state_to_the_wiring_time_value() {
+    let on_starts = Arc::new(AtomicUsize::new(0));
+    let mut builder = GraphBuilder::new();
+    let counter = builder.actor(
+        "counter",
+        ResettingCounter {
+            total: 0,
+            on_starts: Arc::clone(&on_starts),
+        },
+    );
+    let graph = builder.build().expect("valid graph");
+
+    let runtime = Runtime::builder()
+        .graph(graph)
+        .restart(Restart::Permanent)
+        .build()
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+
+    counter.send(CounterMsg::Add(5)).await.expect("add sent");
+    assert_eq!(
+        timeout(Duration::from_secs(1), counter.call(CounterMsg::Total))
+            .await
+            .expect("total resolved")
+            .expect("total replied"),
+        5
+    );
+
+    let restart = handle
+        .monitor_restart("counter")
+        .expect("counter child should be known");
+    counter.send(CounterMsg::Crash).await.expect("crash sent");
+    timeout(Duration::from_secs(2), restart.into_future())
+        .await
+        .expect("restart observed")
+        .expect("restart monitor succeeded");
+
+    assert_eq!(
+        timeout(Duration::from_secs(2), counter.call(CounterMsg::Total))
+            .await
+            .expect("total resolved after restart")
+            .expect("total replied after restart"),
+        0,
+        "restart resets state to the wiring-time value"
+    );
+    assert_eq!(
+        on_starts.load(Ordering::SeqCst),
+        2,
+        "on_start runs once per incarnation"
+    );
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("supervisor shut down cleanly");
 }
 
 #[test]

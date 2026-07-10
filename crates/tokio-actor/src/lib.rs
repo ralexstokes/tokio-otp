@@ -32,7 +32,13 @@
 //! This is especially useful when graph actors are hosted as individual
 //! supervised children through `tokio-otp`.
 //!
-//! # Message loss at shutdown and restart
+//! # Delivery contract: at-most-once
+//!
+//! Mailboxes are incarnation-owned: each actor run binds a fresh mailbox, and
+//! messages accepted by a dead incarnation are lost with it. Delivery is
+//! therefore **at-most-once**, with loss windows at restart and shutdown.
+//! Stronger guarantees (acknowledgements, redelivery) are user protocol built
+//! on [`ActorRef::call`] and [`Reply`], not transport features.
 //!
 //! [`ActorContext::recv`] is fail-fast during shutdown: it returns `None` as
 //! soon as shutdown is requested, even when messages are still queued. A
@@ -52,7 +58,9 @@
 //! so messages queued behind a poison message are dropped with the old
 //! mailbox. [`ActorRef::send`] waits across restart windows when supervision
 //! policy says a rebind is expected, but it does not resurrect messages that
-//! were already accepted by the old mailbox.
+//! were already accepted by the old mailbox. This is deliberate: a mailbox
+//! that survived restarts would redeliver the poison message that caused the
+//! crash, converting one failure into a restart loop.
 //!
 //! # Observability
 //!

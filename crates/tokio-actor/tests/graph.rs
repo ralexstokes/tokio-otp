@@ -978,13 +978,13 @@ async fn send_to_dropped_never_started_graph_returns_actor_terminated() {
 
 mod runnable_actor {
     use std::{
-        fmt,
-        future::pending,
+        future::{Future, pending, poll_fn},
         marker::PhantomData,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        task::Poll,
         time::Duration,
     };
 
@@ -994,12 +994,10 @@ mod runnable_actor {
         time::{sleep, timeout},
     };
     use tokio_actor::{
-        ActorContext, ActorRef, ActorResult, ActorRunError, BoxError, Graph, GraphBuilder,
-        RawActor, RebindPolicy, RunnableActor, RunnableActorFactory, SendError,
+        Actor, ActorContext, ActorRef, ActorResult, ActorRunError, BoxError, DrainPolicy, Graph,
+        GraphBuilder, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory, SendError,
     };
     use tokio_util::sync::CancellationToken;
-    use tracing::{Dispatch, field::Visit};
-    use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     struct Drain<M>(PhantomData<fn(M)>);
 
@@ -1198,57 +1196,6 @@ mod runnable_actor {
             .expect("factory actor uses inherited shutdown timeout");
     }
 
-    #[derive(Clone, Default)]
-    struct MailboxClosedCounter {
-        count: Arc<AtomicUsize>,
-    }
-
-    impl MailboxClosedCounter {
-        fn count(&self) -> usize {
-            self.count.load(Ordering::SeqCst)
-        }
-    }
-
-    impl<S> Layer<S> for MailboxClosedCounter
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            let mut visitor = RejectionVisitor::default();
-            event.record(&mut visitor);
-            if visitor.mailbox_closed {
-                self.count.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-
-    #[derive(Default)]
-    struct RejectionVisitor {
-        mailbox_closed: bool,
-    }
-
-    impl Visit for RejectionVisitor {
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            if field.name() == "reason" && value == "mailbox_closed" {
-                self.mailbox_closed = true;
-            }
-        }
-
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-            if field.name() == "reason" && format!("{value:?}").contains("mailbox_closed") {
-                self.mailbox_closed = true;
-            }
-        }
-    }
-
-    fn mailbox_closed_counter_dispatch(counter: MailboxClosedCounter) -> Dispatch {
-        Dispatch::new(
-            tracing_subscriber::registry()
-                .with(tracing_subscriber::filter::LevelFilter::TRACE)
-                .with(counter),
-        )
-    }
-
     async fn wait_for_stale_mailbox(actor_ref: &ActorRef<String>) {
         timeout(Duration::from_secs(1), async {
             loop {
@@ -1325,30 +1272,19 @@ mod runnable_actor {
             .expect("actor reported stale window");
         wait_for_stale_mailbox(&actor_ref).await;
 
-        let counter = MailboxClosedCounter::default();
-        let dispatch = mailbox_closed_counter_dispatch(counter.clone());
-        let guard = tracing::dispatcher::set_default(&dispatch);
-
+        // The stale mailbox is closed but still bound, so the first poll of
+        // a send deterministically traverses the closed-mailbox branch. It
+        // must park waiting for the binding to change: completing would mean
+        // delivery into a dead mailbox, and erroring would break restart
+        // ride-through.
         let sending_ref = actor_ref.clone();
-        let send_task = tokio::spawn(async move { sending_ref.send("held".to_owned()).await });
-        timeout(Duration::from_secs(1), async {
-            while counter.count() == 0 {
-                sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("send task observed stale closed mailbox in time");
+        let mut send = Box::pin(async move { sending_ref.send("held".to_owned()).await });
+        let first_poll = poll_fn(|cx| Poll::Ready(send.as_mut().poll(cx))).await;
         assert!(
-            !send_task.is_finished(),
-            "send should wait for a new binding"
+            first_poll.is_pending(),
+            "send should wait for a new binding instead of resolving against the stale mailbox"
         );
-
-        drop(guard);
-        assert_eq!(
-            counter.count(),
-            1,
-            "stale closed mailbox should be observed once before waiting"
-        );
+        let send_task = tokio::spawn(send);
 
         release.notify_one();
         first_task
@@ -1626,5 +1562,190 @@ mod runnable_actor {
             worker_ref.try_send("late".to_owned()),
             Err(SendError::ActorTerminated { actor_id }) if actor_id == "worker"
         ));
+    }
+
+    #[derive(Clone)]
+    struct PoisonableWorker {
+        started: mpsc::UnboundedSender<()>,
+        release: Arc<Notify>,
+        seen: mpsc::UnboundedSender<(usize, u32)>,
+        incarnation: Arc<AtomicUsize>,
+    }
+
+    impl RawActor for PoisonableWorker {
+        type Msg = u32;
+
+        async fn run(&self, mut ctx: ActorContext<u32>) -> ActorResult {
+            let incarnation = self.incarnation.fetch_add(1, Ordering::SeqCst);
+            self.started.send(()).expect("receiver alive");
+            self.release.notified().await;
+            while let Some(message) = ctx.recv().await {
+                if message == 0 {
+                    return Err("poison".into());
+                }
+                self.seen
+                    .send((incarnation, message))
+                    .expect("receiver alive");
+            }
+            Ok(())
+        }
+    }
+
+    /// D10: mailboxes are incarnation-owned. Messages accepted by an
+    /// incarnation that dies before reading them are lost with it — the next
+    /// incarnation binds a fresh mailbox and never sees them.
+    #[tokio::test]
+    async fn messages_accepted_by_a_dead_incarnation_are_lost_at_restart() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(Notify::new());
+
+        let mut builder = GraphBuilder::new();
+        builder.mailbox_capacity(4);
+        let worker_ref = builder.actor(
+            "worker",
+            PoisonableWorker {
+                started: started_tx,
+                release: Arc::clone(&release),
+                seen: seen_tx,
+                incarnation: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        let graph = builder.build().expect("valid graph");
+        let worker = single_actor(&graph, "worker");
+
+        // Run 1: a poison message plus two messages queued behind it, all
+        // accepted by the first incarnation's mailbox before it reads any.
+        let (_first_stop, first_task) =
+            start_actor_with_policy(worker.clone(), RebindPolicy::OnFailure);
+        started_rx.recv().await.expect("first incarnation started");
+        worker_ref.send(0).await.expect("poison accepted");
+        worker_ref
+            .send(1)
+            .await
+            .expect("first queued send accepted");
+        worker_ref
+            .send(2)
+            .await
+            .expect("second queued send accepted");
+        release.notify_one();
+
+        let result = timeout(Duration::from_secs(1), first_task)
+            .await
+            .expect("first run ended in time")
+            .expect("first run task joined");
+        assert!(matches!(
+            result,
+            Err(ActorRunError::Failed { actor_id, .. }) if actor_id == "worker"
+        ));
+
+        // Run 2 binds a fresh mailbox: the accepted-but-unread messages died
+        // with the first incarnation.
+        let (second_stop, second_task) = start_actor_with_policy(worker, RebindPolicy::OnFailure);
+        started_rx.recv().await.expect("second incarnation started");
+        release.notify_one();
+        worker_ref
+            .send(3)
+            .await
+            .expect("send to second incarnation");
+        assert_eq!(
+            timeout(Duration::from_secs(1), seen_rx.recv())
+                .await
+                .expect("second incarnation processed a message"),
+            Some((1, 3))
+        );
+
+        stop_actor(second_stop, second_task)
+            .await
+            .expect("second run stopped cleanly");
+        assert!(
+            seen_rx.try_recv().is_err(),
+            "messages queued behind the poison were never delivered"
+        );
+    }
+
+    #[derive(Clone)]
+    struct DrainForwarder {
+        sink: ActorRef<u32>,
+        started: mpsc::UnboundedSender<()>,
+        release: Arc<Notify>,
+        outcomes: mpsc::UnboundedSender<Result<(), SendError>>,
+    }
+
+    impl Actor for DrainForwarder {
+        type Msg = u32;
+
+        async fn on_start(&mut self, _ctx: &ActorContext<u32>) -> ActorResult {
+            self.started.send(()).expect("receiver alive");
+            self.release.notified().await;
+            Ok(())
+        }
+
+        async fn handle(&mut self, message: u32, _ctx: &ActorContext<u32>) -> ActorResult {
+            // D10: shutdown is concurrent, so a sibling may already be gone.
+            // A drain must treat its SendError as skippable, not fatal.
+            let outcome = self.sink.send(message).await;
+            self.outcomes.send(outcome).expect("receiver alive");
+            Ok(())
+        }
+
+        fn drain_policy(&self) -> DrainPolicy {
+            DrainPolicy::Drain
+        }
+    }
+
+    /// D10: siblings stop concurrently during shutdown, so a draining actor
+    /// observes `SendError` from already-stopped siblings; tolerating it
+    /// lets the drain and the actor finish cleanly.
+    #[tokio::test]
+    async fn drain_tolerates_send_errors_from_a_stopped_sibling() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (outcomes_tx, mut outcomes_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(Notify::new());
+
+        let mut builder = GraphBuilder::new();
+        let (sink_slot, sink_ref) = builder.slot::<u32>("sink");
+        let forwarder_ref = builder.actor(
+            "forwarder",
+            DrainForwarder {
+                sink: sink_ref,
+                started: started_tx,
+                release: Arc::clone(&release),
+                outcomes: outcomes_tx,
+            },
+        );
+        builder.define(sink_slot, Drain::<u32>::new());
+        let graph = builder.build().expect("valid graph");
+
+        // The sink runs and stops first; its binding is terminated, exactly
+        // as when a supervisor stops siblings concurrently at shutdown.
+        let (sink_stop, sink_task) = start_actor(single_actor(&graph, "sink"));
+        stop_actor(sink_stop, sink_task)
+            .await
+            .expect("sink stopped cleanly");
+
+        let (forwarder_stop, forwarder_task) = start_actor(single_actor(&graph, "forwarder"));
+        started_rx.recv().await.expect("forwarder started");
+        forwarder_ref.send(1).await.expect("first message queued");
+        forwarder_ref.send(2).await.expect("second message queued");
+
+        forwarder_stop.cancel();
+        release.notify_one();
+
+        timeout(Duration::from_secs(1), forwarder_task)
+            .await
+            .expect("forwarder stopped in time")
+            .expect("forwarder task joined")
+            .expect("drain finished cleanly despite sibling send errors");
+
+        for expected in 1..=2 {
+            let outcome = outcomes_rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("drained message {expected} produced an outcome"));
+            assert!(
+                matches!(outcome, Err(SendError::ActorTerminated { ref actor_id }) if actor_id == "sink"),
+                "drained send observed the stopped sibling: {outcome:?}"
+            );
+        }
     }
 }
