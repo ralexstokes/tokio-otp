@@ -110,3 +110,11 @@ to a typed ref. Because the directory is self-hosted, *you* choose its
 semantics — namespacing, removal, versioning — instead of inheriting a
 framework registry's. The runnable version is
 `crates/tokio-otp/examples/directory.rs`.
+
+Note that a directory instance is homogeneous: `Directory<M>` holds refs to
+actors whose message type is that one `M`, and that is what makes lookups
+fully typed with no downcasting. If several message types need discovery, run
+one small directory per type. A single heterogeneous registry is possible by
+storing `Box<dyn Any>` and downcasting on `Get`, but that reintroduces the
+runtime type checks a stringly-typed framework registry would have imposed —
+which is exactly the cost this design avoids.
