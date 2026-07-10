@@ -33,7 +33,7 @@ If you have used Erlang/OTP or Elixir, the mapping is direct:
 | OTP concept | tokio-otp equivalent |
 |-------------|----------------------|
 | Supervisor + child specs | [`SupervisorBuilder`] + [`ChildSpec`] |
-| `one_for_one` / `one_for_all` | `Strategy::OneForOne` / `Strategy::OneForAll` |
+| `one_for_one` / `one_for_all` / `rest_for_one` | `Strategy::OneForOne` / `Strategy::OneForAll` / `Strategy::RestForOne` |
 | `permanent` / `transient` / `temporary` | `RestartPolicy::Always` / `RestartPolicy::OnFailure` / `RestartPolicy::Never` |
 | Restart intensity (`MaxR`/`MaxT`) | `RestartIntensity::new(max_restarts, within)` |
 | GenServer-ish process with a mailbox | An actor with an [`ActorContext`] |

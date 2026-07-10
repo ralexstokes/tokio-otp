@@ -389,6 +389,7 @@ pub(crate) fn strategy_label(strategy: Strategy) -> &'static str {
     match strategy {
         Strategy::OneForOne => "one_for_one",
         Strategy::OneForAll => "one_for_all",
+        Strategy::RestForOne => "rest_for_one",
     }
 }
 
