@@ -19,7 +19,7 @@ struct FailsOnce {
 impl RawActor for FailsOnce {
     type Msg = ();
 
-    async fn run(&self, ctx: ActorContext<()>) -> ActorResult {
+    async fn run(&mut self, ctx: ActorContext<()>) -> ActorResult {
         if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(io::Error::other("boom").into());
         }
@@ -36,7 +36,7 @@ struct Healthy {
 impl RawActor for Healthy {
     type Msg = ();
 
-    async fn run(&self, ctx: ActorContext<()>) -> ActorResult {
+    async fn run(&mut self, ctx: ActorContext<()>) -> ActorResult {
         self.runs.fetch_add(1, Ordering::SeqCst);
         ctx.shutdown_token().cancelled().await;
         Ok(())

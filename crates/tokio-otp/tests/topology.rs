@@ -212,7 +212,7 @@ struct Park;
 impl RawActor for Park {
     type Msg = ();
 
-    async fn run(&self, ctx: ActorContext<()>) -> ActorResult {
+    async fn run(&mut self, ctx: ActorContext<()>) -> ActorResult {
         ctx.shutdown_token().cancelled().await;
         Ok(())
     }

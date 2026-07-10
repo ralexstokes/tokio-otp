@@ -19,7 +19,7 @@ impl<M> Clone for Idle<M> {
 impl<M: Send + 'static> RawActor for Idle<M> {
     type Msg = M;
 
-    async fn run(&self, mut ctx: ActorContext<M>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<M>) -> ActorResult {
         while ctx.recv().await.is_some() {}
         Ok(())
     }

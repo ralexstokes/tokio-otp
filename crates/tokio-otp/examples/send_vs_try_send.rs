@@ -17,7 +17,7 @@ struct OneMessageSink {
 impl RawActor for OneMessageSink {
     type Msg = String;
 
-    async fn run(&self, mut ctx: ActorContext<String>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<String>) -> ActorResult {
         if let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("receiver alive");
         }

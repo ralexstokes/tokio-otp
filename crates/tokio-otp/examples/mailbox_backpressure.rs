@@ -15,7 +15,7 @@ struct ParkBeforeRecv {
 impl RawActor for ParkBeforeRecv {
     type Msg = &'static str;
 
-    async fn run(&self, mut ctx: ActorContext<&'static str>) -> ActorResult {
+    async fn run(&mut self, mut ctx: ActorContext<&'static str>) -> ActorResult {
         self.release.notified().await;
         while let Some(message) = ctx.recv().await {
             println!("worker received `{message}`");

@@ -18,10 +18,11 @@ pub type ActorResult = Result<(), BoxError>;
 /// custom loop control.
 ///
 /// Implementors can use
-/// `async fn run(&self, ctx: ActorContext<Self::Msg>) -> ActorResult` in their
-/// trait impls. The actor value is cloned for each run, so a restart resets
-/// state to the wiring-time value; per-incarnation resources are acquired
-/// inside [`run`](Self::run).
+/// `async fn run(&mut self, ctx: ActorContext<Self::Msg>) -> ActorResult` in
+/// their trait impls. Each run receives a fresh clone of the wiring-time actor
+/// value, so mutations are private to the run and a restart resets state to
+/// the wiring-time value; per-incarnation resources are acquired inside
+/// [`run`](Self::run).
 ///
 /// This trait is deliberately not implemented for plain closures: an actor is
 /// a named type that implements `RawActor`, which keeps the message type visible
@@ -31,5 +32,5 @@ pub trait RawActor: Clone + Send + Sync + 'static {
     type Msg: Send + 'static;
 
     /// Runs the actor until it finishes or graph shutdown is requested.
-    fn run(&self, ctx: ActorContext<Self::Msg>) -> impl Future<Output = ActorResult> + Send;
+    fn run(&mut self, ctx: ActorContext<Self::Msg>) -> impl Future<Output = ActorResult> + Send;
 }
