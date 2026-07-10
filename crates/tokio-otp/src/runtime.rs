@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 use crate::{ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory};
 use tokio::sync::{broadcast, watch};
@@ -63,6 +66,40 @@ impl Default for DynamicActorOptions {
             shutdown: ShutdownPolicy::default(),
             restart_intensity: None,
         }
+    }
+}
+
+/// Actor-aware extensions for any supervisor handle, including handles for
+/// nested supervisors.
+///
+/// Import this trait to add a [`RunnableActor`] minted by
+/// [`Graph::dynamic_factory`](crate::Graph::dynamic_factory) directly to a
+/// running supervisor subtree.
+pub trait SupervisorHandleExt {
+    /// Adds a runnable actor as a supervised child.
+    ///
+    /// The actor's label becomes the child id. Its stable binding is rebound
+    /// according to `options.restart`, and is terminated when the supervisor
+    /// can no longer restart the child or the child is removed.
+    fn add_actor(
+        &self,
+        actor: RunnableActor,
+        options: DynamicActorOptions,
+    ) -> impl Future<Output = Result<(), ControlError>> + Send;
+}
+
+impl SupervisorHandleExt for SupervisorHandle {
+    fn add_actor(
+        &self,
+        actor: RunnableActor,
+        options: DynamicActorOptions,
+    ) -> impl Future<Output = Result<(), ControlError>> + Send {
+        self.add_child(actor_child_spec(
+            actor,
+            options.restart,
+            options.shutdown,
+            options.restart_intensity,
+        ))
     }
 }
 

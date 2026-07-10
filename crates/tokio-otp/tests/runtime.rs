@@ -12,7 +12,7 @@ use std::{
 use tokio::{sync::mpsc, time::timeout};
 use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, DynamicActorOptions, GraphBuilder,
-    RawActor, Reply, Runtime, SendError, SupervisedActors,
+    RawActor, Reply, Runtime, SendError, SupervisedActors, SupervisorHandleExt,
 };
 use tokio_supervisor::{
     ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, Strategy, SupervisorBuilder,
@@ -419,6 +419,82 @@ async fn runtime_handle_monitor_restart_delegates_to_supervisor() {
         .shutdown_and_wait()
         .await
         .expect("runtime shut down cleanly");
+}
+
+#[tokio::test]
+async fn nested_supervisor_handle_adds_and_restarts_runnable_actor() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let mut graph_builder = GraphBuilder::new();
+    graph_builder.actor("factory-anchor", Drain::<()>::new());
+    let graph = graph_builder.build().expect("graph is valid");
+    let (actor, actor_ref) = graph.dynamic_factory().actor(
+        "subscription",
+        FailAfterObserve {
+            observed: observed_tx,
+        },
+    );
+
+    let nested = SupervisorBuilder::new()
+        .build()
+        .expect("empty nested supervisor is valid");
+    let outer = SupervisorBuilder::new()
+        .supervisor("venue", nested)
+        .build()
+        .expect("outer supervisor is valid");
+    let handle = outer.spawn();
+    timeout(
+        Duration::from_secs(1),
+        handle.subscribe_snapshots().wait_for(|snapshot| {
+            snapshot
+                .child("venue")
+                .and_then(|child| child.supervisor.as_ref())
+                .is_some_and(|supervisor| supervisor.state == SupervisorStateView::Running)
+        }),
+    )
+    .await
+    .expect("nested supervisor started within timeout")
+    .expect("snapshot channel remains open");
+    let venue = handle
+        .supervisor("venue")
+        .expect("nested supervisor handle is available");
+
+    venue
+        .add_actor(actor, DynamicActorOptions::default())
+        .await
+        .expect("actor added to nested supervisor");
+    let restart = venue
+        .monitor_restart("subscription")
+        .expect("actor child is known to nested supervisor");
+
+    actor_ref
+        .send("first".to_owned())
+        .await
+        .expect("first message sent");
+    assert_eq!(observed_rx.recv().await.as_deref(), Some("first"));
+    timeout(Duration::from_secs(1), restart.into_future())
+        .await
+        .expect("actor restarted within timeout")
+        .expect("restart monitor succeeded");
+
+    actor_ref
+        .send("second".to_owned())
+        .await
+        .expect("ref rebound after restart");
+    assert_eq!(observed_rx.recv().await.as_deref(), Some("second"));
+
+    venue
+        .remove_child("subscription")
+        .await
+        .expect("actor removed from nested supervisor");
+    assert!(matches!(
+        actor_ref.send("after removal".to_owned()).await,
+        Err(SendError::ActorTerminated { .. })
+    ));
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("outer supervisor shut down cleanly");
 }
 
 #[derive(Clone)]

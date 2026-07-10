@@ -221,7 +221,8 @@ pub mod prelude {
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
         CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
         RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
-        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, TryRecvError,
+        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt,
+        TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -244,6 +245,6 @@ pub use actor::{
     RunnableActor, RunnableActorFactory, SendError,
 };
 pub use builder::RuntimeBuilder;
-pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle};
+pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
 pub use supervised_actors::SupervisedActors;
 pub use tokio::sync::mpsc::error::TryRecvError;
