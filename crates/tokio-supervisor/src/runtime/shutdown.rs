@@ -238,9 +238,11 @@ impl SupervisorRuntime {
         let Some(classified) = self.consume_joined_child(joined)? else {
             return Ok(());
         };
-        if scope.contains(classified.key) {
-            self.record_exit(classified.key, classified.generation, &classified.status);
-        } else {
+        // Record the exit immediately even when dispatch is deferred: the
+        // entry must not look Running once its join is consumed, or a nested
+        // drain that includes this key would wait on a join that never comes.
+        self.record_exit(classified.key, classified.generation, &classified.status);
+        if !scope.contains(classified.key) {
             deferred.push(classified);
         }
         Ok(())

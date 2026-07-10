@@ -314,3 +314,123 @@ fn reporting_child(
     })
     .restart(RestartPolicy::Always)
 }
+
+/// Two upstream children fail while the suffix drain is held open, so both
+/// exits are deferred in the same drain window. Dispatching the first
+/// deferred exit restarts a suffix that contains the second deferred child;
+/// its already-consumed join must not stall the nested drain, and its own
+/// deferred exit must be recognized as stale afterwards.
+#[tokio::test]
+async fn two_upstream_failures_during_suffix_drain_all_recover() {
+    let fail_a = Arc::new(Notify::new());
+    let fail_b = Arc::new(Notify::new());
+    let fail_trigger = Arc::new(Notify::new());
+    let slow_cancelled = Arc::new(Notify::new());
+    let release_slow = Arc::new(Notify::new());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+
+    let a = failing_once_child("a", fail_a.clone(), started_tx.clone());
+    let b = failing_once_child("b", fail_b.clone(), started_tx.clone());
+    let trigger = failing_once_child("trigger", fail_trigger.clone(), started_tx.clone());
+
+    let slow = ChildSpec::new("slow", {
+        let started_tx = started_tx.clone();
+        let slow_cancelled = slow_cancelled.clone();
+        let release_slow = release_slow.clone();
+        move |ctx| {
+            let started_tx = started_tx.clone();
+            let slow_cancelled = slow_cancelled.clone();
+            let release_slow = release_slow.clone();
+            async move {
+                started_tx
+                    .send(("slow", ctx.generation()))
+                    .expect("test receiver dropped");
+                ctx.shutdown_token().cancelled().await;
+                if ctx.generation() == 0 {
+                    slow_cancelled.notify_one();
+                    release_slow.notified().await;
+                }
+                Ok(())
+            }
+        }
+    })
+    .restart(RestartPolicy::Always)
+    .shutdown(ShutdownPolicy::cooperative_then_abort(Duration::from_secs(
+        1,
+    )));
+
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::RestForOne)
+        .child(a)
+        .child(b)
+        .child(trigger)
+        .child(slow)
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+
+    assert_eq!(
+        common::recv_n(&mut started_rx, 4).await,
+        vec![("a", 0), ("b", 0), ("trigger", 0), ("slow", 0)]
+    );
+
+    // Fail the trigger; the suffix [trigger, slow] starts draining and the
+    // slow child holds the drain open in its grace loop.
+    fail_trigger.notify_one();
+    slow_cancelled.notified().await;
+
+    // While the drain is held open, both upstream children fail. Their joins
+    // are consumed by the drain loop and deferred.
+    fail_a.notify_one();
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    fail_b.notify_one();
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    release_slow.notify_one();
+
+    // Suffix restart from the original failure.
+    assert_eq!(
+        common::recv_n(&mut started_rx, 2).await,
+        vec![("trigger", 1), ("slow", 1)]
+    );
+    // Dispatching a's deferred exit restarts the whole group (a is first).
+    // That suffix restart already covers b, so b's own deferred exit must be
+    // recognized as stale, not dispatched against the fresh generation.
+    assert_eq!(
+        common::recv_n(&mut started_rx, 4).await,
+        vec![("a", 1), ("b", 1), ("trigger", 2), ("slow", 2)]
+    );
+    common::assert_no_event(&mut started_rx).await;
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
+}
+
+fn failing_once_child(
+    id: &'static str,
+    fail: Arc<Notify>,
+    started_tx: mpsc::UnboundedSender<(&'static str, u64)>,
+) -> ChildSpec {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    ChildSpec::new(id, move |ctx| {
+        let fail = fail.clone();
+        let attempts = attempts.clone();
+        let started_tx = started_tx.clone();
+        async move {
+            started_tx
+                .send((id, ctx.generation()))
+                .expect("test receiver dropped");
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                fail.notified().await;
+                return Err(common::test_error("deferred-exit probe failure"));
+            }
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(RestartPolicy::OnFailure)
+    .shutdown(ShutdownPolicy::cooperative_then_abort(
+        Duration::from_millis(200),
+    ))
+}

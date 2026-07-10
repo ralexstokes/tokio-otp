@@ -689,7 +689,13 @@ impl SupervisorRuntime {
 
     async fn dispatch_exit(&mut self, classified: ClassifiedExit) -> Result<(), SupervisorError> {
         self.record_exit(classified.key, classified.generation, &classified.status);
+        self.apply_exit_policy(classified).await
+    }
 
+    async fn apply_exit_policy(
+        &mut self,
+        classified: ClassifiedExit,
+    ) -> Result<(), SupervisorError> {
         if self.state == SupervisorState::Stopping {
             return Ok(());
         }
@@ -909,7 +915,17 @@ impl SupervisorRuntime {
             }
         }
         for classified in deferred {
-            Box::pin(self.dispatch_exit(classified)).await?;
+            // A deferred child may already have been respawned (or removed) by
+            // an earlier deferred dispatch's suffix restart; its recorded exit
+            // is then stale and must not be applied to the fresh generation.
+            if !self.current_child_matches(
+                classified.key,
+                classified.instance,
+                classified.generation,
+            ) {
+                continue;
+            }
+            Box::pin(self.apply_exit_policy(classified)).await?;
         }
         Ok(())
     }
