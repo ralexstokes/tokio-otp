@@ -442,6 +442,18 @@ async fn nested_supervisor_handle_adds_and_restarts_runnable_actor() {
         .build()
         .expect("outer supervisor is valid");
     let handle = outer.spawn();
+    let venue = handle
+        .supervisor("venue")
+        .expect("nested supervisor handle is available");
+
+    let unavailable = venue
+        .add_actor(actor.clone(), DynamicActorOptions::default())
+        .await;
+    assert!(matches!(
+        unavailable,
+        Err(tokio_supervisor::ControlError::Unavailable)
+    ));
+
     timeout(
         Duration::from_secs(1),
         handle.subscribe_snapshots().wait_for(|snapshot| {
@@ -454,9 +466,6 @@ async fn nested_supervisor_handle_adds_and_restarts_runnable_actor() {
     .await
     .expect("nested supervisor started within timeout")
     .expect("snapshot channel remains open");
-    let venue = handle
-        .supervisor("venue")
-        .expect("nested supervisor handle is available");
 
     venue
         .add_actor(actor, DynamicActorOptions::default())
