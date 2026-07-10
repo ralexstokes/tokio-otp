@@ -263,6 +263,14 @@
     return JSON.stringify(exit);
   }
 
+  function formatDuration(d) {
+    var nanos = d.nanos == null ? 0 : d.nanos;
+    var total = d.secs + nanos / 1e9;
+    if (total < 1) return Math.round(total * 1000) + "ms";
+    if (nanos >= 50000000) return total.toFixed(1) + "s";
+    return Math.round(total) + "s";
+  }
+
   function renderChild(child, parentPath) {
     var path = parentPath + "/" + child.id;
     var det = document.createElement("details");
@@ -329,7 +337,7 @@
     if (child.next_restart_in) {
       var nri = document.createElement("span");
       nri.className = "meta";
-      nri.textContent = "restart in " + child.next_restart_in.secs + "s";
+      nri.textContent = "restart in " + formatDuration(child.next_restart_in);
       sum.appendChild(nri);
     }
 
@@ -439,7 +447,7 @@
       return "Child '" + ev.ChildExited.id + "' exited: " + st + " (gen " + ev.ChildExited.generation + ")";
     }
     if (ev.ChildRestarted) return "Child '" + ev.ChildRestarted.id + "' restarted (gen " + ev.ChildRestarted.old_generation + " -> " + ev.ChildRestarted.new_generation + ")";
-    if (ev.ChildRestartScheduled) return "Restart scheduled for '" + ev.ChildRestartScheduled.id + "' in " + ev.ChildRestartScheduled.delay.secs + "s";
+    if (ev.ChildRestartScheduled) return "Restart scheduled for '" + ev.ChildRestartScheduled.id + "' in " + formatDuration(ev.ChildRestartScheduled.delay);
     if (ev.ChildRemoved) return "Child '" + ev.ChildRemoved.id + "' removed";
     if (ev.Nested) return "[" + ev.Nested.id + " gen:" + ev.Nested.generation + "] " + describeEvent(ev.Nested.event);
     return JSON.stringify(ev);
