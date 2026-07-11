@@ -9,7 +9,10 @@ use std::{
 
 use tokio::sync::{Notify, mpsc, watch};
 
-use crate::actor::{error::SendError, observability::GraphObservability};
+use crate::actor::{
+    error::SendError,
+    observability::{GraphObservability, MessageSizeMetrics},
+};
 
 /// A point-in-time snapshot of one actor's message and mailbox statistics.
 ///
@@ -26,6 +29,12 @@ pub struct ActorStats {
     pub messages_accepted: u64,
     /// Previously unread messages replaced by newer messages in a conflating mailbox.
     pub messages_conflated: u64,
+    /// Total bytes reported for accepted messages when message-size
+    /// observation is enabled for this actor.
+    ///
+    /// `None` means the actor did not opt in. The total accumulates across
+    /// actor restarts, like the message counters.
+    pub message_bytes_accepted: Option<u64>,
     /// `send` or `try_send` calls that returned an error.
     pub sends_rejected: u64,
     /// Messages currently occupying the bound mailbox.
@@ -34,15 +43,26 @@ pub struct ActorStats {
     pub mailbox_capacity: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ActorStatsCounters {
     messages_received: AtomicU64,
     messages_accepted: AtomicU64,
     messages_conflated: AtomicU64,
     sends_rejected: AtomicU64,
+    message_bytes_accepted: Option<AtomicU64>,
 }
 
 impl ActorStatsCounters {
+    pub(crate) fn new(observe_message_size: bool) -> Self {
+        Self {
+            messages_received: AtomicU64::new(0),
+            messages_accepted: AtomicU64::new(0),
+            messages_conflated: AtomicU64::new(0),
+            sends_rejected: AtomicU64::new(0),
+            message_bytes_accepted: observe_message_size.then(|| AtomicU64::new(0)),
+        }
+    }
+
     pub(crate) fn record_received(&self) {
         self.messages_received.fetch_add(1, Ordering::Relaxed);
     }
@@ -62,6 +82,12 @@ impl ActorStatsCounters {
         }
     }
 
+    pub(crate) fn record_message_size(&self, size: usize) {
+        if let Some(total) = &self.message_bytes_accepted {
+            total.fetch_add(size as u64, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn snapshot(
         &self,
         actor_id: &str,
@@ -73,6 +99,10 @@ impl ActorStatsCounters {
             messages_received: self.messages_received.load(Ordering::Relaxed),
             messages_accepted: self.messages_accepted.load(Ordering::Relaxed),
             messages_conflated: self.messages_conflated.load(Ordering::Relaxed),
+            message_bytes_accepted: self
+                .message_bytes_accepted
+                .as_ref()
+                .map(|total| total.load(Ordering::Relaxed)),
             sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
             mailbox_depth,
             mailbox_capacity,
@@ -521,6 +551,22 @@ pub(crate) struct BindingCore<M> {
     actor_id: Arc<str>,
     current: watch::Sender<BindingState<M>>,
     stats: Arc<ActorStatsCounters>,
+    message_size: Option<Arc<MessageSizeObserver<M>>>,
+}
+
+pub(crate) struct MessageSizeObserver<M> {
+    size_hint: fn(&M) -> usize,
+    metrics: MessageSizeMetrics,
+}
+
+impl<M> MessageSizeObserver<M> {
+    pub(crate) fn size_hint(&self, message: &M) -> usize {
+        (self.size_hint)(message)
+    }
+
+    pub(crate) fn record_metrics(&self, size: usize) {
+        self.metrics.record(size);
+    }
 }
 
 impl<M> BindingCore<M> {
@@ -529,7 +575,22 @@ impl<M> BindingCore<M> {
         Self {
             actor_id,
             current,
-            stats: Arc::new(ActorStatsCounters::default()),
+            stats: Arc::new(ActorStatsCounters::new(false)),
+            message_size: None,
+        }
+    }
+
+    pub(crate) fn with_message_size(actor_id: Arc<str>, size_hint: fn(&M) -> usize) -> Self {
+        let (current, _receiver) = watch::channel(BindingState::Unbound);
+        let message_size = MessageSizeObserver {
+            size_hint,
+            metrics: MessageSizeMetrics::new(&actor_id),
+        };
+        Self {
+            actor_id,
+            current,
+            stats: Arc::new(ActorStatsCounters::new(true)),
+            message_size: Some(Arc::new(message_size)),
         }
     }
 
@@ -543,6 +604,10 @@ impl<M> BindingCore<M> {
 
     pub(crate) fn stats_counters(&self) -> Arc<ActorStatsCounters> {
         Arc::clone(&self.stats)
+    }
+
+    pub(crate) fn message_size(&self) -> Option<Arc<MessageSizeObserver<M>>> {
+        self.message_size.clone()
     }
 
     pub(crate) fn stats(&self) -> ActorStats {

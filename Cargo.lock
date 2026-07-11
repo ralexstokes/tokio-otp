@@ -1293,6 +1293,8 @@ dependencies = [
 name = "tokio-otp"
 version = "0.1.0"
 dependencies = [
+ "metrics",
+ "metrics-util",
  "serde",
  "serde_json",
  "thiserror",

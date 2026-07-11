@@ -47,6 +47,8 @@ pub struct ActorStatsView {
     pub messages_received: u64,
     pub messages_accepted: u64,
     pub messages_conflated: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_bytes_accepted: Option<u64>,
     pub sends_rejected: u64,
     pub mailbox_depth: usize,
     pub mailbox_capacity: usize,

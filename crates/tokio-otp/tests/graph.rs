@@ -995,7 +995,8 @@ mod runnable_actor {
     };
     use tokio_otp::{
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, BoxError, DrainPolicy, Graph,
-        GraphBuilder, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory, SendError,
+        GraphBuilder, MessageSize, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
+        SendError,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -1050,6 +1051,49 @@ mod runnable_actor {
         started: mpsc::UnboundedSender<()>,
         release: Arc<Notify>,
         received: mpsc::UnboundedSender<()>,
+    }
+
+    #[derive(Debug)]
+    struct SizedPayload(Vec<u8>);
+
+    impl MessageSize for SizedPayload {
+        fn size_hint(&self) -> usize {
+            self.0.len()
+        }
+    }
+
+    #[derive(Clone)]
+    struct GatedSizedDrain {
+        started: mpsc::UnboundedSender<()>,
+        release: Arc<Notify>,
+        received: mpsc::UnboundedSender<()>,
+    }
+
+    impl RawActor for GatedSizedDrain {
+        type Msg = SizedPayload;
+
+        async fn run(&mut self, mut ctx: ActorContext<SizedPayload>) -> ActorResult {
+            self.started.send(()).expect("receiver alive");
+            self.release.notified().await;
+            while let Some(_message) = ctx.recv().await {
+                self.received.send(()).expect("receiver alive");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_sized_registration_returns_a_sized_detached_ref() {
+        let mut builder = GraphBuilder::new();
+        builder.actor_with_message_size("worker", Drain::<SizedPayload>::new());
+        let detached = builder.actor_with_message_size("worker", Drain::<SizedPayload>::new());
+
+        assert_eq!(detached.stats().message_bytes_accepted, Some(0));
+
+        let mut slot_builder = GraphBuilder::new();
+        slot_builder.slot_with_message_size::<SizedPayload>("worker");
+        let (_slot, detached) = slot_builder.slot_with_message_size::<SizedPayload>("worker");
+        assert_eq!(detached.stats().message_bytes_accepted, Some(0));
     }
 
     impl RawActor for GatedDrain {
@@ -1137,6 +1181,7 @@ mod runnable_actor {
                 messages_received: 0,
                 messages_accepted: 2,
                 messages_conflated: 0,
+                message_bytes_accepted: None,
                 sends_rejected: 1,
                 mailbox_depth: 2,
                 mailbox_capacity: 2,
@@ -1151,6 +1196,46 @@ mod runnable_actor {
         assert_eq!(stats.messages_received, 2);
         assert_eq!(stats.mailbox_depth, 0);
         assert_eq!(stats.mailbox_capacity, 2);
+
+        stop_actor(stop, task).await.expect("actor stops");
+    }
+
+    #[tokio::test]
+    async fn message_size_observation_counts_only_accepted_messages() {
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(Notify::new());
+        let mut builder = GraphBuilder::new();
+        builder.mailbox_capacity(1);
+        let worker_ref = builder.actor_with_message_size(
+            "worker",
+            GatedSizedDrain {
+                started: started_tx,
+                release: Arc::clone(&release),
+                received: received_tx,
+            },
+        );
+        let graph = builder.build().expect("valid graph");
+        let worker = single_actor(&graph, "worker");
+        let (stop, task) = start_actor(worker);
+
+        started_rx.recv().await.expect("actor started");
+        worker_ref
+            .try_send(SizedPayload(vec![0; 4]))
+            .expect("first message accepted");
+        assert!(matches!(
+            worker_ref.try_send(SizedPayload(vec![0; 100])),
+            Err(SendError::MailboxFull { .. })
+        ));
+        assert_eq!(worker_ref.stats().message_bytes_accepted, Some(4));
+
+        release.notify_one();
+        received_rx.recv().await.expect("first message received");
+        worker_ref
+            .send(SizedPayload(vec![0; 3]))
+            .await
+            .expect("second message accepted");
+        assert_eq!(worker_ref.stats().message_bytes_accepted, Some(7));
 
         stop_actor(stop, task).await.expect("actor stops");
     }

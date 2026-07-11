@@ -23,7 +23,7 @@ use crate::actor::{
         ActorStats, BindingCore, BindingGuard, BindingLifecycle, MailboxMode, MailboxRef,
         RebindPolicy, mailbox,
     },
-    builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
+    builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY, MessageSize},
     context::{ActorContext, ActorRef, ActorTimers},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     raw::{ActorResult, BoxError, RawActor},
@@ -446,6 +446,34 @@ impl RunnableActorFactory {
     ) -> (RunnableActor, ActorRef<A::Msg>) {
         let actor_id: Arc<str> = label.into().into();
         let binding = Arc::new(BindingCore::<A::Msg>::new(actor_id.clone()));
+        self.actor_with_binding(actor_id, actor, binding, mailbox_mode)
+    }
+
+    /// Constructs a runnable actor with message-size observation enabled.
+    pub fn actor_with_message_size<A>(
+        &self,
+        label: impl Into<String>,
+        actor: A,
+    ) -> (RunnableActor, ActorRef<A::Msg>)
+    where
+        A: RawActor,
+        A::Msg: MessageSize,
+    {
+        let actor_id: Arc<str> = label.into().into();
+        let binding = Arc::new(BindingCore::<A::Msg>::with_message_size(
+            actor_id.clone(),
+            MessageSize::size_hint,
+        ));
+        self.actor_with_binding(actor_id, actor, binding, MailboxMode::Queue)
+    }
+
+    fn actor_with_binding<A: RawActor>(
+        &self,
+        actor_id: Arc<str>,
+        actor: A,
+        binding: Arc<BindingCore<A::Msg>>,
+        mailbox_mode: MailboxMode<A::Msg>,
+    ) -> (RunnableActor, ActorRef<A::Msg>) {
         let actor_ref = ActorRef::from_core(&binding, None);
         let runnable = RunnableActor::new(RunnableActorParts {
             actor_id,

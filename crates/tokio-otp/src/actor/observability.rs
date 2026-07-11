@@ -3,7 +3,13 @@ use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
+#[cfg(feature = "metrics")]
+use std::sync::OnceLock;
+
 use tracing::{Span, debug, info, info_span, trace, warn};
+
+#[cfg(feature = "metrics")]
+use metrics::{Counter, Histogram, counter, histogram};
 
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -147,6 +153,60 @@ pub(crate) fn trace_actor_message(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct MessageSizeMetrics {
+    #[cfg(feature = "metrics")]
+    actor_id: Arc<str>,
+    #[cfg(feature = "metrics")]
+    handles: OnceLock<MessageSizeMetricHandles>,
+}
+
+#[cfg(feature = "metrics")]
+#[derive(Debug)]
+struct MessageSizeMetricHandles {
+    bytes_accepted: Counter,
+    size: Histogram,
+}
+
+impl MessageSizeMetrics {
+    pub(crate) fn new(actor_id: &Arc<str>) -> Self {
+        #[cfg(feature = "metrics")]
+        {
+            Self {
+                actor_id: actor_id.clone(),
+                handles: OnceLock::new(),
+            }
+        }
+
+        #[cfg(not(feature = "metrics"))]
+        {
+            let _ = actor_id;
+            Self {}
+        }
+    }
+
+    pub(crate) fn record(&self, size: usize) {
+        #[cfg(feature = "metrics")]
+        {
+            let handles = self.handles.get_or_init(|| {
+                let actor_id = self.actor_id.to_string();
+                MessageSizeMetricHandles {
+                    bytes_accepted: counter!(
+                        "actor.message.bytes_accepted",
+                        "actor_id" => actor_id.clone()
+                    ),
+                    size: histogram!("actor.message.size", "actor_id" => actor_id),
+                }
+            });
+            handles.bytes_accepted.increment(size as u64);
+            handles.size.record(size as f64);
+        }
+
+        #[cfg(not(feature = "metrics"))]
+        let _ = size;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActorExitStatus {
     Shutdown,
@@ -204,6 +264,9 @@ impl SendRejection {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "metrics")]
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
     use super::*;
 
     #[test]
@@ -220,5 +283,42 @@ mod tests {
         let observability = GraphObservability::new(Arc::from("orders"));
         observability.emit_actor_exited(&Arc::from("worker"), ActorExitStatus::Cancelled, None);
         assert_eq!(observability.running_actors.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn message_size_metrics_record_bytes_and_histogram_samples() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let metrics = MessageSizeMetrics::new(&Arc::from("worker"));
+            metrics.record(4);
+            metrics.record(7);
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let find = |name| {
+            snapshot
+                .iter()
+                .find(|(key, _, _, _)| {
+                    key.key().name() == name
+                        && key
+                            .key()
+                            .labels()
+                            .any(|label| label.key() == "actor_id" && label.value() == "worker")
+                })
+                .map(|(_, _, _, value)| value)
+                .unwrap_or_else(|| panic!("metric `{name}` not found"))
+        };
+
+        assert!(matches!(
+            find("actor.message.bytes_accepted"),
+            DebugValue::Counter(11)
+        ));
+        assert!(matches!(
+            find("actor.message.size"),
+            DebugValue::Histogram(values) if values == &[4.0, 7.0]
+        ));
     }
 }

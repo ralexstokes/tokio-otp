@@ -44,6 +44,7 @@ fn actor_stats() -> Vec<ActorStatsView> {
         messages_received: 11,
         messages_accepted: 10,
         messages_conflated: 3,
+        message_bytes_accepted: None,
         sends_rejected: 1,
         mailbox_depth: 3,
         mailbox_capacity: 32,
