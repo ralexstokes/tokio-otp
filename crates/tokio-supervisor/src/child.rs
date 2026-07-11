@@ -28,6 +28,7 @@ pub(crate) struct ChildDefinition {
     pub(crate) restart: RestartPolicy,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
+    pub(crate) significant: bool,
     pub(crate) kind: ChildKind,
 }
 
@@ -57,6 +58,7 @@ pub(crate) struct ChildSpecInner {
     pub(crate) restart: RestartPolicy,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
+    pub(crate) significant: bool,
     pub(crate) factory: Arc<dyn ChildFactory>,
 }
 
@@ -73,6 +75,7 @@ pub struct SupervisorSpec {
     pub(crate) restart: RestartPolicy,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
+    pub(crate) significant: bool,
 }
 
 impl SupervisorSpec {
@@ -83,6 +86,7 @@ impl SupervisorSpec {
             restart: RestartPolicy::default(),
             restart_intensity: None,
             shutdown_policy: ShutdownPolicy::default(),
+            significant: false,
         }
     }
 
@@ -104,6 +108,17 @@ impl SupervisorSpec {
     #[must_use]
     pub fn restart_intensity(mut self, intensity: RestartIntensity) -> Self {
         self.restart_intensity = Some(intensity);
+        self
+    }
+
+    /// Marks this nested supervisor as significant to its parent.
+    ///
+    /// A clean exit can trigger the parent's configured
+    /// [`AutoShutdown`](crate::AutoShutdown) mode. Significant children cannot
+    /// use [`RestartPolicy::Always`].
+    #[must_use]
+    pub fn significant(mut self) -> Self {
+        self.significant = true;
         self
     }
 }
@@ -165,6 +180,7 @@ impl ChildSpec {
                 restart: RestartPolicy::default(),
                 restart_intensity: None,
                 shutdown_policy: ShutdownPolicy::default(),
+                significant: false,
                 factory: make_child_factory(f),
             }),
         }
@@ -192,6 +208,17 @@ impl ChildSpec {
         self.map_inner(|inner| inner.restart_intensity = Some(intensity))
     }
 
+    /// Marks this child as significant to its supervisor.
+    ///
+    /// A clean exit can trigger the supervisor's configured
+    /// [`AutoShutdown`](crate::AutoShutdown) mode. Significant children cannot
+    /// use [`RestartPolicy::Always`], because a clean exit must be final before
+    /// it can complete the supervisor's purpose.
+    #[must_use]
+    pub fn significant(self) -> Self {
+        self.map_inner(|inner| inner.significant = true)
+    }
+
     /// Returns the child's unique identifier.
     pub fn id(&self) -> &str {
         &self.inner.id
@@ -211,12 +238,18 @@ impl ChildSpec {
         self.inner.shutdown_policy
     }
 
+    /// Returns whether this child is significant to its supervisor.
+    pub fn is_significant(&self) -> bool {
+        self.inner.significant
+    }
+
     pub(crate) fn into_definition(self) -> ChildDefinition {
         ChildDefinition {
             id: self.inner.id.clone(),
             restart: self.inner.restart,
             restart_intensity: self.inner.restart_intensity,
             shutdown_policy: self.inner.shutdown_policy,
+            significant: self.inner.significant,
             kind: ChildKind::Task(self.inner.factory.clone()),
         }
     }
@@ -229,6 +262,7 @@ impl ChildDefinition {
             restart: spec.restart,
             restart_intensity: spec.restart_intensity,
             shutdown_policy: spec.shutdown_policy,
+            significant: spec.significant,
             kind: ChildKind::Supervisor(spec.supervisor),
         }
     }

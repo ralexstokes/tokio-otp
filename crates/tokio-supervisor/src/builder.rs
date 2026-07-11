@@ -4,6 +4,7 @@ use crate::{
     child::{ChildDefinition, ChildSpec, SupervisorSpec},
     error::SupervisorBuildError,
     restart::RestartIntensity,
+    shutdown::AutoShutdown,
     strategy::Strategy,
     supervisor::{Supervisor, SupervisorConfig},
 };
@@ -29,6 +30,7 @@ use crate::{
 pub struct SupervisorBuilder {
     strategy: Strategy,
     restart_intensity: RestartIntensity,
+    auto_shutdown: AutoShutdown,
     children: Vec<ChildDefinition>,
     control_channel_capacity: usize,
     event_channel_capacity: usize,
@@ -50,6 +52,7 @@ impl SupervisorBuilder {
         Self {
             strategy: Strategy::default(),
             restart_intensity: RestartIntensity::default(),
+            auto_shutdown: AutoShutdown::default(),
             children: Vec::new(),
             control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
             event_channel_capacity: DEFAULT_EVENT_CHANNEL_CAPACITY,
@@ -68,6 +71,13 @@ impl SupervisorBuilder {
     #[must_use]
     pub fn restart_intensity(mut self, intensity: RestartIntensity) -> Self {
         self.restart_intensity = intensity;
+        self
+    }
+
+    /// Sets when clean exits from significant children stop the supervisor.
+    #[must_use]
+    pub fn auto_shutdown(mut self, auto_shutdown: AutoShutdown) -> Self {
+        self.auto_shutdown = auto_shutdown;
         self
     }
 
@@ -121,6 +131,8 @@ impl SupervisorBuilder {
     /// - Two children share the same id.
     /// - Any channel capacity is zero.
     /// - Any restart intensity or backoff configuration is invalid.
+    /// - A significant child uses [`RestartPolicy::Always`](crate::RestartPolicy::Always).
+    /// - A child is significant while automatic shutdown is disabled.
     pub fn build(self) -> Result<Supervisor, SupervisorBuildError> {
         self.restart_intensity.validate()?;
         if self.control_channel_capacity == 0 {
@@ -144,6 +156,16 @@ impl SupervisorBuilder {
             if let Some(restart_intensity) = child.restart_intensity {
                 restart_intensity.validate()?;
             }
+            if child.significant && matches!(child.restart, crate::RestartPolicy::Always) {
+                return Err(SupervisorBuildError::InvalidConfig(
+                    "significant children cannot use RestartPolicy::Always",
+                ));
+            }
+            if child.significant && matches!(self.auto_shutdown, AutoShutdown::Never) {
+                return Err(SupervisorBuildError::InvalidConfig(
+                    "significant children require automatic shutdown",
+                ));
+            }
             if !ids.insert(child.id.as_str()) {
                 return Err(SupervisorBuildError::DuplicateChildId(child.id.clone()));
             }
@@ -152,6 +174,7 @@ impl SupervisorBuilder {
         Ok(Supervisor::new(SupervisorConfig {
             strategy: self.strategy,
             restart_intensity: self.restart_intensity,
+            auto_shutdown: self.auto_shutdown,
             children: self.children,
             control_channel_capacity: self.control_channel_capacity,
             event_channel_capacity: self.event_channel_capacity,

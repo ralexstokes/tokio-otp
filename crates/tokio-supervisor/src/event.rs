@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::observability::SupervisorObservability;
+use crate::{observability::SupervisorObservability, shutdown::AutoShutdown};
 
 /// Snapshot of how a child task exited.
 ///
@@ -86,6 +86,14 @@ pub enum SupervisorEvent {
         generation: u64,
         /// How the child exited.
         status: ExitStatusView,
+    },
+    /// A significant child's clean exit satisfied the supervisor's automatic
+    /// shutdown condition.
+    AutoShutdownTriggered {
+        /// The significant child whose exit satisfied the condition.
+        id: String,
+        /// The automatic shutdown mode that was satisfied.
+        mode: AutoShutdown,
     },
     /// A restart for this child has been scheduled after a backoff delay.
     ChildRestartScheduled {

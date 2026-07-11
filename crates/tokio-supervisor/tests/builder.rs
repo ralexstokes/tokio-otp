@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use tokio_supervisor::{
-    BackoffPolicy, ChildSpec, RestartIntensity, SupervisorBuildError, SupervisorBuilder,
+    AutoShutdown, BackoffPolicy, ChildSpec, RestartIntensity, RestartPolicy, SupervisorBuildError,
+    SupervisorBuilder,
 };
 
 #[test]
@@ -9,6 +10,39 @@ fn empty_children_are_accepted() {
     SupervisorBuilder::new()
         .build()
         .expect("building without children should succeed");
+}
+
+#[test]
+fn significant_always_child_is_rejected() {
+    let err = SupervisorBuilder::new()
+        .auto_shutdown(AutoShutdown::AnySignificant)
+        .child(
+            ChildSpec::new("worker", |_| async { Ok(()) })
+                .restart(RestartPolicy::Always)
+                .significant(),
+        )
+        .build()
+        .expect_err("significant permanent children must be rejected");
+
+    assert_eq!(
+        err,
+        SupervisorBuildError::InvalidConfig(
+            "significant children cannot use RestartPolicy::Always"
+        )
+    );
+}
+
+#[test]
+fn significant_child_requires_automatic_shutdown() {
+    let err = SupervisorBuilder::new()
+        .child(ChildSpec::new("worker", |_| async { Ok(()) }).significant())
+        .build()
+        .expect_err("significant child without automatic shutdown must be rejected");
+
+    assert_eq!(
+        err,
+        SupervisorBuildError::InvalidConfig("significant children require automatic shutdown")
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant as StdInstant},
 };
 
@@ -20,6 +20,7 @@ use crate::{
     handle::{NestedChannels, NestedHandles, StableSupervisorChannels, SupervisorCommand},
     observability::{SupervisorObservability, format_child_path},
     restart::{RestartIntensity, RestartPolicy},
+    shutdown::AutoShutdown,
     snapshot::{
         ChildMembershipView, ChildSnapshot, ChildStateView, NestedSnapshotNotification,
         NestedSnapshotState, SupervisorSnapshot, SupervisorStateView,
@@ -29,7 +30,9 @@ use crate::{
 };
 
 use super::{
-    child_runtime::{ChildRuntime, RuntimeChildState},
+    child_runtime::{
+        COMPLETION_CANCELLED, COMPLETION_CLEAN, COMPLETION_PENDING, ChildRuntime, RuntimeChildState,
+    },
     exit::ExitStatus,
 };
 
@@ -117,6 +120,7 @@ impl ChildEntry {
 /// Read-only configuration and identity, fixed at construction time.
 pub(crate) struct RuntimeMeta {
     pub(crate) strategy: Strategy,
+    pub(crate) auto_shutdown: AutoShutdown,
     pub(crate) default_restart_intensity: RestartIntensity,
     pub(crate) path_prefix: Vec<String>,
     pub(crate) observability: SupervisorObservability,
@@ -219,6 +223,7 @@ impl SupervisorRuntime {
         Self {
             meta: RuntimeMeta {
                 strategy: config.strategy,
+                auto_shutdown: config.auto_shutdown,
                 default_restart_intensity,
                 path_prefix,
                 observability,
@@ -331,6 +336,16 @@ impl SupervisorRuntime {
                 .validate()
                 .map_err(|err| map_build_error_to_control(child.id(), err))?;
         }
+        if child.is_significant() && matches!(child.restart_policy(), RestartPolicy::Always) {
+            return Err(ControlError::InvalidConfig(
+                "significant children cannot use RestartPolicy::Always",
+            ));
+        }
+        if child.is_significant() && matches!(self.meta.auto_shutdown, AutoShutdown::Never) {
+            return Err(ControlError::InvalidConfig(
+                "significant children require automatic shutdown",
+            ));
+        }
 
         let id = child.id().to_owned();
         if self.children_by_id.contains_key(&id) {
@@ -376,6 +391,16 @@ impl SupervisorRuntime {
             intensity
                 .validate()
                 .map_err(|error| map_build_error_to_control(&id, error))?;
+        }
+        if supervisor.significant && matches!(supervisor.restart, RestartPolicy::Always) {
+            return Err(ControlError::InvalidConfig(
+                "significant children cannot use RestartPolicy::Always",
+            ));
+        }
+        if supervisor.significant && matches!(self.meta.auto_shutdown, AutoShutdown::Never) {
+            return Err(ControlError::InvalidConfig(
+                "significant children require automatic shutdown",
+            ));
         }
         if self.children_by_id.contains_key(&id) {
             return Err(ControlError::DuplicateChildId(id));
@@ -599,9 +624,10 @@ impl SupervisorRuntime {
             ));
         };
 
-        self.handle_joined_child(joined)
-            .await
-            .map_err(map_supervisor_error_to_control)?;
+        if let Err(error) = self.handle_joined_child(joined).await {
+            self.pending_exit = Some(Err(error.clone()));
+            return Err(map_supervisor_error_to_control(error));
+        }
 
         if self.pending_exit.is_some() {
             return Err(ControlError::SupervisorStopping);
@@ -611,12 +637,32 @@ impl SupervisorRuntime {
     }
 
     fn cancel_child(&mut self, key: ChildKey) {
+        self.children[key]
+            .runtime
+            .completion_state
+            .compare_exchange(
+                COMPLETION_PENDING,
+                COMPLETION_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok();
         if let Some(token) = self.children[key].runtime.active_token.as_ref() {
             token.cancel();
         }
     }
 
     fn abort_child(&mut self, key: ChildKey) {
+        self.children[key]
+            .runtime
+            .completion_state
+            .compare_exchange(
+                COMPLETION_PENDING,
+                COMPLETION_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok();
         if let Some(abort_handle) = self.children[key].runtime.abort_handle.as_ref() {
             abort_handle.abort();
         }
@@ -696,7 +742,22 @@ impl SupervisorRuntime {
         &mut self,
         classified: ClassifiedExit,
     ) -> Result<(), SupervisorError> {
-        if self.state == SupervisorState::Stopping {
+        self.apply_exit_policy_inner(classified, true).await
+    }
+
+    async fn apply_drained_completion_policy(
+        &mut self,
+        classified: ClassifiedExit,
+    ) -> Result<(), SupervisorError> {
+        self.apply_exit_policy_inner(classified, false).await
+    }
+
+    async fn apply_exit_policy_inner(
+        &mut self,
+        classified: ClassifiedExit,
+        allow_restart: bool,
+    ) -> Result<(), SupervisorError> {
+        if self.state != SupervisorState::Running {
             return Ok(());
         }
 
@@ -705,9 +766,19 @@ impl SupervisorRuntime {
             return Ok(());
         }
 
+        if self.auto_shutdown_triggered(classified.key, &classified.status) {
+            let id = self.children[classified.key].id.clone();
+            self.send_event(SupervisorEvent::AutoShutdownTriggered {
+                id,
+                mode: self.meta.auto_shutdown,
+            });
+            self.pending_exit = Some(self.shutdown_all().await);
+            return Ok(());
+        }
+
         let restart_policy = self.children[classified.key].runtime.definition.restart;
 
-        if restart_policy.should_restart(classified.status.is_failure()) {
+        if allow_restart && restart_policy.should_restart(classified.status.is_failure()) {
             match self.meta.strategy {
                 Strategy::OneForOne => {
                     self.handle_one_for_one_restart(classified.key, classified.generation)
@@ -721,15 +792,27 @@ impl SupervisorRuntime {
         Ok(())
     }
 
-    pub(crate) fn handle_drained_join(
-        &mut self,
-        joined: Result<(Id, ChildEnvelope), JoinError>,
-    ) -> Result<(), SupervisorError> {
-        let Some(classified) = self.consume_joined_child(joined)? else {
-            return Ok(());
-        };
-        self.record_exit(classified.key, classified.generation, &classified.status);
-        Ok(())
+    fn auto_shutdown_triggered(&self, exited_key: ChildKey, status: &ExitStatus) -> bool {
+        if !matches!(status, ExitStatus::Completed)
+            || !self.children[exited_key].runtime.definition.significant
+        {
+            return false;
+        }
+
+        match self.meta.auto_shutdown {
+            AutoShutdown::Never => false,
+            AutoShutdown::AnySignificant => true,
+            AutoShutdown::AllSignificant => self.children.iter().all(|(_, child)| {
+                if child.membership != MembershipState::Active
+                    || !child.runtime.definition.significant
+                {
+                    return true;
+                }
+                !child.runtime.state.is_active()
+                    && child.runtime.completion_state.load(Ordering::Acquire) == COMPLETION_CLEAN
+                    && matches!(child.last_exit, Some(ExitStatusView::Completed))
+            }),
+        }
     }
 
     fn classify_join(
@@ -850,7 +933,20 @@ impl SupervisorRuntime {
         );
         // Drain the old generation completely before creating a fresh group
         // token so `OneForAll` restarts never overlap old and new tasks.
-        self.drain_for_group_restart().await?;
+        let completed = self.drain_for_group_restart().await?;
+        for classified in completed {
+            if !self.current_child_matches(
+                classified.key,
+                classified.instance,
+                classified.generation,
+            ) {
+                continue;
+            }
+            Box::pin(self.apply_drained_completion_policy(classified)).await?;
+        }
+        if self.pending_exit.is_some() {
+            return Ok(());
+        }
         self.group_token = CancellationToken::new();
         let keys = self.child_order.clone();
         for key in keys {
@@ -902,8 +998,26 @@ impl SupervisorRuntime {
             failing_child.id
         );
         let deferred = self.drain_for_rest_for_one_restart(&keys).await?;
+        let (completed_in_suffix, deferred): (Vec<_>, Vec<_>) = deferred
+            .into_iter()
+            .partition(|classified| keys.contains(&classified.key));
+        for classified in completed_in_suffix {
+            if !self.current_child_matches(
+                classified.key,
+                classified.instance,
+                classified.generation,
+            ) {
+                continue;
+            }
+            Box::pin(self.apply_drained_completion_policy(classified)).await?;
+        }
+        if self.pending_exit.is_some() {
+            return Ok(());
+        }
         for key in keys {
-            let entry = &self.children[key];
+            let Some(entry) = self.children.get(key) else {
+                continue;
+            };
             if entry.membership != MembershipState::Active
                 || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
             {
@@ -915,6 +1029,9 @@ impl SupervisorRuntime {
             }
         }
         for classified in deferred {
+            if self.pending_exit.is_some() {
+                break;
+            }
             // A deferred child may already have been respawned (or removed) by
             // an earlier deferred dispatch's suffix restart; its recorded exit
             // is then stale and must not be applied to the fresh generation.
@@ -1095,7 +1212,12 @@ impl SupervisorRuntime {
     pub(crate) async fn drain_ready_joins(&mut self) -> Result<(), SupervisorError> {
         loop {
             match tokio::time::timeout(Duration::ZERO, self.join_set.join_next_with_id()).await {
-                Ok(Some(joined)) => self.handle_drained_join(joined)?,
+                Ok(Some(joined)) => {
+                    if let Err(error) = self.handle_joined_child(joined).await {
+                        self.pending_exit = Some(Err(error.clone()));
+                        return Err(error);
+                    }
+                }
                 Ok(None) | Err(_) => return Ok(()),
             }
         }
@@ -1105,6 +1227,9 @@ impl SupervisorRuntime {
         self.abort_child(key);
         tokio::task::yield_now().await;
         self.drain_ready_joins().await?;
+        if self.pending_exit.is_some() || self.state != SupervisorState::Running {
+            return Ok(());
+        }
         self.finalize_removed_child_if_present(key);
         Ok(())
     }
@@ -1198,6 +1323,7 @@ fn event_child_id(event: &SupervisorEvent) -> Option<&str> {
     match event {
         SupervisorEvent::ChildStarted { id, .. }
         | SupervisorEvent::ChildExited { id, .. }
+        | SupervisorEvent::AutoShutdownTriggered { id, .. }
         | SupervisorEvent::ChildRestartScheduled { id, .. }
         | SupervisorEvent::ChildRestarted { id, .. }
         | SupervisorEvent::ChildRemoved { id }
