@@ -124,7 +124,12 @@ impl<H: Actor> RawActor for H {
                     _ = ctx.shutdown.cancelled() => {
                         if self.drain_policy() == DrainPolicy::Drain {
                             ctx.mailbox.close();
-                            while let Some(message) = ctx.mailbox.recv().await {
+                            loop {
+                                let message = match ctx.take_continuation() {
+                                    Some(message) => Some(message),
+                                    None => ctx.mailbox.recv().await,
+                                };
+                                let Some(message) = message else { break };
                                 ctx.myself.record_received();
                                 ctx.observability.emit_message_received(&ctx.id);
                                 self.handle(message, &ctx).await?;

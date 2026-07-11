@@ -411,7 +411,9 @@ impl<M: Send + 'static> ActorContext<M> {
     /// Calls made from [`Actor::on_start`](crate::Actor::on_start) are
     /// processed after startup readiness is reported and before ordinary
     /// mailbox messages. This keeps expensive warm-up work out of the
-    /// readiness-critical initialization path.
+    /// readiness-critical initialization path. Continuations count as
+    /// received messages in [`ActorStats`](crate::ActorStats), but not as
+    /// externally accepted mailbox messages.
     pub fn continue_with(&self, message: M) {
         self.continuations
             .lock()

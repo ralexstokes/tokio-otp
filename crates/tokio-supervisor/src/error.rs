@@ -16,6 +16,10 @@ pub enum SupervisorBuildError {
 /// Fatal errors that cause a running supervisor to exit.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SupervisorError {
+    /// The supervisor stopped or a child exited before reporting startup
+    /// readiness.
+    #[error("supervisor startup aborted: {0}")]
+    StartupAborted(String),
     /// A child exceeded its [`RestartIntensity`](crate::RestartIntensity)
     /// limit, so the supervisor cannot continue.
     #[error("restart intensity exceeded")]

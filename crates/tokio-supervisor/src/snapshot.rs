@@ -36,6 +36,12 @@ pub struct ChildSnapshot {
     pub id: String,
     /// Current generation counter. Incremented on each restart.
     pub generation: u64,
+    /// Whether this child has reported readiness in its current generation.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub started: bool,
+    /// Whether this generation exited permanently before reporting readiness.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub startup_aborted: bool,
     /// Current lifecycle state.
     pub state: ChildStateView,
     /// Whether the child is active or being removed.

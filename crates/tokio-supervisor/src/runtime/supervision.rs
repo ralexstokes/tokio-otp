@@ -15,7 +15,7 @@ use tracing::{debug, trace};
 
 use crate::{
     builder::StartMode,
-    child::{ChildDefinition, ChildKind, SupervisorSpec},
+    child::{ChildDefinition, ChildKind, ChildReadiness, SupervisorSpec},
     context::ChildReady,
     error::{ControlError, SupervisorError},
     event::{ExitStatusView, NestedEventNotification, SupervisorEvent},
@@ -264,11 +264,25 @@ impl SupervisorRuntime {
         }
     }
 
-    pub(crate) async fn run(&mut self) -> Result<(), SupervisorError> {
+    pub(crate) async fn run(
+        &mut self,
+        startup_ready: Option<crate::context::ChildContext>,
+    ) -> Result<(), SupervisorError> {
         self.publish_snapshot();
         self.send_event(SupervisorEvent::SupervisorStarted);
         let initial_children = self.child_order.clone();
-        self.start_children(initial_children).await?;
+        let startup_completed = self.start_children(initial_children.clone()).await?;
+        if let Some(startup_ready) = startup_ready {
+            if startup_completed && self.wait_until_children_ready(&initial_children).await? {
+                startup_ready.mark_ready();
+            } else if let Some(result) = self.pending_exit.take() {
+                return result;
+            } else {
+                return Err(SupervisorError::StartupAborted(
+                    "nested supervisor child failed before startup completed".to_owned(),
+                ));
+            }
+        }
 
         loop {
             if let Some(result) = self.pending_exit.take() {
@@ -320,19 +334,29 @@ impl SupervisorRuntime {
     pub(crate) async fn start_children(
         &mut self,
         keys: Vec<ChildKey>,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<bool, SupervisorError> {
         for key in keys {
-            let readiness_gated = self.children[key].runtime.definition.readiness
-                == crate::child::ChildReadiness::Explicit;
-            self.spawn_child(key)?;
-            if self.meta.start_mode == StartMode::Sequential
-                && readiness_gated
-                && !Box::pin(self.wait_until_child_ready(key)).await?
-            {
-                break;
+            let (ready, _, _) = self.spawn_child_for_start(key).await?;
+            if !ready {
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
+    }
+
+    async fn spawn_child_for_start(
+        &mut self,
+        key: ChildKey,
+    ) -> Result<(bool, Option<u64>, u64), SupervisorError> {
+        let readiness_gated =
+            self.children[key].runtime.definition.readiness == ChildReadiness::Explicit;
+        let (old_generation, new_generation) = self.spawn_child(key)?;
+        let ready = if self.meta.start_mode == StartMode::Sequential && readiness_gated {
+            Box::pin(self.wait_until_child_ready(key)).await?
+        } else {
+            true
+        };
+        Ok((ready, old_generation, new_generation))
     }
 
     async fn wait_until_child_ready(&mut self, key: ChildKey) -> Result<bool, SupervisorError> {
@@ -342,7 +366,6 @@ impl SupervisorRuntime {
             };
             match entry.runtime.state {
                 RuntimeChildState::Running => return Ok(true),
-                RuntimeChildState::Stopped if !entry.runtime.has_started => return Ok(false),
                 RuntimeChildState::Stopped => return Ok(false),
                 RuntimeChildState::Starting | RuntimeChildState::Stopping => {}
             }
@@ -381,6 +404,24 @@ impl SupervisorRuntime {
         }
     }
 
+    async fn wait_until_children_ready(
+        &mut self,
+        keys: &[ChildKey],
+    ) -> Result<bool, SupervisorError> {
+        for &key in keys {
+            let Some(entry) = self.children.get(key) else {
+                return Ok(false);
+            };
+            if entry.runtime.has_reported_ready {
+                continue;
+            }
+            if !Box::pin(self.wait_until_child_ready(key)).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn handle_child_ready(&mut self, ready: ChildReady) {
         let Some(entry) = self.children.get_mut(ready.key) else {
             return;
@@ -393,6 +434,7 @@ impl SupervisorRuntime {
             return;
         }
         entry.runtime.state = RuntimeChildState::Running;
+        entry.runtime.has_reported_ready = true;
         let id = entry.id.clone();
         self.send_event(SupervisorEvent::ChildStarted {
             id,
@@ -883,6 +925,9 @@ impl SupervisorRuntime {
                 Strategy::OneForAll => self.handle_one_for_all_restart(classified.key).await?,
                 Strategy::RestForOne => self.handle_rest_for_one_restart(classified.key).await?,
             }
+        } else if allow_restart && !self.children[classified.key].runtime.has_reported_ready {
+            self.children[classified.key].runtime.startup_aborted = true;
+            self.publish_snapshot();
         }
 
         Ok(())
@@ -1052,16 +1097,12 @@ impl SupervisorRuntime {
             {
                 continue;
             }
-            let readiness_gated =
-                entry.runtime.definition.readiness == crate::child::ChildReadiness::Explicit;
-            let (old_generation, new_generation) = self.spawn_child(key)?;
+            let (ready, old_generation, new_generation) =
+                Box::pin(self.spawn_child_for_start(key)).await?;
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
             }
-            if self.meta.start_mode == StartMode::Sequential
-                && readiness_gated
-                && !Box::pin(self.wait_until_child_ready(key)).await?
-            {
+            if !ready {
                 break;
             }
         }
@@ -1127,16 +1168,12 @@ impl SupervisorRuntime {
             {
                 continue;
             }
-            let readiness_gated =
-                entry.runtime.definition.readiness == crate::child::ChildReadiness::Explicit;
-            let (old_generation, new_generation) = self.spawn_child(key)?;
+            let (ready, old_generation, new_generation) =
+                Box::pin(self.spawn_child_for_start(key)).await?;
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
             }
-            if self.meta.start_mode == StartMode::Sequential
-                && readiness_gated
-                && !Box::pin(self.wait_until_child_ready(key)).await?
-            {
+            if !ready {
                 break;
             }
         }
@@ -1289,6 +1326,8 @@ impl SupervisorRuntime {
             children.push(ChildSnapshot {
                 id: entry.id.clone(),
                 generation: entry.runtime.generation,
+                started: entry.runtime.has_reported_ready,
+                startup_aborted: entry.runtime.startup_aborted,
                 state: match entry.runtime.state {
                     RuntimeChildState::Starting => ChildStateView::Starting,
                     RuntimeChildState::Running => ChildStateView::Running,
@@ -1397,7 +1436,9 @@ fn map_supervisor_error_to_control(err: SupervisorError) -> ControlError {
     match err {
         SupervisorError::ShutdownTimedOut(ids) => ControlError::ShutdownTimedOut(ids),
         SupervisorError::Internal(message) => ControlError::Internal(message),
-        SupervisorError::RestartIntensityExceeded => ControlError::SupervisorStopping,
+        SupervisorError::RestartIntensityExceeded | SupervisorError::StartupAborted(_) => {
+            ControlError::SupervisorStopping
+        }
     }
 }
 

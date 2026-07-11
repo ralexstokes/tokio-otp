@@ -128,6 +128,8 @@ mod tests {
             children: vec![crate::ChildSnapshot {
                 id: "worker".to_owned(),
                 generation: 1,
+                started: true,
+                startup_aborted: false,
                 state: ChildStateView::Running,
                 membership: ChildMembershipView::Removing,
                 last_exit: None,

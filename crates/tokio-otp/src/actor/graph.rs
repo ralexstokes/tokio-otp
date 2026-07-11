@@ -305,7 +305,8 @@ impl RunnableActor {
                 biased;
                 joined = &mut actor_task => break joined,
                 result = &mut ready_rx, if ready.is_some() => {
-                    if result.is_ok() && let Some(ready) = ready.take() {
+                    let ready = ready.take();
+                    if result.is_ok() && let Some(ready) = ready {
                         ready();
                     }
                 }

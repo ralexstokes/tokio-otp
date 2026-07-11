@@ -60,6 +60,8 @@ impl SupervisorRuntime {
             let child_token = self.group_token.child_token();
             child.active_token = Some(child_token.clone());
             child.state = RuntimeChildState::Starting;
+            child.has_reported_ready = false;
+            child.startup_aborted = false;
             child.next_restart_deadline = None;
             let completion_state = Arc::new(AtomicU8::new(COMPLETION_PENDING));
             child.completion_state = completion_state.clone();
@@ -191,6 +193,7 @@ impl SupervisorRuntime {
             let child = &mut entry.runtime;
             child.has_started = true;
             child.state = if child.definition.readiness == ChildReadiness::Immediate {
+                child.has_reported_ready = true;
                 RuntimeChildState::Running
             } else {
                 RuntimeChildState::Starting

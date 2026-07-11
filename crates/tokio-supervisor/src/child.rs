@@ -234,7 +234,10 @@ impl ChildSpec {
     ///
     /// This is primarily useful with [`StartMode::Sequential`](crate::StartMode::Sequential).
     /// If the child exits before reporting readiness, its ordinary restart
-    /// policy applies and later sequential siblings remain unstarted.
+    /// policy applies and later sequential siblings remain unstarted. There is
+    /// no built-in readiness timeout; use a timeout inside the child when
+    /// initialization must be bounded. While a sequential supervisor waits,
+    /// shutdown remains responsive and control commands remain queued.
     #[must_use]
     pub fn wait_for_ready(self) -> Self {
         self.map_inner(|inner| inner.readiness = ChildReadiness::Explicit)
@@ -285,7 +288,7 @@ impl ChildDefinition {
             restart_intensity: spec.restart_intensity,
             shutdown_policy: spec.shutdown_policy,
             significant: spec.significant,
-            readiness: ChildReadiness::Immediate,
+            readiness: ChildReadiness::Explicit,
             kind: ChildKind::Supervisor(spec.supervisor),
         }
     }

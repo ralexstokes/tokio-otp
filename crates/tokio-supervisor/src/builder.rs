@@ -45,7 +45,10 @@ pub enum StartMode {
     #[default]
     Concurrent,
     /// Start children in declaration order, waiting for each child to report
-    /// readiness before spawning the next.
+    /// readiness before spawning the next. While startup is waiting, shutdown
+    /// remains responsive but control commands are queued. There is no
+    /// built-in readiness timeout; children that use explicit readiness should
+    /// arrange their own initialization timeout.
     Sequential,
 }
 

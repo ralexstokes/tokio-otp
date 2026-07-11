@@ -82,3 +82,78 @@ async fn actors_gate_sequential_start_on_on_start_and_run_continuations_first() 
     assert!(continuation < mailbox);
     handle.shutdown_and_wait().await.unwrap();
 }
+
+#[derive(Clone)]
+struct FailsOnStart;
+
+impl Actor for FailsOnStart {
+    type Msg = ();
+
+    async fn on_start(&mut self, _ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        Err(std::io::Error::other("actor init failed").into())
+    }
+
+    async fn handle(&mut self, (): (), _ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn failed_actor_start_disarms_readiness_without_panicking() {
+    let mut graph = GraphBuilder::new();
+    graph.add(FailsOnStart);
+    let handle = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .restart(RestartPolicy::Never)
+        .build()
+        .unwrap()
+        .spawn();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), handle.wait_started())
+            .await
+            .unwrap(),
+        Err(SupervisorError::StartupAborted(_))
+    ));
+    let child = handle.snapshot().children.into_iter().next().unwrap();
+    assert!(matches!(child.last_exit, Some(ExitStatusView::Failed(_))));
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[derive(Clone)]
+struct DrainContinuation {
+    handled: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Actor for DrainContinuation {
+    type Msg = &'static str;
+
+    async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        self.handled.lock().await.push(message);
+        if message == "trigger" {
+            ctx.continue_with("continued");
+        }
+        Ok(())
+    }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        DrainPolicy::Drain
+    }
+}
+
+#[tokio::test]
+async fn drain_processes_continuations_queued_by_drained_messages() {
+    let handled = Arc::new(Mutex::new(Vec::new()));
+    let mut graph = GraphBuilder::new();
+    let actor = graph.add(DrainContinuation {
+        handled: Arc::clone(&handled),
+    });
+    let handle = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+    handle.wait_started().await.unwrap();
+    actor.send("trigger").await.unwrap();
+    handle.shutdown_and_wait().await.unwrap();
+    assert_eq!(&*handled.lock().await, &["trigger", "continued"]);
+}

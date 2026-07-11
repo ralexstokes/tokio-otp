@@ -28,6 +28,8 @@ fn snapshot(child_state: ChildStateView) -> SupervisorSnapshot {
         children: vec![ChildSnapshot {
             id: "worker".into(),
             generation: 0,
+            started: child_state == ChildStateView::Running,
+            startup_aborted: false,
             state: child_state,
             membership: ChildMembershipView::Active,
             last_exit: None,
