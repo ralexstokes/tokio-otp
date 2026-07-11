@@ -51,7 +51,7 @@
 //! | [`Actor`] | Handler-style actor definition with a provided receive loop. |
 //! | [`RawActor`] | Custom-loop typed actor definition (the escape hatch). |
 //! | [`ActorRef`] | Cloneable, restart-stable, typed mailbox sender. |
-//! | [`ActorContext`] | Mailbox, blocking work, and shutdown token visible to one actor. |
+//! | [`ActorContext`] | Mailbox, monitors, timers, blocking work, and shutdown token visible to one actor. |
 //! | [`MailboxMode`] | FIFO or latest-wins storage policy selected per actor. |
 //! | [`Reply`] | One-shot response channel carried inside request messages. |
 //! | [`RunnableActor`] | One actor plus stable binding — the unit of execution. |
@@ -90,6 +90,12 @@
 //! failure into a restart loop. [`ActorRef::send`] rides through restart
 //! windows when a rebind is expected, and restart resets actor state to the
 //! wiring-time value (`Clone` is the reset mechanism; see [`Actor`]).
+//!
+//! Actors can observe a peer incarnation with [`ActorContext::monitor`]. Its
+//! [`Down`] notification is mapped into the observer's message type and
+//! delivered through the ordinary mailbox. [`MonitorRef::cancel`] suppresses
+//! future delivery, and all monitors are cancelled automatically when the
+//! observing actor stops or restarts.
 //!
 //! # Static topologies
 //!

@@ -11,7 +11,7 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use crate::actor::{
     error::SendError,
-    monitor::{DownReason, MonitorHub},
+    monitor::MonitorHub,
     observability::{GraphObservability, MessageSizeMetrics},
 };
 
@@ -541,7 +541,6 @@ pub enum RebindPolicy {
 pub(crate) trait BindingLifecycle: Send + Sync {
     fn unbind(&self);
     fn terminate(&self);
-    fn notify_exit(&self, reason: DownReason);
     fn stats(&self) -> ActorStats;
 }
 
@@ -662,10 +661,6 @@ impl<M: Send + 'static> BindingLifecycle for BindingCore<M> {
 
     fn terminate(&self) {
         BindingCore::terminate(self);
-    }
-
-    fn notify_exit(&self, reason: DownReason) {
-        self.monitors.exited(reason);
     }
 
     fn stats(&self) -> ActorStats {

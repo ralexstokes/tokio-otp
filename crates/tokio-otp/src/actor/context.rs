@@ -398,10 +398,15 @@ impl<M: Send + 'static> ActorContext<M> {
     ///
     /// When that incarnation exits, `map` converts its [`Down`] information
     /// into this actor's message type and the result is delivered through this
-    /// actor's mailbox. Monitoring a ref with no live incarnation delivers an
-    /// immediate [`DownReason::NoProcess`](crate::DownReason::NoProcess).
+    /// actor's mailbox. A target that has not started yet is monitored from its
+    /// first incarnation; an exited, terminated, or detached target delivers
+    /// an immediate [`DownReason::NoProcess`](crate::DownReason::NoProcess).
     /// Monitors are automatically cancelled when this observer incarnation
     /// stops or restarts.
+    ///
+    /// Delivery uses the observer's ordinary mailbox policy. A conflating
+    /// mailbox may replace an unread monitor message, so use a FIFO mailbox
+    /// when every `Down` must be observed.
     pub fn monitor<T, F>(&self, target: &ActorRef<T>, map: F) -> MonitorRef
     where
         T: Send + 'static,
@@ -412,6 +417,7 @@ impl<M: Send + 'static> ActorContext<M> {
             cancellation: cancellation.clone(),
         };
         let myself = self.myself();
+        let runtime = tokio::runtime::Handle::try_current().ok();
 
         target.monitors.register(
             cancellation.clone(),
@@ -419,8 +425,11 @@ impl<M: Send + 'static> ActorContext<M> {
                 if cancellation.is_cancelled() {
                     return;
                 }
-                let message = map(down);
-                tokio::spawn(async move {
+                let Some(runtime) = runtime else {
+                    return;
+                };
+                runtime.spawn(async move {
+                    let message = map(down);
                     tokio::select! {
                         biased;
                         () = cancellation.cancelled() => {}

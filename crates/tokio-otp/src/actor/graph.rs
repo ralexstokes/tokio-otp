@@ -25,7 +25,7 @@ use crate::actor::{
     },
     builder::{ActorOptions, DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
     context::{ActorContext, ActorRef, ActorTimers},
-    monitor::{ActorMonitors, DownReason},
+    monitor::{ActorMonitors, DownReason, MonitorExitGuard},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     raw::{ActorResult, BoxError, RawActor},
 };
@@ -69,6 +69,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             start.rebind_policy,
         );
         let myself = ActorRef::from_core(&self.binding, Some(actor_id.clone()));
+        let monitor_hub = self.binding.monitor_hub();
         let ctx = ActorContext {
             id: actor_id,
             mailbox,
@@ -82,7 +83,15 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
 
         Box::pin(async move {
             let _bound_mailbox = bound_mailbox;
-            actor.run(ctx).await
+            let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
+            let result = actor.run(ctx).await;
+            let reason = if result.is_ok() {
+                DownReason::Normal
+            } else {
+                DownReason::Failure
+            };
+            monitor_exit.report(reason);
+            result
         })
     }
 }
@@ -295,7 +304,6 @@ impl RunnableActor {
                 } else {
                     ActorExitStatus::Stopped
                 };
-                self.inner.binding_lifecycle.notify_exit(DownReason::Normal);
                 self.apply_run_disposition(run_disposition(rebind, shutdown_requested, status));
                 self.inner
                     .observability
@@ -307,9 +315,6 @@ impl RunnableActor {
                     actor_id: actor_id.to_string(),
                     source,
                 };
-                self.inner
-                    .binding_lifecycle
-                    .notify_exit(DownReason::Failure);
                 self.apply_run_disposition(run_disposition(
                     rebind,
                     shutdown_requested,
@@ -323,9 +328,6 @@ impl RunnableActor {
                 Err(error)
             }
             Err(err) if err.is_panic() => {
-                self.inner
-                    .binding_lifecycle
-                    .notify_exit(DownReason::Failure);
                 self.apply_run_disposition(run_disposition(
                     rebind,
                     shutdown_requested,
@@ -339,9 +341,6 @@ impl RunnableActor {
                 std::panic::resume_unwind(err.into_panic());
             }
             Err(_err) if aborted_after_timeout => {
-                self.inner
-                    .binding_lifecycle
-                    .notify_exit(DownReason::Failure);
                 self.apply_run_disposition(run_disposition(
                     rebind,
                     shutdown_requested,
@@ -362,9 +361,6 @@ impl RunnableActor {
                     actor_id: actor_id.to_string(),
                     source,
                 };
-                self.inner
-                    .binding_lifecycle
-                    .notify_exit(DownReason::Failure);
                 self.apply_run_disposition(run_disposition(
                     rebind,
                     shutdown_requested,

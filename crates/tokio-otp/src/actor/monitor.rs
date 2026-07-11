@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+};
 
 use tokio_util::sync::CancellationToken;
 
@@ -8,6 +11,8 @@ pub struct Down {
     /// Stable id of the actor that was monitored.
     pub actor_id: String,
     /// Incarnation counter, starting at zero and increasing on every restart.
+    /// This value is a placeholder when [`reason`](Self::reason) is
+    /// [`NoProcess`](DownReason::NoProcess) for an actor that never started.
     pub generation: u64,
     /// How the monitored incarnation exited.
     pub reason: DownReason,
@@ -92,7 +97,10 @@ impl MonitorHub {
     }
 
     pub(crate) fn register(&self, cancellation: CancellationToken, callback: MonitorCallback) {
-        let mut state = self.state.lock().expect("actor monitor lock poisoned");
+        let mut state = self.state();
+        state
+            .registrations
+            .retain(|_, registration| !registration.cancellation.is_cancelled());
         let generation = match state.lifecycle {
             Lifecycle::Pending => state.next_generation,
             Lifecycle::Running(generation) => generation,
@@ -120,7 +128,10 @@ impl MonitorHub {
     }
 
     pub(crate) fn started(&self) {
-        let mut state = self.state.lock().expect("actor monitor lock poisoned");
+        let mut state = self.state();
+        state
+            .registrations
+            .retain(|_, registration| !registration.cancellation.is_cancelled());
         let generation = state.next_generation;
         state.next_generation = state.next_generation.saturating_add(1);
         state.lifecycle = Lifecycle::Running(generation);
@@ -128,7 +139,7 @@ impl MonitorHub {
 
     pub(crate) fn exited(&self, reason: DownReason) {
         let callbacks = {
-            let mut state = self.state.lock().expect("actor monitor lock poisoned");
+            let mut state = self.state();
             let Lifecycle::Running(generation) = state.lifecycle else {
                 return;
             };
@@ -150,7 +161,7 @@ impl MonitorHub {
 
     pub(crate) fn terminated(&self) {
         let callbacks = {
-            let mut state = self.state.lock().expect("actor monitor lock poisoned");
+            let mut state = self.state();
             match state.lifecycle {
                 Lifecycle::Pending => {
                     state.lifecycle = Lifecycle::Terminated(None);
@@ -161,7 +172,15 @@ impl MonitorHub {
                         .map(|(_, registration)| (registration, down.clone()))
                         .collect::<Vec<_>>()
                 }
-                Lifecycle::Running(_) => Vec::new(),
+                Lifecycle::Running(generation) => {
+                    state.lifecycle = Lifecycle::Terminated(Some(generation));
+                    let down = self.down(generation, DownReason::Failure);
+                    state
+                        .registrations
+                        .extract_if(|_, registration| registration.generation == generation)
+                        .map(|(_, registration)| (registration, down.clone()))
+                        .collect::<Vec<_>>()
+                }
                 Lifecycle::Exited(generation) => {
                     state.lifecycle = Lifecycle::Terminated(Some(generation));
                     Vec::new()
@@ -182,6 +201,37 @@ impl MonitorHub {
             actor_id: self.actor_id.clone(),
             generation,
             reason,
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, MonitorState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+pub(crate) struct MonitorExitGuard {
+    hub: Arc<MonitorHub>,
+    reported: bool,
+}
+
+impl MonitorExitGuard {
+    pub(crate) fn new(hub: Arc<MonitorHub>) -> Self {
+        Self {
+            hub,
+            reported: false,
+        }
+    }
+
+    pub(crate) fn report(&mut self, reason: DownReason) {
+        self.hub.exited(reason);
+        self.reported = true;
+    }
+}
+
+impl Drop for MonitorExitGuard {
+    fn drop(&mut self) {
+        if !self.reported {
+            self.hub.exited(DownReason::Failure);
         }
     }
 }
