@@ -80,10 +80,10 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             monitors,
         };
         let mut actor = self.actor.clone();
+        let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
 
         Box::pin(async move {
             let _bound_mailbox = bound_mailbox;
-            let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
             let result = actor.run(ctx).await;
             let reason = if result.is_ok() {
                 DownReason::Normal
