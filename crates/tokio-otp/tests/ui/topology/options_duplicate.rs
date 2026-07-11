@@ -13,10 +13,8 @@ impl RawActor for Park {
 
 #[derive(Topology)]
 struct ParkGraph {
-    #[topology(
-        options = tokio_otp::ActorOptions::new(),
-        options = tokio_otp::ActorOptions::new()
-    )]
+    #[topology(options = tokio_otp::ActorOptions::new())]
+    #[topology(options = tokio_otp::ActorOptions::new())]
     park: Park,
 }
 

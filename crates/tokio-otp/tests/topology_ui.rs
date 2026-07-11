@@ -3,7 +3,7 @@
 //! type for a slot, reusing a consumed slot token).
 
 #[test]
-fn topology_errors_are_readable() {
+fn topology_derive_ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/topology/*.rs");
     t.pass("tests/ui/topology-pass/*.rs");

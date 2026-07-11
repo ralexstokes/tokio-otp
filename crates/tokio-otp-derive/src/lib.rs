@@ -148,11 +148,28 @@ use syn::{
 /// `ActorOptions` expression to `GraphBuilder::slot_with_options`. Fields
 /// without this attribute continue to use the default options:
 ///
-/// ```ignore
+/// ```
+/// # use tokio_otp::{
+/// #     ActorContext, ActorOptions, ActorResult, MailboxMode, MessageSize, RawActor,
+/// # };
+/// # struct Snapshot(Vec<u8>);
+/// # impl MessageSize for Snapshot {
+/// #     fn size_hint(&self) -> usize {
+/// #         self.0.len()
+/// #     }
+/// # }
+/// # #[derive(Clone)]
+/// # struct SnapshotActor;
+/// # impl RawActor for SnapshotActor {
+/// #     type Msg = Snapshot;
+/// #     async fn run(&mut self, _: ActorContext<Snapshot>) -> ActorResult {
+/// #         Ok(())
+/// #     }
+/// # }
 /// #[derive(tokio_otp::Topology)]
 /// struct MarketData {
-///     #[topology(options = tokio_otp::ActorOptions::new()
-///         .mailbox(tokio_otp::MailboxMode::Conflate)
+///     #[topology(options = ActorOptions::new()
+///         .mailbox(MailboxMode::Conflate)
 ///         .message_size())]
 ///     snapshots: SnapshotActor,
 /// }
