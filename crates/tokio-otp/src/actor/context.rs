@@ -281,6 +281,9 @@ impl TimerRef {
     }
 
     /// Returns `true` if this timer has been cancelled.
+    ///
+    /// Completion is distinct from cancellation: a one-shot timer that has
+    /// already fired is not considered cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
@@ -403,6 +406,7 @@ impl<M: Send + 'static> ActorContext<M> {
                             sent = myself.send(message.clone()) => sent,
                         };
                         if sent.is_err() {
+                            cancellation.cancel();
                             break;
                         }
                     }

@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::{Notify, mpsc},
+    time::{Instant, advance, timeout},
+};
 use tokio_otp::{ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Runtime};
 use tokio_supervisor::{Strategy, SupervisorBuilder};
 
@@ -41,7 +44,7 @@ impl RawActor for OneShot {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn send_after_fires_once() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, _) = build_runtime(OneShot {
@@ -84,7 +87,7 @@ impl RawActor for CancelledTimer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancelling_send_after_prevents_delivery() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, _) = build_runtime(CancelledTimer {
@@ -124,7 +127,7 @@ impl RawActor for Interval {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn interval_repeats_until_cancelled() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, _) = build_runtime(Interval {
@@ -173,7 +176,7 @@ impl RawActor for RestartingTimer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn restart_cancels_previous_incarnations_timers() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, _) = build_runtime(RestartingTimer {
@@ -194,6 +197,100 @@ async fn restart_cancels_previous_incarnations_timers() {
             .is_err(),
         "a previous incarnation delivered a stale timer message"
     );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackpressureMsg {
+    Occupied,
+    Tick,
+}
+
+#[derive(Clone)]
+struct BackpressureInterval {
+    ready: Arc<Notify>,
+    release: Arc<Notify>,
+    observed: mpsc::UnboundedSender<Vec<(BackpressureMsg, Duration)>>,
+}
+
+impl RawActor for BackpressureInterval {
+    type Msg = BackpressureMsg;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let started = Instant::now();
+        let _timer = ctx.interval(BackpressureMsg::Tick, Duration::from_millis(10));
+        self.ready.notify_one();
+        self.release.notified().await;
+
+        let mut messages = Vec::new();
+        for _ in 0..4 {
+            let message = ctx.recv().await.expect("message before shutdown");
+            messages.push((message, Instant::now().duration_since(started)));
+        }
+        self.observed.send(messages).expect("observer alive");
+
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn interval_waits_for_mailbox_capacity_and_skips_missed_ticks() {
+    let ready = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+
+    let mut builder = GraphBuilder::new();
+    builder.mailbox_capacity(1);
+    let actor_ref = builder.actor(
+        "timer",
+        BackpressureInterval {
+            ready: Arc::clone(&ready),
+            release: Arc::clone(&release),
+            observed: observed_tx,
+        },
+    );
+    let graph = builder.build().expect("valid graph");
+    let runtime = tokio_otp::SupervisedActors::new(graph)
+        .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+
+    ready.notified().await;
+    actor_ref
+        .send(BackpressureMsg::Occupied)
+        .await
+        .expect("mailbox filled");
+    advance(Duration::from_millis(100)).await;
+    tokio::task::yield_now().await;
+
+    let stats = actor_ref.stats();
+    assert_eq!(stats.mailbox_depth, 1);
+    assert_eq!(stats.messages_accepted, 1, "timer must await capacity");
+
+    release.notify_one();
+    let messages = observed_rx.recv().await.expect("actor reported messages");
+    assert_eq!(
+        messages
+            .iter()
+            .map(|(message, _)| *message)
+            .collect::<Vec<_>>(),
+        vec![
+            BackpressureMsg::Occupied,
+            BackpressureMsg::Tick,
+            BackpressureMsg::Tick,
+            BackpressureMsg::Tick,
+        ]
+    );
+    assert_eq!(messages[0].1, Duration::from_millis(100));
+    assert_eq!(messages[1].1, Duration::from_millis(100));
+    assert_eq!(
+        messages[2].1,
+        Duration::from_millis(110),
+        "missed ticks must not burst after capacity becomes available"
+    );
+    assert_eq!(messages[3].1, Duration::from_millis(120));
 
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }
