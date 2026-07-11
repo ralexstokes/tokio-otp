@@ -6,4 +6,5 @@
 fn topology_errors_are_readable() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/topology/*.rs");
+    t.pass("tests/ui/topology-pass/*.rs");
 }
