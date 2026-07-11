@@ -25,6 +25,7 @@ use crate::actor::{
     },
     builder::{ActorOptions, DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
     context::{ActorContext, ActorRef, ActorTimers},
+    monitor::{ActorMonitors, DownReason, MonitorExitGuard},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     raw::{ActorResult, BoxError, RawActor},
 };
@@ -57,6 +58,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
     fn start(&self, start: RunnerStart) -> BoxedActorFuture {
         let actor_shutdown = start.shutdown;
         let timers = ActorTimers::new(&actor_shutdown);
+        let monitors = ActorMonitors::new(&actor_shutdown);
         let observability = start.observability;
         let (sender, mailbox) = mailbox(&self.mailbox_mode, start.mailbox_capacity);
         let actor_id = self.binding.actor_id().clone();
@@ -67,6 +69,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             start.rebind_policy,
         );
         let myself = ActorRef::from_core(&self.binding, Some(actor_id.clone()));
+        let monitor_hub = self.binding.monitor_hub();
         let ctx = ActorContext {
             id: actor_id,
             mailbox,
@@ -74,12 +77,21 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             shutdown: actor_shutdown,
             observability,
             timers,
+            monitors,
         };
         let mut actor = self.actor.clone();
+        let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
 
         Box::pin(async move {
             let _bound_mailbox = bound_mailbox;
-            actor.run(ctx).await
+            let result = actor.run(ctx).await;
+            let reason = if result.is_ok() {
+                DownReason::Normal
+            } else {
+                DownReason::Failure
+            };
+            monitor_exit.report(reason);
+            result
         })
     }
 }

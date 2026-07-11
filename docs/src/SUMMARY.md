@@ -9,6 +9,7 @@
 - [Actor graphs](actor-graphs.md)
 - [Supervised actors](supervised-actors.md)
 - [Actor timers](actor-timers.md)
+- [Actor monitors](actor-monitors.md)
 - [Dynamic actors](dynamic-actors.md)
 - [Observability](observability.md)
 

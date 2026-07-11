@@ -12,6 +12,7 @@ mod context;
 mod error;
 mod graph;
 mod handler;
+mod monitor;
 mod observability;
 mod raw;
 
@@ -21,4 +22,5 @@ pub use context::{ActorContext, ActorRef, Reply, TimerRef};
 pub use error::{CallError, GraphBuildError, SendError};
 pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};
 pub use handler::{Actor, DrainPolicy};
+pub use monitor::{Down, DownReason, MonitorRef};
 pub use raw::{ActorResult, BoxError, RawActor};

@@ -12,6 +12,7 @@ use crate::actor::{
         MessageSizeObserver, SendOutcome,
     },
     error::{CallError, SendError},
+    monitor::{ActorMonitors, Down, MonitorHub, MonitorRef},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
 
@@ -27,6 +28,7 @@ pub struct ActorRef<M> {
     stats: Arc<ActorStatsCounters>,
     message_size: Option<Arc<MessageSizeObserver<M>>>,
     source_actor_id: Option<Arc<str>>,
+    monitors: Arc<MonitorHub>,
 }
 
 impl<M> Clone for ActorRef<M> {
@@ -37,6 +39,7 @@ impl<M> Clone for ActorRef<M> {
             stats: Arc::clone(&self.stats),
             message_size: self.message_size.clone(),
             source_actor_id: self.source_actor_id.clone(),
+            monitors: Arc::clone(&self.monitors),
         }
     }
 }
@@ -57,6 +60,7 @@ impl<M> ActorRef<M> {
             core.stats_counters(),
             core.message_size(),
             source_actor_id,
+            core.monitor_hub(),
         )
     }
 
@@ -66,6 +70,7 @@ impl<M> ActorRef<M> {
         stats: Arc<ActorStatsCounters>,
         message_size: Option<Arc<MessageSizeObserver<M>>>,
         source_actor_id: Option<Arc<str>>,
+        monitors: Arc<MonitorHub>,
     ) -> Self {
         Self {
             actor_id,
@@ -73,6 +78,7 @@ impl<M> ActorRef<M> {
             stats,
             message_size,
             source_actor_id,
+            monitors,
         }
     }
 
@@ -364,6 +370,7 @@ pub struct ActorContext<M> {
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
     pub(crate) timers: ActorTimers,
+    pub(crate) monitors: ActorMonitors,
 }
 
 impl<M: Send + 'static> ActorContext<M> {
@@ -385,6 +392,54 @@ impl<M: Send + 'static> ActorContext<M> {
     /// Returns a sender targeting this actor's own mailbox.
     pub fn myself(&self) -> ActorRef<M> {
         self.myself.clone()
+    }
+
+    /// Monitors the target actor's current incarnation.
+    ///
+    /// When that incarnation exits, `map` converts its [`Down`] information
+    /// into this actor's message type and the result is delivered through this
+    /// actor's mailbox. A target that has not started yet is monitored from its
+    /// first incarnation; an exited, terminated, or detached target delivers
+    /// an immediate [`DownReason::NoProcess`](crate::DownReason::NoProcess).
+    /// Monitors are automatically cancelled when this observer incarnation
+    /// stops or restarts.
+    ///
+    /// Delivery uses the observer's ordinary mailbox policy. A conflating
+    /// mailbox may replace an unread monitor message, so use a FIFO mailbox
+    /// when every `Down` must be observed.
+    pub fn monitor<T, F>(&self, target: &ActorRef<T>, map: F) -> MonitorRef
+    where
+        T: Send + 'static,
+        F: FnOnce(Down) -> M + Send + 'static,
+    {
+        let cancellation = self.monitors.child_token();
+        let monitor = MonitorRef {
+            cancellation: cancellation.clone(),
+        };
+        let myself = self.myself();
+        let runtime = tokio::runtime::Handle::try_current().ok();
+
+        target.monitors.register(
+            cancellation.clone(),
+            Box::new(move |down| {
+                if cancellation.is_cancelled() {
+                    return;
+                }
+                let Some(runtime) = runtime else {
+                    return;
+                };
+                runtime.spawn(async move {
+                    let message = map(down);
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => {}
+                        _ = myself.send(message) => {}
+                    }
+                });
+            }),
+        );
+
+        monitor
     }
 
     /// Sends `message` to this actor after `delay` has elapsed.

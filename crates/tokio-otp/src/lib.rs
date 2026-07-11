@@ -51,7 +51,7 @@
 //! | [`Actor`] | Handler-style actor definition with a provided receive loop. |
 //! | [`RawActor`] | Custom-loop typed actor definition (the escape hatch). |
 //! | [`ActorRef`] | Cloneable, restart-stable, typed mailbox sender. |
-//! | [`ActorContext`] | Mailbox, blocking work, and shutdown token visible to one actor. |
+//! | [`ActorContext`] | Mailbox, monitors, timers, blocking work, and shutdown token visible to one actor. |
 //! | [`MailboxMode`] | FIFO or latest-wins storage policy selected per actor. |
 //! | [`Reply`] | One-shot response channel carried inside request messages. |
 //! | [`RunnableActor`] | One actor plus stable binding — the unit of execution. |
@@ -90,6 +90,12 @@
 //! failure into a restart loop. [`ActorRef::send`] rides through restart
 //! windows when a rebind is expected, and restart resets actor state to the
 //! wiring-time value (`Clone` is the reset mechanism; see [`Actor`]).
+//!
+//! Actors can observe a peer incarnation with [`ActorContext::monitor`]. Its
+//! [`Down`] notification is mapped into the observer's message type and
+//! delivered through the ordinary mailbox. [`MonitorRef::cancel`] suppresses
+//! future delivery, and all monitors are cancelled automatically when the
+//! observing actor stops or restarts.
 //!
 //! # Static topologies
 //!
@@ -233,10 +239,11 @@ pub mod prelude {
     pub use crate::codec;
     pub use crate::{
         Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot,
-        ActorStats, BoxError, CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError,
-        GraphBuilder, MailboxMode, MessageSize, RawActor, RebindPolicy, Reply, RunnableActor,
-        RunnableActorFactory, Runtime, RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors,
-        SupervisorHandleExt, TimerRef, TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
+        ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, DynamicActorOptions, Graph,
+        GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorRef, RawActor,
+        RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime, RuntimeBuilder,
+        RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt, TimerRef, TopologyEdge,
+        TopologyMetadata, TopologyNode, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -255,9 +262,9 @@ pub use tokio_otp_derive::Topology;
 
 pub use actor::{
     Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
-    BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, MailboxMode,
-    MessageSize, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError,
-    TimerRef,
+    BoxError, CallError, Down, DownReason, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
+    MailboxMode, MessageSize, MonitorRef, RawActor, RebindPolicy, Reply, RunnableActor,
+    RunnableActorFactory, SendError, TimerRef,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
