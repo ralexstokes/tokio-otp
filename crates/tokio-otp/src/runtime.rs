@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    ActorRef, ActorStats, MessageSize, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
+    ActorOptions, ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
 };
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{
@@ -265,24 +265,19 @@ impl RuntimeHandle {
         self.add_constructed_actor(actor, options).await
     }
 
-    /// Adds a supervised runtime actor with message-size observation enabled.
-    ///
-    /// This is the runtime-added equivalent of
-    /// [`GraphBuilder::actor_with_message_size`](crate::GraphBuilder::actor_with_message_size).
-    pub async fn add_actor_with_message_size<A>(
+    /// Adds a supervised runtime actor with explicit per-actor registration
+    /// options and returns its stable typed ref.
+    pub async fn add_actor_with_options<A: RawActor>(
         &self,
         label: impl Into<String>,
         actor: A,
+        actor_options: ActorOptions<A::Msg>,
         options: DynamicActorOptions,
-    ) -> Result<ActorRef<A::Msg>, ControlError>
-    where
-        A: RawActor,
-        A::Msg: MessageSize,
-    {
+    ) -> Result<ActorRef<A::Msg>, ControlError> {
         let actor = self
             .actors
             .actor_factory
-            .actor_with_message_size(label, actor);
+            .actor_with_options(label, actor, actor_options);
         self.add_constructed_actor(actor, options).await
     }
 

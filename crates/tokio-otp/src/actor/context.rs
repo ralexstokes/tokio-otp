@@ -11,7 +11,6 @@ use crate::actor::{
         ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxReceiver, MailboxRef,
         MessageSizeObserver, SendOutcome,
     },
-    builder::MessageSize,
     error::{CallError, SendError},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
@@ -82,14 +81,8 @@ impl<M> ActorRef<M> {
         Self::from_core(&core, None)
     }
 
-    pub(crate) fn detached_with_message_size(actor_id: Arc<str>) -> Self
-    where
-        M: MessageSize,
-    {
-        let core = Arc::new(BindingCore::<M>::with_message_size(
-            actor_id,
-            MessageSize::size_hint,
-        ));
+    pub(crate) fn detached_with_size_hint(actor_id: Arc<str>, size_hint: fn(&M) -> usize) -> Self {
+        let core = Arc::new(BindingCore::<M>::with_message_size(actor_id, size_hint));
         Self::from_core(&core, None)
     }
 

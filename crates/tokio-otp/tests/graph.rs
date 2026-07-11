@@ -994,9 +994,9 @@ mod runnable_actor {
         time::{sleep, timeout},
     };
     use tokio_otp::{
-        Actor, ActorContext, ActorRef, ActorResult, ActorRunError, BoxError, DrainPolicy, Graph,
-        GraphBuilder, MessageSize, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
-        SendError,
+        Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, BoxError,
+        DrainPolicy, Graph, GraphBuilder, MessageSize, RawActor, RebindPolicy, RunnableActor,
+        RunnableActorFactory, SendError,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -1085,14 +1085,24 @@ mod runnable_actor {
     #[test]
     fn failed_sized_registration_returns_a_sized_detached_ref() {
         let mut builder = GraphBuilder::new();
-        builder.actor_with_message_size("worker", Drain::<SizedPayload>::new());
-        let detached = builder.actor_with_message_size("worker", Drain::<SizedPayload>::new());
+        builder.actor_with_options(
+            "worker",
+            Drain::<SizedPayload>::new(),
+            ActorOptions::new().message_size(),
+        );
+        let detached = builder.actor_with_options(
+            "worker",
+            Drain::<SizedPayload>::new(),
+            ActorOptions::new().message_size(),
+        );
 
         assert_eq!(detached.stats().message_bytes_accepted, Some(0));
 
         let mut slot_builder = GraphBuilder::new();
-        slot_builder.slot_with_message_size::<SizedPayload>("worker");
-        let (_slot, detached) = slot_builder.slot_with_message_size::<SizedPayload>("worker");
+        slot_builder
+            .slot_with_options::<SizedPayload>("worker", ActorOptions::new().message_size());
+        let (_slot, detached) = slot_builder
+            .slot_with_options::<SizedPayload>("worker", ActorOptions::new().message_size());
         assert_eq!(detached.stats().message_bytes_accepted, Some(0));
     }
 
@@ -1207,13 +1217,14 @@ mod runnable_actor {
         let release = Arc::new(Notify::new());
         let mut builder = GraphBuilder::new();
         builder.mailbox_capacity(1);
-        let worker_ref = builder.actor_with_message_size(
+        let worker_ref = builder.actor_with_options(
             "worker",
             GatedSizedDrain {
                 started: started_tx,
                 release: Arc::clone(&release),
                 received: received_tx,
             },
+            ActorOptions::new().message_size(),
         );
         let graph = builder.build().expect("valid graph");
         let worker = single_actor(&graph, "worker");

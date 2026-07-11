@@ -16,7 +16,7 @@ mod observability;
 mod raw;
 
 pub use binding::{ActorStats, MailboxMode, RebindPolicy};
-pub use builder::{ActorSlot, GraphBuilder, MessageSize};
+pub use builder::{ActorOptions, ActorSlot, GraphBuilder, MessageSize};
 pub use context::{ActorContext, ActorRef, Reply, TimerRef};
 pub use error::{CallError, GraphBuildError, SendError};
 pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};

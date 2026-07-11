@@ -167,11 +167,11 @@
 //! live mailbox usage are available through [`ActorRef::stats`] and
 //! [`RuntimeHandle::actor_stats`]; exporting time-series is a user-side
 //! sampler task over those surfaces (see `examples/actor_metrics.rs`).
-//! Actors registered with [`GraphBuilder::actor_with_message_size`] or
-//! [`GraphBuilder::slot_with_message_size`] also expose application-defined
-//! accepted-byte totals through [`ActorStats`] and emit size metrics when the
-//! `metrics` feature is enabled. Runtime-added actors can opt in through
-//! [`RuntimeHandle::add_actor_with_message_size`].
+//! Actors registered with [`ActorOptions::message_size`] expose
+//! application-defined accepted-byte totals through [`ActorStats`] and emit
+//! size metrics when the `metrics` feature is enabled. The same options can
+//! select a [`MailboxMode`] and apply to statically or dynamically registered
+//! actors.
 //! Install subscribers and samplers at the application boundary, not inside
 //! the library.
 //!
@@ -232,9 +232,9 @@ pub mod prelude {
     #[cfg(feature = "serde")]
     pub use crate::codec;
     pub use crate::{
-        Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
-        CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
-        MailboxMode, MessageSize, RawActor, RebindPolicy, Reply, RunnableActor,
+        Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot,
+        ActorStats, BoxError, CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError,
+        GraphBuilder, MailboxMode, MessageSize, RawActor, RebindPolicy, Reply, RunnableActor,
         RunnableActorFactory, Runtime, RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors,
         SupervisorHandleExt, TimerRef, TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
     };
@@ -254,9 +254,10 @@ pub use tokio_otp_console::{ActorStatsView, Console, ConsoleBuilder, ConsoleHand
 pub use tokio_otp_derive::Topology;
 
 pub use actor::{
-    Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
-    CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, MailboxMode, MessageSize,
-    RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, TimerRef,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
+    BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, MailboxMode,
+    MessageSize, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError,
+    TimerRef,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
