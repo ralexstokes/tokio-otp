@@ -12,4 +12,8 @@ pub enum Strategy {
     /// unexpectedly. Use this when children have hard interdependencies and
     /// cannot function correctly without their siblings.
     OneForAll,
+    /// The exited child and every child declared after it are stopped and
+    /// restarted. Children declared before it are unaffected. Use this for
+    /// ordered pipelines where downstream state depends on upstream output.
+    RestForOne,
 }

@@ -107,11 +107,14 @@ The [`Strategy`] decides who is affected when a child fails:
   Use this when children hold interdependent state, e.g. a producer/consumer
   pair that must resynchronize from scratch. (`Never` children are drained
   with the group but not respawned.)
+- **`Strategy::RestForOne`** — the failed child and every child declared after
+  it are stopped, then eligible children in that suffix restart in declaration
+  order. Earlier children remain running. Use this for ordered pipelines.
 
 ## Shutdown policies
 
-When a child must stop — on supervisor shutdown, removal, or a `OneForAll`
-group restart — its [`ShutdownPolicy`] governs how:
+When a child must stop — on supervisor shutdown, removal, or a group restart —
+its [`ShutdownPolicy`] governs how:
 
 - **`ShutdownPolicy::cooperative_strict(grace)`** — cancel the child's token
   and wait up to `grace` for a voluntary exit; abort *and report a timeout

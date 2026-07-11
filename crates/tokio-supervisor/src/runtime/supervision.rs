@@ -35,7 +35,7 @@ use super::{
 
 /// Slab key for a child entry. Stable across restarts but invalidated when the
 /// child is removed from the slab.
-type ChildKey = usize;
+pub(crate) type ChildKey = usize;
 
 /// Message returned by a child task through the `JoinSet`, carrying the task
 /// result alongside the bookkeeping keys needed to correlate it back to the
@@ -684,8 +684,18 @@ impl SupervisorRuntime {
         let Some(classified) = self.consume_joined_child(joined)? else {
             return Ok(());
         };
-        self.record_exit(classified.key, classified.generation, &classified.status);
+        self.dispatch_exit(classified).await
+    }
 
+    async fn dispatch_exit(&mut self, classified: ClassifiedExit) -> Result<(), SupervisorError> {
+        self.record_exit(classified.key, classified.generation, &classified.status);
+        self.apply_exit_policy(classified).await
+    }
+
+    async fn apply_exit_policy(
+        &mut self,
+        classified: ClassifiedExit,
+    ) -> Result<(), SupervisorError> {
         if self.state == SupervisorState::Stopping {
             return Ok(());
         }
@@ -704,6 +714,7 @@ impl SupervisorRuntime {
                         .await?
                 }
                 Strategy::OneForAll => self.handle_one_for_all_restart(classified.key).await?,
+                Strategy::RestForOne => self.handle_rest_for_one_restart(classified.key).await?,
             }
         }
 
@@ -753,7 +764,7 @@ impl SupervisorRuntime {
         }
     }
 
-    fn record_exit(&mut self, key: ChildKey, generation: u64, status: &ExitStatus) {
+    pub(crate) fn record_exit(&mut self, key: ChildKey, generation: u64, status: &ExitStatus) {
         if counts_as_running(
             self.children[key].membership,
             self.children[key].runtime.state,
@@ -853,6 +864,68 @@ impl SupervisorRuntime {
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
             }
+        }
+        Ok(())
+    }
+
+    async fn handle_rest_for_one_restart(
+        &mut self,
+        failing_key: ChildKey,
+    ) -> Result<(), SupervisorError> {
+        let failing_instance = self.children[failing_key].instance;
+        let delay = self.schedule_restart(failing_key)?;
+        self.send_event(SupervisorEvent::ChildRestartScheduled {
+            id: self.children[failing_key].id.clone(),
+            generation: self.children[failing_key].runtime.generation,
+            delay,
+        });
+        if !self.wait_for_restart_delay(delay).await? {
+            return Ok(());
+        }
+
+        let Some(failing_child) = self.children.get(failing_key) else {
+            return Ok(());
+        };
+        if failing_child.instance != failing_instance
+            || failing_child.membership != MembershipState::Active
+        {
+            return Ok(());
+        }
+
+        let Some(failing_position) = self.child_order.iter().position(|&key| key == failing_key)
+        else {
+            return Ok(());
+        };
+        let keys = self.child_order[failing_position..].to_vec();
+        debug!(
+            "restarting child suffix after exit from {}",
+            failing_child.id
+        );
+        let deferred = self.drain_for_rest_for_one_restart(&keys).await?;
+        for key in keys {
+            let entry = &self.children[key];
+            if entry.membership != MembershipState::Active
+                || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
+            {
+                continue;
+            }
+            let (old_generation, new_generation) = self.spawn_child(key)?;
+            if let Some(old_generation) = old_generation {
+                self.send_restart_event(key, old_generation, new_generation);
+            }
+        }
+        for classified in deferred {
+            // A deferred child may already have been respawned (or removed) by
+            // an earlier deferred dispatch's suffix restart; its recorded exit
+            // is then stale and must not be applied to the fresh generation.
+            if !self.current_child_matches(
+                classified.key,
+                classified.instance,
+                classified.generation,
+            ) {
+                continue;
+            }
+            Box::pin(self.apply_exit_policy(classified)).await?;
         }
         Ok(())
     }
@@ -1036,7 +1109,7 @@ impl SupervisorRuntime {
         Ok(())
     }
 
-    fn consume_joined_child(
+    pub(crate) fn consume_joined_child(
         &mut self,
         joined: Result<(Id, ChildEnvelope), JoinError>,
     ) -> Result<Option<ClassifiedExit>, SupervisorError> {
@@ -1091,11 +1164,11 @@ fn map_supervisor_error_to_control(err: SupervisorError) -> ControlError {
     }
 }
 
-struct ClassifiedExit {
-    key: ChildKey,
+pub(crate) struct ClassifiedExit {
+    pub(crate) key: ChildKey,
     instance: u64,
-    generation: u64,
-    status: ExitStatus,
+    pub(crate) generation: u64,
+    pub(crate) status: ExitStatus,
 }
 
 /// Why the supervisor is draining its join set.
@@ -1103,6 +1176,7 @@ struct ClassifiedExit {
 pub(crate) enum DrainReason {
     Shutdown,
     GroupRestart,
+    RestForOneRestart,
 }
 
 fn counts_as_running(membership: MembershipState, state: RuntimeChildState) -> bool {

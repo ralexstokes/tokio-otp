@@ -25,6 +25,9 @@
 //!   restarted together. [`Never`](RestartPolicy::Never) children are still
 //!   drained with the group but are not respawned. Use this when children have
 //!   hard interdependencies.
+//! - **[`RestForOne`](Strategy::RestForOne)** — the failed child and children
+//!   declared after it are stopped and restarted; earlier children remain
+//!   running. Use this for ordered pipelines.
 //!
 //! # Restart policies
 //!
