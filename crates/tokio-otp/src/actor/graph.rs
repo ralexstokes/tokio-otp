@@ -22,7 +22,7 @@ use tracing::Instrument;
 use crate::actor::{
     binding::{ActorStats, BindingCore, BindingGuard, BindingLifecycle, MailboxRef, RebindPolicy},
     builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY, MessageSize},
-    context::{ActorContext, ActorRef},
+    context::{ActorContext, ActorRef, ActorTimers},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     raw::{ActorResult, BoxError, RawActor},
 };
@@ -53,6 +53,7 @@ pub(crate) struct TypedRunner<A: RawActor> {
 impl<A: RawActor> ErasedRunner for TypedRunner<A> {
     fn start(&self, start: RunnerStart) -> BoxedActorFuture {
         let actor_shutdown = start.shutdown;
+        let timers = ActorTimers::new(&actor_shutdown);
         let observability = start.observability;
         let (sender, mailbox) = mpsc::channel(start.mailbox_capacity);
         let actor_id = self.binding.actor_id().clone();
@@ -69,6 +70,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             myself,
             shutdown: actor_shutdown,
             observability,
+            timers,
         };
         let mut actor = self.actor.clone();
 

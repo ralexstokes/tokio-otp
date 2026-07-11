@@ -17,7 +17,7 @@ mod raw;
 
 pub use binding::{ActorStats, RebindPolicy};
 pub use builder::{ActorSlot, GraphBuilder, MessageSize};
-pub use context::{ActorContext, ActorRef, Reply};
+pub use context::{ActorContext, ActorRef, Reply, TimerRef};
 pub use error::{CallError, GraphBuildError, SendError};
 pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};
 pub use handler::{Actor, DrainPolicy};
