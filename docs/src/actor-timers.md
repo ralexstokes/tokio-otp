@@ -115,7 +115,7 @@ impl Actor for Order {
 }
 ```
 
-Calling `state_timeout` owns the message and returns a `TimerRef`, like
+Calling `state_timeout` takes ownership of the message and returns a `TimerRef`, like
 `send_after`, but the actor does not need to retain it. Entering another timed
 state and calling `state_timeout` automatically cancels the previous timeout.
 Call `clear_state_timeout` when entering a state without a timeout.

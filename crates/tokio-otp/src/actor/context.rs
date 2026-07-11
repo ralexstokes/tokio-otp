@@ -494,8 +494,6 @@ impl<M: Send + 'static> ActorContext<M> {
     /// clearing the slot cancels its token even if it already fired, so a
     /// retained handle will then report [`TimerRef::is_cancelled`] as `true`.
     pub fn state_timeout(&self, message: M, delay: Duration) -> TimerRef {
-        self.clear_state_timeout();
-
         let cancellation = self.timers.child_token();
         let timer = TimerRef {
             cancellation: cancellation.clone(),
