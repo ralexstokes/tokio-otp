@@ -62,7 +62,9 @@ ref and leak a stale message into the next incarnation.
 
 Rust enums already make actor state machines explicit. `state_timeout` adds
 the one piece that otherwise requires bookkeeping: a single timeout slot that
-cancels and replaces the previous timeout whenever the actor enters a state.
+cancels and replaces the previous timeout whenever the actor enters another
+timed state. `clear_state_timeout` cancels the slot when entering an untimed
+state.
 
 ```rust,ignore
 use std::time::Duration;
@@ -94,12 +96,18 @@ impl Actor for Order {
 
     async fn handle(&mut self, message: Message, ctx: &ActorContext<Message>) -> ActorResult {
         match (&*self, message) {
-            (Order::PendingFill, Message::Filled) => *self = Order::Complete,
+            (Order::PendingFill, Message::Filled) => {
+                ctx.clear_state_timeout();
+                *self = Order::Complete;
+            }
             (Order::PendingFill, Message::FillTimedOut) => {
                 *self = Order::Cancelling;
                 ctx.state_timeout(Message::Cancelled, Duration::from_secs(2));
             }
-            (Order::Cancelling, Message::Cancelled) => *self = Order::Complete,
+            (Order::Cancelling, Message::Cancelled) => {
+                ctx.clear_state_timeout();
+                *self = Order::Complete;
+            }
             _ => {}
         }
         Ok(())
@@ -110,7 +118,13 @@ impl Actor for Order {
 Calling `state_timeout` owns the message and returns a `TimerRef`, like
 `send_after`, but the actor does not need to retain it. Entering another timed
 state and calling `state_timeout` automatically cancels the previous timeout.
+Call `clear_state_timeout` when entering a state without a timeout.
+
 Timeout messages that were already accepted by the mailbox cannot be
-retracted, so the handler should still match them against the current state.
-State timeouts are also cleared with all other timers when the actor stops or
+retracted. Each timeout message must therefore identify the state it was set
+for, either with a distinct variant as above or with a state or generation
+tag, and the handler must reject tags that do not match its current state.
+Replacing or clearing a state timeout cancels its token even if it already
+fired, so a retained handle will then report `is_cancelled() == true`. State
+timeouts are also cleared with all other timers when the actor stops or
 restarts.

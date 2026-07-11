@@ -185,6 +185,44 @@ async fn new_state_timeout_cancels_previous_timeout() {
 }
 
 #[derive(Clone)]
+struct ClearedStateTimeout {
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for ClearedStateTimeout {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let timer = ctx.state_timeout("stale", Duration::from_millis(20));
+        ctx.clear_state_timeout();
+        assert!(timer.is_cancelled());
+
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn clearing_state_timeout_prevents_delivery() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, _) = build_runtime(ClearedStateTimeout {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    assert!(
+        timeout(Duration::from_millis(60), observed_rx.recv())
+            .await
+            .is_err(),
+        "cleared state timeout delivered a message"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
 struct Interval {
     observed: mpsc::UnboundedSender<usize>,
 }
