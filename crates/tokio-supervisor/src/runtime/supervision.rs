@@ -1015,7 +1015,9 @@ impl SupervisorRuntime {
             return Ok(());
         }
         for key in keys {
-            let entry = &self.children[key];
+            let Some(entry) = self.children.get(key) else {
+                continue;
+            };
             if entry.membership != MembershipState::Active
                 || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
             {
@@ -1225,6 +1227,9 @@ impl SupervisorRuntime {
         self.abort_child(key);
         tokio::task::yield_now().await;
         self.drain_ready_joins().await?;
+        if self.pending_exit.is_some() || self.state != SupervisorState::Running {
+            return Ok(());
+        }
         self.finalize_removed_child_if_present(key);
         Ok(())
     }

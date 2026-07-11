@@ -581,3 +581,54 @@ async fn fatal_restart_during_abort_removal_stops_supervisor() {
         .expect("fatal restart observed during removal must stop supervisor");
     assert_eq!(result, Err(SupervisorError::RestartIntensityExceeded));
 }
+
+#[tokio::test]
+async fn abort_removal_emits_nothing_after_auto_shutdown_stopped() {
+    let complete = Arc::new(Notify::new());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let removable = ChildSpec::new("removable", {
+        let complete = complete.clone();
+        let started_tx = started_tx.clone();
+        move |_| {
+            let guard = NotifyOnDrop(complete.clone());
+            let started_tx = started_tx.clone();
+            async move {
+                let _guard = guard;
+                started_tx.send(()).expect("test receiver dropped");
+                pending::<()>().await;
+                Ok(())
+            }
+        }
+    })
+    .shutdown(ShutdownPolicy::abort());
+    let significant = ChildSpec::new("significant", move |_| {
+        let complete = complete.clone();
+        let started_tx = started_tx.clone();
+        async move {
+            started_tx.send(()).expect("test receiver dropped");
+            complete.notified().await;
+            Ok(())
+        }
+    })
+    .significant();
+
+    let handle = SupervisorBuilder::new()
+        .auto_shutdown(AutoShutdown::AnySignificant)
+        .child(removable)
+        .child(significant)
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+    let mut events = handle.subscribe();
+    common::recv_n(&mut started_rx, 2).await;
+
+    let _ = handle.remove_child("removable").await;
+    handle.wait().await.expect("auto-shutdown should be clean");
+
+    let mut stopped = false;
+    while let Ok(event) = events.try_recv() {
+        assert!(!stopped, "event emitted after SupervisorStopped: {event:?}");
+        stopped = event == SupervisorEvent::SupervisorStopped;
+    }
+    assert!(stopped, "SupervisorStopped should be observed");
+}
