@@ -67,7 +67,10 @@ report `None` and do not sample message sizes. With the `metrics` feature,
 each accepted sized message also updates the `actor.message.size` histogram
 and `actor.message.bytes_accepted` counter. Metric handles and actor-id labels
 are registered lazily on the first accepted message and cached per actor; later
-accepted sends only sample `size_hint` and update those handles. The feature
+accepted sends only sample `size_hint` and update those handles. Because the
+cached handles bind to whichever recorder is installed when that first message
+is accepted, install your metrics recorder at startup, before actors begin
+receiving messages. The feature
 continues to enable the supervisor lifecycle counters, gauges, and histograms
 as well.
 
