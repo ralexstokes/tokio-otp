@@ -1,7 +1,16 @@
-use std::sync::Arc;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use tokio::sync::{Notify, mpsc};
-use tokio_otp::{ActorContext, ActorResult, GraphBuilder, MailboxMode, RawActor, RebindPolicy};
+use tokio_otp::{
+    Actor, ActorContext, ActorResult, CallError, DrainPolicy, GraphBuilder, MailboxMode, RawActor,
+    RebindPolicy, Reply,
+};
 use tokio_util::sync::CancellationToken;
 
 struct GatedCollector<M> {
@@ -93,12 +102,12 @@ struct Tick {
 }
 
 #[tokio::test]
-async fn conflate_by_key_preserves_latest_values_in_first_key_order() {
+async fn conflate_by_key_replaces_values_and_evicts_the_oldest_key_at_capacity() {
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let (received_tx, mut received_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
-    builder.mailbox_capacity(4);
+    builder.mailbox_capacity(2);
     let (slot, actor_ref) = builder.slot_with_mailbox(
         "market-data",
         MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol),
@@ -137,24 +146,21 @@ async fn conflate_by_key_preserves_latest_values_in_first_key_order() {
             symbol: "BTC",
             price: 21,
         },
+        Tick {
+            symbol: "SOL",
+            price: 30,
+        },
     ] {
         actor_ref.send(tick).await.expect("keyed send succeeds");
     }
 
     let stats = actor_ref.stats();
-    assert_eq!(stats.messages_accepted, 4);
-    assert_eq!(stats.messages_conflated, 2);
+    assert_eq!(stats.messages_accepted, 5);
+    assert_eq!(stats.messages_conflated, 3);
     assert_eq!(stats.mailbox_depth, 2);
-    assert_eq!(stats.mailbox_capacity, 4);
+    assert_eq!(stats.mailbox_capacity, 2);
 
     release.notify_one();
-    assert_eq!(
-        received_rx.recv().await,
-        Some(Tick {
-            symbol: "ETH",
-            price: 11,
-        })
-    );
     assert_eq!(
         received_rx.recv().await,
         Some(Tick {
@@ -162,8 +168,185 @@ async fn conflate_by_key_preserves_latest_values_in_first_key_order() {
             price: 21,
         })
     );
+    assert_eq!(
+        received_rx.recv().await,
+        Some(Tick {
+            symbol: "SOL",
+            price: 30,
+        })
+    );
     assert!(received_rx.try_recv().is_err());
 
+    stop.cancel();
+    task.await.expect("actor task joins").expect("actor stops");
+}
+
+enum RequestMsg {
+    Get(Reply<()>),
+    Snapshot(u64),
+}
+
+#[tokio::test]
+async fn replaced_call_reports_reply_dropped() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    let actor_ref = builder.actor_with_mailbox(
+        "requests",
+        GatedCollector {
+            started: started_tx,
+            release: Arc::clone(&release),
+            received: received_tx,
+        },
+        MailboxMode::Conflate,
+    );
+    let graph = builder.build().expect("valid graph");
+    let actor = graph.actors()[0].clone();
+    let stop = CancellationToken::new();
+    let task = tokio::spawn({
+        let stop = stop.clone();
+        async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await }
+    });
+    started_rx.recv().await.expect("actor started");
+
+    let call = tokio::spawn({
+        let actor_ref = actor_ref.clone();
+        async move { actor_ref.call(RequestMsg::Get).await }
+    });
+    while actor_ref.stats().messages_accepted == 0 {
+        tokio::task::yield_now().await;
+    }
+    actor_ref
+        .send(RequestMsg::Snapshot(42))
+        .await
+        .expect("new snapshot replaces request");
+
+    assert!(matches!(
+        call.await.expect("call task joins"),
+        Err(CallError::ReplyDropped { .. })
+    ));
+
+    release.notify_one();
+    match received_rx.recv().await {
+        Some(RequestMsg::Snapshot(value)) => assert_eq!(value, 42),
+        Some(RequestMsg::Get(reply)) => {
+            drop(reply);
+            panic!("replaced request reached actor");
+        }
+        None => panic!("actor stopped before receiving snapshot"),
+    }
+
+    stop.cancel();
+    task.await.expect("actor task joins").expect("actor stops");
+}
+
+#[derive(Clone)]
+struct GatedDrainActor {
+    started: mpsc::UnboundedSender<()>,
+    release: Arc<Notify>,
+    received: mpsc::UnboundedSender<u64>,
+}
+
+impl Actor for GatedDrainActor {
+    type Msg = u64;
+
+    async fn handle(&mut self, message: u64, _ctx: &ActorContext<u64>) -> ActorResult {
+        self.received
+            .send(message)
+            .expect("test receives drained message");
+        Ok(())
+    }
+
+    async fn on_start(&mut self, _ctx: &ActorContext<u64>) -> ActorResult {
+        self.started.send(()).expect("test receives start signal");
+        self.release.notified().await;
+        Ok(())
+    }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        DrainPolicy::Drain
+    }
+}
+
+#[tokio::test]
+async fn drain_policy_handles_latest_message_after_shutdown() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    let actor_ref = builder.actor_with_mailbox(
+        "drain",
+        GatedDrainActor {
+            started: started_tx,
+            release: Arc::clone(&release),
+            received: received_tx,
+        },
+        MailboxMode::Conflate,
+    );
+    let graph = builder.build().expect("valid graph");
+    let actor = graph.actors()[0].clone();
+    let stop = CancellationToken::new();
+    let task = tokio::spawn({
+        let stop = stop.clone();
+        async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await }
+    });
+    started_rx.recv().await.expect("actor started");
+
+    actor_ref.send(1).await.expect("first send succeeds");
+    actor_ref.send(2).await.expect("replacement succeeds");
+    actor_ref.send(3).await.expect("replacement succeeds");
+    stop.cancel();
+    release.notify_one();
+
+    task.await.expect("actor task joins").expect("actor drains");
+    assert_eq!(received_rx.recv().await, Some(3));
+    assert!(received_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn poisoned_key_match_lock_recovers_without_panicking_in_drop() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let panic_once = Arc::new(AtomicBool::new(true));
+    let mut builder = GraphBuilder::new();
+    let actor_ref = builder.actor_with_mailbox(
+        "poison-recovery",
+        GatedCollector {
+            started: started_tx,
+            release: Arc::clone(&release),
+            received: received_tx,
+        },
+        MailboxMode::conflate_by_key({
+            let panic_once = Arc::clone(&panic_once);
+            move |value: &u64| {
+                assert!(
+                    !panic_once.swap(false, Ordering::SeqCst),
+                    "key extraction panic"
+                );
+                value % 2
+            }
+        }),
+    );
+    let graph = builder.build().expect("valid graph");
+    let actor = graph.actors()[0].clone();
+    let stop = CancellationToken::new();
+    let task = tokio::spawn({
+        let stop = stop.clone();
+        async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await }
+    });
+    started_rx.recv().await.expect("actor started");
+
+    actor_ref.try_send(1).expect("first key is inserted");
+    let panic = catch_unwind(AssertUnwindSafe(|| actor_ref.try_send(2)));
+    assert!(panic.is_err());
+    actor_ref
+        .try_send(3)
+        .expect("send recovers the poisoned lock");
+
+    release.notify_one();
+    assert_eq!(received_rx.recv().await, Some(3));
     stop.cancel();
     task.await.expect("actor task joins").expect("actor stops");
 }

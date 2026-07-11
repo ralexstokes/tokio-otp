@@ -57,7 +57,9 @@ impl ActorStatsCounters {
     }
 
     pub(crate) fn record_conflated(&self, count: u64) {
-        self.messages_conflated.fetch_add(count, Ordering::Relaxed);
+        if count > 0 {
+            self.messages_conflated.fetch_add(count, Ordering::Relaxed);
+        }
     }
 
     pub(crate) fn snapshot(
@@ -84,11 +86,15 @@ impl ActorStatsCounters {
 /// capacity. Conflating mailboxes never wait for capacity: they replace stale
 /// unread state and are intended for idempotent snapshots, not commands.
 #[derive(Default)]
+#[non_exhaustive]
 pub enum MailboxMode<M> {
     /// A bounded FIFO queue. This is the default.
     #[default]
     Queue,
     /// One latest-wins slot for the whole mailbox.
+    ///
+    /// This mode always has capacity 1; the graph's mailbox capacity setting
+    /// does not apply.
     Conflate,
     /// One latest-wins slot per key, bounded by the mailbox capacity.
     ///
@@ -108,6 +114,10 @@ pub struct MailboxKeyMatcher<M>(Arc<KeyMatcherFn<M>>);
 
 impl<M> MailboxMode<M> {
     /// Creates a keyed latest-wins mailbox using `key` to group messages.
+    ///
+    /// Each send scans at most the configured mailbox capacity and may call
+    /// `key` for both the incoming and each queued message. Keep extraction
+    /// cheap and prefer clone-free keys such as numeric or interned ids.
     pub fn conflate_by_key<K, F>(key: F) -> Self
     where
         K: Eq,
@@ -317,17 +327,21 @@ struct ConflatingShared<M> {
     notify: Notify,
 }
 
+impl<M> ConflatingShared<M> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ConflatingState<M>> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 pub(crate) struct ConflatingSender<M> {
     shared: Arc<ConflatingShared<M>>,
 }
 
 impl<M> ConflatingSender<M> {
     fn send(&self, message: M) -> SendOutcome<M> {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("conflating mailbox poisoned");
+        let mut state = self.shared.lock();
         if state.receiver_closed {
             return SendOutcome::Closed(message);
         }
@@ -365,22 +379,14 @@ impl<M> ConflatingSender<M> {
     }
 
     fn usage(&self) -> (usize, usize) {
-        let state = self
-            .shared
-            .state
-            .lock()
-            .expect("conflating mailbox poisoned");
+        let state = self.shared.lock();
         (state.messages.len(), state.capacity)
     }
 }
 
 impl<M> Clone for ConflatingSender<M> {
     fn clone(&self) -> Self {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("conflating mailbox poisoned");
+        let mut state = self.shared.lock();
         state.sender_count += 1;
         drop(state);
         Self {
@@ -391,11 +397,7 @@ impl<M> Clone for ConflatingSender<M> {
 
 impl<M> Drop for ConflatingSender<M> {
     fn drop(&mut self) {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("conflating mailbox poisoned");
+        let mut state = self.shared.lock();
         state.sender_count -= 1;
         let last = state.sender_count == 0;
         drop(state);
@@ -414,11 +416,7 @@ impl<M> ConflatingReceiver<M> {
         loop {
             let notified = self.shared.notify.notified();
             {
-                let mut state = self
-                    .shared
-                    .state
-                    .lock()
-                    .expect("conflating mailbox poisoned");
+                let mut state = self.shared.lock();
                 if let Some(message) = state.messages.pop_front() {
                     return Some(message);
                 }
@@ -431,11 +429,7 @@ impl<M> ConflatingReceiver<M> {
     }
 
     fn try_recv(&mut self) -> Result<M, mpsc::error::TryRecvError> {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("conflating mailbox poisoned");
+        let mut state = self.shared.lock();
         if let Some(message) = state.messages.pop_front() {
             Ok(message)
         } else if state.receiver_closed || state.sender_count == 0 {
@@ -446,11 +440,7 @@ impl<M> ConflatingReceiver<M> {
     }
 
     fn close(&mut self) {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("conflating mailbox poisoned");
+        let mut state = self.shared.lock();
         state.receiver_closed = true;
         drop(state);
         self.shared.notify.notify_waiters();

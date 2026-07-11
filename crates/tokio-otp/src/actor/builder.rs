@@ -112,6 +112,10 @@ impl GraphBuilder {
     }
 
     /// Sets the bounded mailbox capacity used for every actor in the graph.
+    ///
+    /// This is the FIFO queue capacity and the maximum number of distinct
+    /// unread keys for keyed conflation. Unkeyed conflation always has
+    /// capacity 1 and ignores this setting.
     pub fn mailbox_capacity(&mut self, capacity: usize) -> &mut Self {
         self.mailbox_capacity = capacity;
         self
@@ -147,7 +151,7 @@ impl GraphBuilder {
         actor_id: &str,
         mailbox_mode: MailboxMode<M>,
     ) -> (ActorSlot<M>, ActorRef<M>) {
-        match self.push_slot(actor_id, mailbox_mode) {
+        match self.push_slot_with_mailbox(actor_id, mailbox_mode) {
             Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
             None => (
                 ActorSlot::new(self.builder_id, None),
@@ -207,19 +211,17 @@ impl GraphBuilder {
         actor: A,
         mailbox_mode: MailboxMode<A::Msg>,
     ) -> ActorRef<A::Msg> {
-        let runner_mode = mailbox_mode.clone();
-        let Some((index, actor_ref)) = self.push_slot(actor_id, mailbox_mode) else {
+        let Some((index, actor_ref)) = self.push_slot(actor_id) else {
             return ActorRef::detached(actor_id.into());
         };
         let slot = &mut self.slots[index];
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
             unreachable!("message type id already verified")
         };
-        slot.mailbox_mode = None;
         slot.runner = Some(Arc::new(TypedRunner {
             actor,
             binding,
-            mailbox_mode: runner_mode,
+            mailbox_mode,
         }));
         actor_ref
     }
@@ -303,12 +305,18 @@ impl GraphBuilder {
         ))
     }
 
-    /// Creates a named slot and returns its index plus typed ref.
-    fn push_slot<M: Send + 'static>(
+    fn push_slot_with_mailbox<M: Send + 'static>(
         &mut self,
         actor_id: &str,
         mailbox_mode: MailboxMode<M>,
     ) -> Option<(usize, ActorRef<M>)> {
+        let (index, actor_ref) = self.push_slot(actor_id)?;
+        self.slots[index].mailbox_mode = Some(Box::new(mailbox_mode));
+        Some((index, actor_ref))
+    }
+
+    /// Creates a named slot and returns its index plus typed ref.
+    fn push_slot<M: Send + 'static>(&mut self, actor_id: &str) -> Option<(usize, ActorRef<M>)> {
         if actor_id.is_empty() {
             self.errors
                 .push(GraphBuildError::InvalidConfig("actor id must not be empty"));
@@ -332,7 +340,7 @@ impl GraphBuilder {
             message_type: TypeId::of::<M>(),
             binding: core.clone(),
             binding_lifecycle: core,
-            mailbox_mode: Some(Box::new(mailbox_mode)),
+            mailbox_mode: None,
             runner: None,
         });
         Some((index, actor_ref))

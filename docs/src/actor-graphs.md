@@ -210,7 +210,7 @@ let latest = builder.actor_with_mailbox(
 let per_symbol = builder.actor_with_mailbox(
     "market-by-symbol",
     keyed_market_actor,
-    MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol.clone()),
+    MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol_id),
 );
 ```
 
@@ -220,6 +220,10 @@ its number of keys is bounded by `mailbox_capacity`, and a new key evicts the
 oldest unread key when full. Both `send` and `try_send` replace stale state
 without waiting for capacity. `ActorStats::messages_conflated` counts replaced
 or evicted unread messages.
+
+Keyed sends scan at most `mailbox_capacity` unread keys and may evaluate the
+extractor for every comparison. Keep the extractor cheap and prefer numeric
+or interned ids over allocating keys.
 
 Use these modes only for idempotent state snapshots. They are deliberately
 lossy and are unsuitable for commands. In particular, do not use `call`: if a
