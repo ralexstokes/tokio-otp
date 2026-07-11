@@ -229,7 +229,7 @@ pub mod prelude {
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
         CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
         RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
-        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt,
+        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt, TimerRef,
         TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
     };
     pub use tokio_supervisor::{
@@ -250,7 +250,7 @@ pub use tokio_otp_derive::Topology;
 pub use actor::{
     Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
     CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor, RebindPolicy, Reply,
-    RunnableActor, RunnableActorFactory, SendError,
+    RunnableActor, RunnableActorFactory, SendError, TimerRef,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
