@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fmt,
     sync::{Arc, Mutex},
     time::Duration,
@@ -376,9 +377,50 @@ pub struct ActorContext<M> {
     pub(crate) timers: ActorTimers,
     pub(crate) state_timeout: Mutex<Option<TimerRef>>,
     pub(crate) monitors: ActorMonitors,
+    pub(crate) ready: Mutex<Option<oneshot::Sender<()>>>,
+    pub(crate) continuations: Mutex<VecDeque<M>>,
 }
 
 impl<M: Send + 'static> ActorContext<M> {
+    /// Reports that a custom [`RawActor`](crate::RawActor) has completed
+    /// initialization.
+    ///
+    /// This is only needed when `RawActor::readiness_gated` is overridden to
+    /// return `true`. Handler-style [`Actor`](crate::Actor) implementations
+    /// report readiness automatically after `on_start` succeeds.
+    pub fn mark_ready(&self) {
+        if let Some(ready) = self
+            .ready
+            .lock()
+            .expect("actor ready signal poisoned")
+            .take()
+        {
+            let _ = ready.send(());
+        }
+    }
+
+    pub(crate) fn take_continuation(&self) -> Option<M> {
+        self.continuations
+            .lock()
+            .expect("actor continuation queue poisoned")
+            .pop_front()
+    }
+
+    /// Queues initialization follow-up work as the actor's next message.
+    ///
+    /// Calls made from [`Actor::on_start`](crate::Actor::on_start) are
+    /// processed after startup readiness is reported and before ordinary
+    /// mailbox messages. This keeps expensive warm-up work out of the
+    /// readiness-critical initialization path. Continuations count as
+    /// received messages in [`ActorStats`](crate::ActorStats), but not as
+    /// externally accepted mailbox messages.
+    pub fn continue_with(&self, message: M) {
+        self.continuations
+            .lock()
+            .expect("actor continuation queue poisoned")
+            .push_back(message);
+    }
+
     /// Returns the actor's unique identifier within the graph.
     pub fn id(&self) -> &str {
         &self.id

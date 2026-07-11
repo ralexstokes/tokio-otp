@@ -66,7 +66,7 @@ pub enum SupervisorEvent {
         /// The inner event from the nested supervisor.
         event: Box<SupervisorEvent>,
     },
-    /// A child task has been spawned and is now running.
+    /// A child has been spawned and completed its readiness boundary.
     ChildStarted {
         /// Child identifier.
         id: String,

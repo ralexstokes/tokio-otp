@@ -8,13 +8,13 @@ use crate::actor::{
 /// How the provided [`Actor`] receive loop treats messages still
 /// queued when shutdown is requested.
 ///
-/// # Start and shutdown are concurrent
+/// # Startup ordering and concurrent shutdown
 ///
-/// Actors do not start or stop in sequence. At startup, supervised actors
-/// spawn in declaration order but initialize concurrently with no readiness
-/// gating; dependency ordering self-resolves because sends wait for the
-/// target's mailbox to bind. At shutdown, every sibling is cancelled at the
-/// same time under one shared grace deadline. A draining actor can therefore
+/// Actors initialize concurrently by default. With
+/// [`StartMode::Sequential`](tokio_supervisor::StartMode::Sequential), each
+/// actor's [`on_start`](Self::on_start) must finish before the next actor is
+/// spawned. At shutdown, every sibling is cancelled at the same time under
+/// one shared grace deadline. A draining actor can therefore
 /// observe a [`SendError`](crate::SendError) from a sibling that has already
 /// stopped; drain handlers must tolerate that (skip or log the failed send)
 /// rather than propagate it, or the error fails the draining actor itself.
@@ -107,24 +107,38 @@ pub trait Actor: Clone + Send + Sync + 'static {
 impl<H: Actor> RawActor for H {
     type Msg = H::Msg;
 
+    fn readiness_gated(&self) -> bool {
+        true
+    }
+
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         self.on_start(&ctx).await?;
+        ctx.mark_ready();
 
         loop {
-            let message = tokio::select! {
-                biased;
-                _ = ctx.shutdown.cancelled() => {
-                    if self.drain_policy() == DrainPolicy::Drain {
-                        ctx.mailbox.close();
-                        while let Some(message) = ctx.mailbox.recv().await {
-                            ctx.myself.record_received();
-                            ctx.observability.emit_message_received(&ctx.id);
-                            self.handle(message, &ctx).await?;
+            let message = if let Some(message) = ctx.take_continuation() {
+                Some(message)
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = ctx.shutdown.cancelled() => {
+                        if self.drain_policy() == DrainPolicy::Drain {
+                            ctx.mailbox.close();
+                            loop {
+                                let message = match ctx.take_continuation() {
+                                    Some(message) => Some(message),
+                                    None => ctx.mailbox.recv().await,
+                                };
+                                let Some(message) = message else { break };
+                                ctx.myself.record_received();
+                                ctx.observability.emit_message_received(&ctx.id);
+                                self.handle(message, &ctx).await?;
+                            }
                         }
+                        break;
                     }
-                    break;
+                    message = ctx.mailbox.recv() => message,
                 }
-                message = ctx.mailbox.recv() => message,
             };
 
             let Some(message) = message else {

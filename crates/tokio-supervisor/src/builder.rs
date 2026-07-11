@@ -29,11 +29,29 @@ use crate::{
 /// ```
 pub struct SupervisorBuilder {
     strategy: Strategy,
+    start_mode: StartMode,
     restart_intensity: RestartIntensity,
     auto_shutdown: AutoShutdown,
     children: Vec<ChildDefinition>,
     control_channel_capacity: usize,
     event_channel_capacity: usize,
+}
+
+/// How a supervisor starts a set of children.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum StartMode {
+    /// Spawn every child without waiting for readiness. This is the default.
+    #[default]
+    Concurrent,
+    /// Start children in declaration order, waiting for each child to report
+    /// readiness before spawning the next. While readiness-gated startup is
+    /// waiting (including inside a nested supervisor), shutdown remains
+    /// responsive but control commands are queued. A child must not await a
+    /// control command on its own supervisor before reporting ready. There is no
+    /// built-in readiness timeout; children that use explicit readiness should
+    /// arrange their own initialization timeout.
+    Sequential,
 }
 
 const DEFAULT_CONTROL_CHANNEL_CAPACITY: usize = 64;
@@ -51,6 +69,7 @@ impl SupervisorBuilder {
     pub fn new() -> Self {
         Self {
             strategy: Strategy::default(),
+            start_mode: StartMode::default(),
             restart_intensity: RestartIntensity::default(),
             auto_shutdown: AutoShutdown::default(),
             children: Vec::new(),
@@ -63,6 +82,13 @@ impl SupervisorBuilder {
     #[must_use]
     pub fn strategy(mut self, strategy: Strategy) -> Self {
         self.strategy = strategy;
+        self
+    }
+
+    /// Sets how children are started initially and during group restarts.
+    #[must_use]
+    pub fn start_mode(mut self, start_mode: StartMode) -> Self {
+        self.start_mode = start_mode;
         self
     }
 
@@ -81,8 +107,8 @@ impl SupervisorBuilder {
         self
     }
 
-    /// Appends a child to the supervisor. Children are started in the order
-    /// they are added.
+    /// Appends a child to the supervisor. Declaration order determines
+    /// sequential startup and group-restart order.
     #[must_use]
     pub fn child(mut self, child: ChildSpec) -> Self {
         self.children.push(child.into_definition());
@@ -173,6 +199,7 @@ impl SupervisorBuilder {
 
         Ok(Supervisor::new(SupervisorConfig {
             strategy: self.strategy,
+            start_mode: self.start_mode,
             restart_intensity: self.restart_intensity,
             auto_shutdown: self.auto_shutdown,
             children: self.children,

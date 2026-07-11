@@ -4,6 +4,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{Instrument, info_span};
 
 use crate::{
+    StartMode,
     child::{ChildDefinition, ChildKind, ChildResult},
     context::ChildContext,
     error::SupervisorError,
@@ -36,6 +37,7 @@ pub struct Supervisor {
 #[derive(Clone)]
 pub(crate) struct SupervisorConfig {
     pub(crate) strategy: Strategy,
+    pub(crate) start_mode: StartMode,
     pub(crate) restart_intensity: RestartIntensity,
     pub(crate) auto_shutdown: AutoShutdown,
     pub(crate) children: Vec<ChildDefinition>,
@@ -93,6 +95,7 @@ impl Supervisor {
                     nested_channels,
                     Vec::new(),
                     None,
+                    None,
                 )
                 .await;
             let _ = task_done_tx.send(Some(result.clone()));
@@ -126,6 +129,7 @@ impl Supervisor {
         let nested_handles = channels.nested_handles();
         let nested_channels = channels.nested_channels();
         let generation = ctx.generation();
+        let startup_ctx = ctx.clone();
         let task_done_tx = done_tx.clone();
 
         let join_handle = tokio::spawn(async move {
@@ -139,6 +143,7 @@ impl Supervisor {
                     nested_channels,
                     path,
                     Some(parent_link),
+                    Some(startup_ctx),
                 )
                 .await;
             let _ = task_done_tx.send(Some(result.clone()));
@@ -181,6 +186,7 @@ impl Supervisor {
         nested_channels: NestedChannels,
         path: Vec<String>,
         parent_link: Option<ParentLink>,
+        startup_ready: Option<ChildContext>,
     ) -> Result<(), SupervisorError> {
         let supervisor_name = supervisor_name_for_path(&path).to_owned();
         let supervisor_path = format_path(&path);
@@ -197,7 +203,7 @@ impl Supervisor {
             parent_link,
         );
         runtime
-            .run()
+            .run(startup_ready)
             .instrument(info_span!(
                 "supervisor",
                 supervisor_name = %supervisor_name,
@@ -253,6 +259,8 @@ pub(crate) fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot 
             .map(|child| ChildSnapshot {
                 id: child.id.clone(),
                 generation: 0,
+                started: false,
+                startup_aborted: false,
                 state: ChildStateView::Starting,
                 membership: ChildMembershipView::Active,
                 last_exit: None,

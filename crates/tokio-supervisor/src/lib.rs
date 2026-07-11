@@ -194,7 +194,7 @@ mod snapshot;
 mod strategy;
 mod supervisor;
 
-pub use builder::SupervisorBuilder;
+pub use builder::{StartMode, SupervisorBuilder};
 pub use child::{BoxError, ChildResult, ChildSpec, SupervisorSpec};
 pub use context::{ChildContext, SupervisorToken};
 pub use error::{ControlError, RestartMonitorError, SupervisorBuildError, SupervisorError};

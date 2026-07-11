@@ -13,7 +13,7 @@ use crate::{
     error::{ControlError, RestartMonitorError, SupervisorError},
     event::SupervisorEvent,
     monitor::RestartMonitor,
-    snapshot::{ChildMembershipView, SupervisorSnapshot},
+    snapshot::{ChildMembershipView, SupervisorSnapshot, SupervisorStateView},
 };
 
 type SupervisorJoinHandle = JoinHandle<Result<(), SupervisorError>>;
@@ -388,6 +388,55 @@ impl SupervisorHandle {
                 "missing supervisor completion result".to_owned(),
             ))
         })
+    }
+
+    /// Waits until every current child generation has completed startup.
+    ///
+    /// Explicitly gated children complete startup when they call
+    /// [`ChildContext::mark_ready`](crate::ChildContext::mark_ready); ordinary
+    /// children are ready as soon as they are spawned. Readiness remains
+    /// latched after a child exits, and resets when that child restarts. Nested
+    /// supervisors report ready only after their own children are ready. An
+    /// empty supervisor is ready immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError::StartupAborted`] if a gated child exits or
+    /// the supervisor stops before readiness is reported.
+    pub async fn wait_started(&self) -> Result<(), SupervisorError> {
+        let mut snapshots = self.snapshots_rx();
+        loop {
+            let snapshot = snapshots.borrow_and_update().clone();
+            if snapshot
+                .children
+                .iter()
+                .filter(|child| child.membership == ChildMembershipView::Active)
+                .all(|child| child.started)
+            {
+                return Ok(());
+            }
+            if let Some(child) = snapshot.children.iter().find(|child| {
+                child.membership == ChildMembershipView::Active
+                    && !child.started
+                    && child.startup_aborted
+            }) {
+                return Err(SupervisorError::StartupAborted(format!(
+                    "child `{}` exited before reporting readiness",
+                    child.id
+                )));
+            }
+            if snapshot.state == SupervisorStateView::Stopped {
+                self.wait().await?;
+                return Err(SupervisorError::StartupAborted(
+                    "supervisor stopped before all children reported readiness".to_owned(),
+                ));
+            }
+            snapshots.changed().await.map_err(|_| {
+                SupervisorError::StartupAborted(
+                    "supervisor stopped before all children reported readiness".to_owned(),
+                )
+            })?;
+        }
     }
 
     /// Captures a direct child's current generation and returns an awaitable

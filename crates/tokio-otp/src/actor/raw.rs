@@ -31,6 +31,16 @@ pub trait RawActor: Clone + Send + Sync + 'static {
     /// The message type this actor receives.
     type Msg: Send + 'static;
 
+    /// Returns whether this actor reports readiness explicitly from
+    /// [`ActorContext::mark_ready`](crate::ActorContext::mark_ready).
+    ///
+    /// Handler-style [`Actor`](crate::Actor) implementations do this
+    /// automatically after `on_start`; custom raw actors are ready immediately
+    /// unless they override this method.
+    fn readiness_gated(&self) -> bool {
+        false
+    }
+
     /// Runs the actor until it finishes or graph shutdown is requested.
     fn run(&mut self, ctx: ActorContext<Self::Msg>) -> impl Future<Output = ActorResult> + Send;
 }

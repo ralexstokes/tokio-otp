@@ -79,7 +79,7 @@ pub use crate::{
     AutoShutdown, BackoffPolicy, BoxError, ChildContext, ChildMembershipView, ChildResult,
     ChildSnapshot, ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView,
     RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode,
-    ShutdownPolicy, Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
-    SupervisorEvent, SupervisorHandle, SupervisorSnapshot, SupervisorSpec, SupervisorStateView,
-    SupervisorToken,
+    ShutdownPolicy, StartMode, Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder,
+    SupervisorError, SupervisorEvent, SupervisorHandle, SupervisorSnapshot, SupervisorSpec,
+    SupervisorStateView, SupervisorToken,
 };

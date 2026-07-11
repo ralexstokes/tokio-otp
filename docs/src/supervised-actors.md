@@ -78,6 +78,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 graph actor into its own supervised child with uniform policies and packages
 the result into a `Runtime` with a supervisor and dynamic actor support.
 
+Actor children use `on_start` as their readiness boundary. Even with the
+default concurrent start mode, snapshots remain `Starting`, `ChildStarted`
+events are delayed, and restart monitors remain pending until `on_start`
+succeeds. Select `StartMode::Sequential` to additionally prevent the next
+actor from spawning until that boundary is crossed. Code outside the tree can
+await `RuntimeHandle::wait_started`; readiness is latched for a completed
+generation and resets on restart.
+
 The restart monitor before sending `origami cranes x1000` is still deliberate.
 A worker gets a fresh mailbox on restart; anything queued behind the crashing
 `origami` order would be dropped with the old mailbox. `send` waits while the

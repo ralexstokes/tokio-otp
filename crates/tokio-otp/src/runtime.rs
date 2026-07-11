@@ -315,6 +315,11 @@ impl RuntimeHandle {
         self.supervisor.wait().await
     }
 
+    /// Waits until all current actor children have completed `on_start`.
+    pub async fn wait_started(&self) -> Result<(), SupervisorError> {
+        self.supervisor.wait_started().await
+    }
+
     /// Delegates to [`SupervisorHandle::monitor_restart`].
     pub fn monitor_restart(
         &self,
@@ -432,11 +437,14 @@ fn actor_child_spec_with_termination(
         let actor = child_guard.actor.clone();
         async move {
             actor
-                .run_until(ctx.shutdown_token().cancelled(), rebind)
+                .run_until_ready(ctx.shutdown_token().cancelled(), rebind, || {
+                    ctx.mark_ready()
+                })
                 .await
                 .map_err(Into::into)
         }
     })
+    .wait_for_ready()
     .restart(restart)
     .shutdown(shutdown);
 

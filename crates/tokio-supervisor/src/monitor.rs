@@ -15,9 +15,8 @@ use crate::{
 ///
 /// The monitor resolves when the watched direct child is next observed
 /// [`Running`](ChildStateView::Running) with a generation greater than the
-/// baseline captured at construction time. The supervisor marks a child
-/// running when its task is spawned; actor-level readiness hooks may still be
-/// running at that point.
+/// baseline captured at construction time. Explicitly readiness-gated
+/// children become running only after they report readiness.
 pub struct RestartMonitor {
     id: String,
     baseline_generation: u64,
@@ -129,6 +128,8 @@ mod tests {
             children: vec![crate::ChildSnapshot {
                 id: "worker".to_owned(),
                 generation: 1,
+                started: true,
+                startup_aborted: false,
                 state: ChildStateView::Running,
                 membership: ChildMembershipView::Removing,
                 last_exit: None,

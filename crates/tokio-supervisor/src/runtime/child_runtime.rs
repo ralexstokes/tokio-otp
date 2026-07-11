@@ -23,6 +23,8 @@ pub(crate) struct ChildRuntime {
     pub(crate) active_token: Option<CancellationToken>,
     pub(crate) abort_handle: Option<AbortHandle>,
     pub(crate) has_started: bool,
+    pub(crate) has_reported_ready: bool,
+    pub(crate) startup_aborted: bool,
     pub(crate) next_restart_deadline: Option<Instant>,
     /// Atomically orders a natural clean return against supervisor-driven
     /// cancellation.
@@ -59,6 +61,8 @@ impl ChildRuntime {
             active_token: None,
             abort_handle: None,
             has_started: false,
+            has_reported_ready: false,
+            startup_aborted: false,
             next_restart_deadline: None,
             completion_state: Arc::new(AtomicU8::new(COMPLETION_PENDING)),
         }

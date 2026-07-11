@@ -29,7 +29,15 @@ pub(crate) struct ChildDefinition {
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) significant: bool,
+    pub(crate) readiness: ChildReadiness,
     pub(crate) kind: ChildKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ChildReadiness {
+    #[default]
+    Immediate,
+    Explicit,
 }
 
 #[derive(Clone)]
@@ -59,6 +67,7 @@ pub(crate) struct ChildSpecInner {
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) significant: bool,
+    pub(crate) readiness: ChildReadiness,
     pub(crate) factory: Arc<dyn ChildFactory>,
 }
 
@@ -181,6 +190,7 @@ impl ChildSpec {
                 restart_intensity: None,
                 shutdown_policy: ShutdownPolicy::default(),
                 significant: false,
+                readiness: ChildReadiness::Immediate,
                 factory: make_child_factory(f),
             }),
         }
@@ -219,6 +229,22 @@ impl ChildSpec {
         self.map_inner(|inner| inner.significant = true)
     }
 
+    /// Requires the child to call [`ChildContext::mark_ready`](crate::ChildContext::mark_ready)
+    /// before it is considered started.
+    ///
+    /// This is primarily useful with [`StartMode::Sequential`](crate::StartMode::Sequential).
+    /// If the child exits before reporting readiness, its ordinary restart
+    /// policy applies and later sequential siblings remain unstarted. There is
+    /// no built-in readiness timeout; use a timeout inside the child when
+    /// initialization must be bounded. While a supervisor waits for readiness,
+    /// shutdown remains responsive and control commands remain queued; do not
+    /// await a control command on that same supervisor before calling
+    /// `mark_ready`.
+    #[must_use]
+    pub fn wait_for_ready(self) -> Self {
+        self.map_inner(|inner| inner.readiness = ChildReadiness::Explicit)
+    }
+
     /// Returns the child's unique identifier.
     pub fn id(&self) -> &str {
         &self.inner.id
@@ -250,6 +276,7 @@ impl ChildSpec {
             restart_intensity: self.inner.restart_intensity,
             shutdown_policy: self.inner.shutdown_policy,
             significant: self.inner.significant,
+            readiness: self.inner.readiness,
             kind: ChildKind::Task(self.inner.factory.clone()),
         }
     }
@@ -263,6 +290,7 @@ impl ChildDefinition {
             restart_intensity: spec.restart_intensity,
             shutdown_policy: spec.shutdown_policy,
             significant: spec.significant,
+            readiness: ChildReadiness::Explicit,
             kind: ChildKind::Supervisor(spec.supervisor),
         }
     }

@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
 use crate::{
-    child::{ChildDefinition, ChildKind, SupervisorSpec},
+    builder::StartMode,
+    child::{ChildDefinition, ChildKind, ChildReadiness, SupervisorSpec},
+    context::ChildReady,
     error::{ControlError, SupervisorError},
     event::{ExitStatusView, NestedEventNotification, SupervisorEvent},
     handle::{NestedChannels, NestedHandles, StableSupervisorChannels, SupervisorCommand},
@@ -120,6 +122,7 @@ impl ChildEntry {
 /// Read-only configuration and identity, fixed at construction time.
 pub(crate) struct RuntimeMeta {
     pub(crate) strategy: Strategy,
+    pub(crate) start_mode: StartMode,
     pub(crate) auto_shutdown: AutoShutdown,
     pub(crate) default_restart_intensity: RestartIntensity,
     pub(crate) path_prefix: Vec<String>,
@@ -169,9 +172,12 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) nested_event_rx: mpsc::Receiver<NestedEventNotification>,
     pub(crate) nested_snapshot_tx: mpsc::Sender<NestedSnapshotNotification>,
     pub(crate) nested_snapshot_rx: mpsc::Receiver<NestedSnapshotNotification>,
+    pub(crate) ready_tx: mpsc::UnboundedSender<ChildReady>,
+    pub(crate) ready_rx: mpsc::UnboundedReceiver<ChildReady>,
     pub(crate) commands_open: bool,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
     pub(crate) pending_exit: Option<Result<(), SupervisorError>>,
+    pub(crate) restart_epoch: u64,
 }
 
 impl SupervisorRuntime {
@@ -188,6 +194,7 @@ impl SupervisorRuntime {
         parent_link: Option<ParentLink>,
     ) -> Self {
         let default_restart_intensity = config.restart_intensity;
+        let start_mode = config.start_mode;
         let observability = SupervisorObservability::new(path_prefix.clone(), config.strategy);
         let mut children = Slab::with_capacity(config.children.len());
         let mut children_by_id = HashMap::with_capacity(config.children.len());
@@ -219,10 +226,12 @@ impl SupervisorRuntime {
             .max(config.event_channel_capacity);
         let (nested_snapshot_tx, nested_snapshot_rx) = mpsc::channel(nested_snapshot_capacity);
         let (nested_event_tx, nested_event_rx) = mpsc::channel(config.event_channel_capacity);
+        let (ready_tx, ready_rx) = mpsc::unbounded_channel();
 
         Self {
             meta: RuntimeMeta {
                 strategy: config.strategy,
+                start_mode,
                 auto_shutdown: config.auto_shutdown,
                 default_restart_intensity,
                 path_prefix,
@@ -248,18 +257,39 @@ impl SupervisorRuntime {
             nested_event_rx,
             nested_snapshot_tx,
             nested_snapshot_rx,
+            ready_tx,
+            ready_rx,
             commands_open: true,
             task_map: HashMap::new(),
             pending_exit: None,
+            restart_epoch: 0,
         }
     }
 
-    pub(crate) async fn run(&mut self) -> Result<(), SupervisorError> {
+    pub(crate) async fn run(
+        &mut self,
+        startup_ready: Option<crate::context::ChildContext>,
+    ) -> Result<(), SupervisorError> {
         self.publish_snapshot();
         self.send_event(SupervisorEvent::SupervisorStarted);
         let initial_children = self.child_order.clone();
-        for key in initial_children {
-            self.spawn_child(key)?;
+        let initial_instances: Vec<_> = initial_children
+            .iter()
+            .filter_map(|&key| self.children.get(key).map(|entry| (key, entry.instance)))
+            .collect();
+        let startup_completed = self.start_children(initial_children.clone()).await?;
+        if let Some(startup_ready) = startup_ready {
+            if startup_completed && self.wait_until_children_ready(&initial_instances).await? {
+                startup_ready.mark_ready();
+            } else if let Some(result) = self.pending_exit.take() {
+                return result;
+            } else {
+                let error = SupervisorError::StartupAborted(
+                    "nested supervisor child failed before startup completed".to_owned(),
+                );
+                let _ = self.shutdown_all().await;
+                return Err(error);
+            }
         }
 
         loop {
@@ -293,6 +323,11 @@ impl SupervisorRuntime {
                         self.handle_nested_event(event);
                     }
                 }
+                ready = self.ready_rx.recv() => {
+                    if let Some(ready) = ready {
+                        self.handle_child_ready(ready);
+                    }
+                }
                 maybe = self.join_set.join_next_with_id(), if !self.join_set.is_empty() => {
                     let Some(joined) = maybe else { continue };
                     self.handle_joined_child(joined).await?;
@@ -304,10 +339,168 @@ impl SupervisorRuntime {
         }
     }
 
+    pub(crate) async fn start_children(
+        &mut self,
+        keys: Vec<ChildKey>,
+    ) -> Result<bool, SupervisorError> {
+        let restart_epoch = self.restart_epoch;
+        for key in keys {
+            let Some((ready, _, _)) = self.spawn_child_for_start(key).await? else {
+                continue;
+            };
+            if self.restart_epoch != restart_epoch {
+                return Ok(true);
+            }
+            if !ready {
+                if self.children.contains(key) {
+                    return Ok(false);
+                }
+                continue;
+            }
+        }
+        Ok(true)
+    }
+
+    async fn spawn_child_for_start(
+        &mut self,
+        key: ChildKey,
+    ) -> Result<Option<(bool, Option<u64>, u64)>, SupervisorError> {
+        let Some(entry) = self.children.get(key) else {
+            return Ok(None);
+        };
+        if entry.membership != MembershipState::Active
+            || entry.runtime.state != RuntimeChildState::Stopped
+        {
+            return Ok(None);
+        }
+        let readiness_gated = entry.runtime.definition.readiness == ChildReadiness::Explicit;
+        let (old_generation, new_generation) = self.spawn_child(key)?;
+        let ready = if self.meta.start_mode == StartMode::Sequential && readiness_gated {
+            Box::pin(self.wait_until_child_ready(key)).await?
+        } else {
+            true
+        };
+        Ok(Some((ready, old_generation, new_generation)))
+    }
+
+    async fn wait_until_child_ready(&mut self, key: ChildKey) -> Result<bool, SupervisorError> {
+        let Some(instance) = self.children.get(key).map(|entry| entry.instance) else {
+            return Ok(false);
+        };
+        loop {
+            let Some(entry) = self.children.get(key) else {
+                return Ok(false);
+            };
+            if entry.instance != instance {
+                return Ok(false);
+            }
+            match entry.runtime.state {
+                RuntimeChildState::Running => return Ok(true),
+                RuntimeChildState::Stopped => return Ok(false),
+                RuntimeChildState::Starting | RuntimeChildState::Stopping => {}
+            }
+
+            tokio::select! {
+                biased;
+                changed = self.shutdown_rx.changed() => {
+                    if self.shutdown_requested(changed) {
+                        self.queue_shutdown_exit().await;
+                        return Ok(false);
+                    }
+                }
+                ready = self.ready_rx.recv() => {
+                    if let Some(ready) = ready {
+                        self.handle_child_ready(ready);
+                    }
+                }
+                update = self.nested_snapshot_rx.recv() => {
+                    if let Some(update) = update {
+                        self.handle_nested_snapshot(update);
+                    }
+                }
+                event = self.nested_event_rx.recv() => {
+                    if let Some(event) = event {
+                        self.handle_nested_event(event);
+                    }
+                }
+                maybe = self.join_set.join_next_with_id(), if !self.join_set.is_empty() => {
+                    let Some(joined) = maybe else { continue };
+                    self.handle_joined_child(joined).await?;
+                    if self.pending_exit.is_some() {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn wait_until_children_ready(
+        &mut self,
+        children: &[(ChildKey, u64)],
+    ) -> Result<bool, SupervisorError> {
+        for &(key, instance) in children {
+            let Some(entry) = self.children.get(key) else {
+                continue;
+            };
+            if entry.instance != instance {
+                continue;
+            }
+            if entry.runtime.has_reported_ready {
+                continue;
+            }
+            if !Box::pin(self.wait_until_child_ready(key)).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn handle_child_ready(&mut self, ready: ChildReady) {
+        let Some(entry) = self.children.get_mut(ready.key) else {
+            return;
+        };
+        if entry.instance != ready.instance
+            || entry.runtime.generation != ready.generation
+            || entry.membership != MembershipState::Active
+            || entry.runtime.state != RuntimeChildState::Starting
+        {
+            return;
+        }
+        entry.runtime.state = RuntimeChildState::Running;
+        entry.runtime.has_reported_ready = true;
+        let id = entry.id.clone();
+        self.send_event(SupervisorEvent::ChildStarted {
+            id,
+            generation: ready.generation,
+        });
+    }
+
+    fn should_skip_group_respawn(&mut self, key: ChildKey) -> bool {
+        let Some(entry) = self.children.get_mut(key) else {
+            return true;
+        };
+        if entry.membership != MembershipState::Active {
+            return true;
+        }
+        if entry.runtime.has_started
+            && matches!(entry.runtime.definition.restart, RestartPolicy::Never)
+        {
+            let startup_aborted = !entry.runtime.has_reported_ready;
+            if startup_aborted {
+                entry.runtime.startup_aborted = true;
+            }
+            if startup_aborted {
+                self.publish_snapshot();
+            }
+            return true;
+        }
+        false
+    }
+
     async fn handle_command(&mut self, command: SupervisorCommand) {
         match command {
             SupervisorCommand::AddChild { child, reply } => {
-                let _ = reply.send(self.add_child(child));
+                let _ = reply.send(self.add_child(child).await);
             }
             SupervisorCommand::RemoveChild { id, reply } => {
                 let _ = reply.send(self.remove_child(id).await);
@@ -317,12 +510,12 @@ impl SupervisorRuntime {
                 supervisor,
                 reply,
             } => {
-                let _ = reply.send(self.add_supervisor(id, *supervisor));
+                let _ = reply.send(self.add_supervisor(id, *supervisor).await);
             }
         }
     }
 
-    fn add_child(&mut self, child: crate::child::ChildSpec) -> Result<(), ControlError> {
+    async fn add_child(&mut self, child: crate::child::ChildSpec) -> Result<(), ControlError> {
         if self.state == SupervisorState::Stopping {
             return Err(ControlError::SupervisorStopping);
         }
@@ -366,17 +559,15 @@ impl SupervisorRuntime {
         self.children_by_id.insert(id.clone(), key);
         self.child_order.push(key);
 
-        if let Err(err) = self.spawn_child(key) {
-            self.children_by_id.remove(&id);
-            self.child_order.retain(|&existing| existing != key);
-            self.children.remove(key);
-            return Err(map_supervisor_error_to_control(err));
+        if let Err(error) = self.start_children(vec![key]).await {
+            self.pending_exit = Some(Err(error.clone()));
+            return Err(map_supervisor_error_to_control(error));
         }
 
         Ok(())
     }
 
-    fn add_supervisor(
+    async fn add_supervisor(
         &mut self,
         id: String,
         supervisor: SupervisorSpec,
@@ -429,18 +620,8 @@ impl SupervisorRuntime {
             .expect("nested channel map poisoned")
             .insert(id.clone(), stable);
 
-        if let Err(error) = self.spawn_child(key) {
-            self.children_by_id.remove(&id);
-            self.child_order.retain(|&existing| existing != key);
-            self.children.remove(key);
-            self.nested_handles
-                .lock()
-                .expect("nested handle map poisoned")
-                .remove(&id);
-            self.nested_channels
-                .lock()
-                .expect("nested channel map poisoned")
-                .remove(&id);
+        if let Err(error) = self.start_children(vec![key]).await {
+            self.pending_exit = Some(Err(error.clone()));
             return Err(map_supervisor_error_to_control(error));
         }
 
@@ -787,6 +968,9 @@ impl SupervisorRuntime {
                 Strategy::OneForAll => self.handle_one_for_all_restart(classified.key).await?,
                 Strategy::RestForOne => self.handle_rest_for_one_restart(classified.key).await?,
             }
+        } else if allow_restart && !self.children[classified.key].runtime.has_reported_ready {
+            self.children[classified.key].runtime.startup_aborted = true;
+            self.publish_snapshot();
         }
 
         Ok(())
@@ -948,17 +1132,26 @@ impl SupervisorRuntime {
             return Ok(());
         }
         self.group_token = CancellationToken::new();
+        self.restart_epoch = self.restart_epoch.saturating_add(1);
+        let restart_epoch = self.restart_epoch;
         let keys = self.child_order.clone();
         for key in keys {
-            let entry = &self.children[key];
-            if entry.membership != MembershipState::Active
-                || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
-            {
+            if self.should_skip_group_respawn(key) {
                 continue;
             }
-            let (old_generation, new_generation) = self.spawn_child(key)?;
+            let Some((ready, old_generation, new_generation)) =
+                Box::pin(self.spawn_child_for_start(key)).await?
+            else {
+                continue;
+            };
+            if self.restart_epoch != restart_epoch {
+                return Ok(());
+            }
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
+            }
+            if !ready && self.children.contains(key) {
+                break;
             }
         }
         Ok(())
@@ -1014,18 +1207,25 @@ impl SupervisorRuntime {
         if self.pending_exit.is_some() {
             return Ok(());
         }
+        self.restart_epoch = self.restart_epoch.saturating_add(1);
+        let restart_epoch = self.restart_epoch;
         for key in keys {
-            let Some(entry) = self.children.get(key) else {
-                continue;
-            };
-            if entry.membership != MembershipState::Active
-                || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
-            {
+            if self.should_skip_group_respawn(key) {
                 continue;
             }
-            let (old_generation, new_generation) = self.spawn_child(key)?;
+            let Some((ready, old_generation, new_generation)) =
+                Box::pin(self.spawn_child_for_start(key)).await?
+            else {
+                continue;
+            };
+            if self.restart_epoch != restart_epoch {
+                break;
+            }
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
+            }
+            if !ready && self.children.contains(key) {
+                break;
             }
         }
         for classified in deferred {
@@ -1135,8 +1335,14 @@ impl SupervisorRuntime {
     }
 
     fn send_restart_event(&self, key: ChildKey, old_generation: u64, new_generation: u64) {
+        let Some(entry) = self.children.get(key) else {
+            return;
+        };
+        if entry.runtime.generation != new_generation {
+            return;
+        }
         self.send_event(SupervisorEvent::ChildRestarted {
-            id: self.children[key].id.clone(),
+            id: entry.id.clone(),
             old_generation,
             new_generation,
         });
@@ -1177,6 +1383,8 @@ impl SupervisorRuntime {
             children.push(ChildSnapshot {
                 id: entry.id.clone(),
                 generation: entry.runtime.generation,
+                started: entry.runtime.has_reported_ready,
+                startup_aborted: entry.runtime.startup_aborted,
                 state: match entry.runtime.state {
                     RuntimeChildState::Starting => ChildStateView::Starting,
                     RuntimeChildState::Running => ChildStateView::Running,
@@ -1285,7 +1493,9 @@ fn map_supervisor_error_to_control(err: SupervisorError) -> ControlError {
     match err {
         SupervisorError::ShutdownTimedOut(ids) => ControlError::ShutdownTimedOut(ids),
         SupervisorError::Internal(message) => ControlError::Internal(message),
-        SupervisorError::RestartIntensityExceeded => ControlError::SupervisorStopping,
+        SupervisorError::RestartIntensityExceeded | SupervisorError::StartupAborted(_) => {
+            ControlError::SupervisorStopping
+        }
     }
 }
 

@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use crate::{
-    child::ChildKind,
-    context::{ChildContext, SupervisorToken},
+    child::{ChildKind, ChildReadiness},
+    context::{ChildContext, ChildReady, ReadySignal, SupervisorToken},
     error::SupervisorError,
     event::{EventSink, SupervisorEvent},
     runtime::{
@@ -60,6 +60,8 @@ impl SupervisorRuntime {
             let child_token = self.group_token.child_token();
             child.active_token = Some(child_token.clone());
             child.state = RuntimeChildState::Starting;
+            child.has_reported_ready = false;
+            child.startup_aborted = false;
             child.next_restart_deadline = None;
             let completion_state = Arc::new(AtomicU8::new(COMPLETION_PENDING));
             child.completion_state = completion_state.clone();
@@ -79,6 +81,16 @@ impl SupervisorRuntime {
                 generation,
                 child_token,
                 SupervisorToken::new(self.group_token.clone()),
+                (child.definition.readiness == ChildReadiness::Explicit).then(|| {
+                    ReadySignal::new(
+                        self.ready_tx.clone(),
+                        ChildReady {
+                            key,
+                            instance,
+                            generation,
+                        },
+                    )
+                }),
             );
             let kind = child.definition.kind.clone();
             let nested_channels = entry.nested_channels.clone();
@@ -180,7 +192,12 @@ impl SupervisorRuntime {
             })?;
             let child = &mut entry.runtime;
             child.has_started = true;
-            child.state = RuntimeChildState::Running;
+            child.state = if child.definition.readiness == ChildReadiness::Immediate {
+                child.has_reported_ready = true;
+                RuntimeChildState::Running
+            } else {
+                RuntimeChildState::Starting
+            };
             child.abort_handle = Some(abort_handle);
         }
         if !counted_before {
@@ -195,10 +212,14 @@ impl SupervisorRuntime {
                 generation,
             },
         );
-        self.send_event(SupervisorEvent::ChildStarted {
-            id: child_id,
-            generation,
-        });
+        if self.children[key].runtime.state == RuntimeChildState::Running {
+            self.send_event(SupervisorEvent::ChildStarted {
+                id: child_id,
+                generation,
+            });
+        } else {
+            self.publish_snapshot();
+        }
 
         Ok((old_generation, generation))
     }
