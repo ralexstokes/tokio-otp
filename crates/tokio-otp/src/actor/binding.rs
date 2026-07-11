@@ -11,6 +11,7 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use crate::actor::{
     error::SendError,
+    monitor::{DownReason, MonitorHub},
     observability::{GraphObservability, MessageSizeMetrics},
 };
 
@@ -540,6 +541,7 @@ pub enum RebindPolicy {
 pub(crate) trait BindingLifecycle: Send + Sync {
     fn unbind(&self);
     fn terminate(&self);
+    fn notify_exit(&self, reason: DownReason);
     fn stats(&self) -> ActorStats;
 }
 
@@ -552,6 +554,7 @@ pub(crate) struct BindingCore<M> {
     current: watch::Sender<BindingState<M>>,
     stats: Arc<ActorStatsCounters>,
     message_size: Option<Arc<MessageSizeObserver<M>>>,
+    monitors: Arc<MonitorHub>,
 }
 
 pub(crate) struct MessageSizeObserver<M> {
@@ -572,16 +575,19 @@ impl<M> MessageSizeObserver<M> {
 impl<M> BindingCore<M> {
     pub(crate) fn new(actor_id: Arc<str>) -> Self {
         let (current, _receiver) = watch::channel(BindingState::Unbound);
+        let monitors = Arc::new(MonitorHub::new(&actor_id));
         Self {
             actor_id,
             current,
             stats: Arc::new(ActorStatsCounters::new(false)),
             message_size: None,
+            monitors,
         }
     }
 
     pub(crate) fn with_message_size(actor_id: Arc<str>, size_hint: fn(&M) -> usize) -> Self {
         let (current, _receiver) = watch::channel(BindingState::Unbound);
+        let monitors = Arc::new(MonitorHub::new(&actor_id));
         let message_size = MessageSizeObserver {
             size_hint,
             metrics: MessageSizeMetrics::new(&actor_id),
@@ -591,6 +597,7 @@ impl<M> BindingCore<M> {
             current,
             stats: Arc::new(ActorStatsCounters::new(true)),
             message_size: Some(Arc::new(message_size)),
+            monitors,
         }
     }
 
@@ -610,6 +617,10 @@ impl<M> BindingCore<M> {
         self.message_size.clone()
     }
 
+    pub(crate) fn monitor_hub(&self) -> Arc<MonitorHub> {
+        Arc::clone(&self.monitors)
+    }
+
     pub(crate) fn stats(&self) -> ActorStats {
         let state = self.current.borrow();
         let (depth, capacity) = match &*state {
@@ -620,6 +631,7 @@ impl<M> BindingCore<M> {
     }
 
     fn bind(&self, mailbox: MailboxRef<M>) {
+        self.monitors.started();
         self.current.send_replace(BindingState::Bound(mailbox));
     }
 
@@ -639,6 +651,7 @@ impl<M> BindingCore<M> {
 
     pub(crate) fn terminate(&self) {
         self.current.send_replace(BindingState::Terminated);
+        self.monitors.terminated();
     }
 }
 
@@ -651,8 +664,18 @@ impl<M: Send + 'static> BindingLifecycle for BindingCore<M> {
         BindingCore::terminate(self);
     }
 
+    fn notify_exit(&self, reason: DownReason) {
+        self.monitors.exited(reason);
+    }
+
     fn stats(&self) -> ActorStats {
         BindingCore::stats(self)
+    }
+}
+
+impl<M> Drop for BindingCore<M> {
+    fn drop(&mut self) {
+        self.monitors.terminated();
     }
 }
 

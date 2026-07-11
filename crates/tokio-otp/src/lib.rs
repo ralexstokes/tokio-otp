@@ -233,10 +233,11 @@ pub mod prelude {
     pub use crate::codec;
     pub use crate::{
         Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot,
-        ActorStats, BoxError, CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError,
-        GraphBuilder, MailboxMode, MessageSize, RawActor, RebindPolicy, Reply, RunnableActor,
-        RunnableActorFactory, Runtime, RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors,
-        SupervisorHandleExt, TimerRef, TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
+        ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, DynamicActorOptions, Graph,
+        GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorRef, RawActor,
+        RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime, RuntimeBuilder,
+        RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt, TimerRef, TopologyEdge,
+        TopologyMetadata, TopologyNode, TryRecvError,
     };
     pub use tokio_supervisor::{
         BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
@@ -255,9 +256,9 @@ pub use tokio_otp_derive::Topology;
 
 pub use actor::{
     Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
-    BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, MailboxMode,
-    MessageSize, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError,
-    TimerRef,
+    BoxError, CallError, Down, DownReason, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
+    MailboxMode, MessageSize, MonitorRef, RawActor, RebindPolicy, Reply, RunnableActor,
+    RunnableActorFactory, SendError, TimerRef,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
