@@ -7,7 +7,10 @@ use std::{
 };
 
 use tokio::sync::{Mutex, Notify};
-use tokio_supervisor::{ChildSpec, RestartPolicy, StartMode, Strategy, SupervisorBuilder};
+use tokio_supervisor::{
+    BackoffPolicy, ChildSpec, RestartIntensity, RestartPolicy, StartMode, Strategy,
+    SupervisorBuilder, SupervisorSpec,
+};
 
 #[tokio::test]
 async fn sequential_start_waits_for_explicit_readiness() {
@@ -475,5 +478,168 @@ async fn rest_for_one_restart_preserves_sequential_readiness_order() {
     })
     .await
     .unwrap();
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn pre_ready_one_for_all_failure_does_not_duplicate_children() {
+    let first_attempts = Arc::new(AtomicUsize::new(0));
+    let second_runs = Arc::new(AtomicUsize::new(0));
+    let first = ChildSpec::new("first", {
+        let first_attempts = Arc::clone(&first_attempts);
+        move |ctx| {
+            let attempt = first_attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return Err(std::io::Error::other("pre-ready failure").into());
+                }
+                ctx.mark_ready();
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .wait_for_ready();
+    let second = ChildSpec::new("second", {
+        let second_runs = Arc::clone(&second_runs);
+        move |ctx| {
+            let second_runs = Arc::clone(&second_runs);
+            async move {
+                second_runs.fetch_add(1, Ordering::SeqCst);
+                ctx.mark_ready();
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .wait_for_ready();
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .start_mode(StartMode::Sequential)
+        .child(first)
+        .child(second)
+        .build()
+        .unwrap()
+        .spawn();
+    tokio::time::timeout(Duration::from_secs(1), handle.wait_started())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(second_runs.load(Ordering::SeqCst), 1);
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn nested_startup_abort_gracefully_stops_ready_siblings() {
+    let sibling_stopped = Arc::new(Notify::new());
+    let sibling = ChildSpec::new("sibling", {
+        let sibling_stopped = Arc::clone(&sibling_stopped);
+        move |ctx| {
+            let sibling_stopped = Arc::clone(&sibling_stopped);
+            async move {
+                ctx.mark_ready();
+                ctx.shutdown_token().cancelled().await;
+                sibling_stopped.notify_one();
+                Ok(())
+            }
+        }
+    })
+    .wait_for_ready();
+    let failed = ChildSpec::new("failed", |_| async {
+        Err(std::io::Error::other("nested init failed").into())
+    })
+    .restart(RestartPolicy::Never)
+    .wait_for_ready();
+    let nested = SupervisorBuilder::new()
+        .start_mode(StartMode::Sequential)
+        .child(sibling)
+        .child(failed)
+        .build()
+        .unwrap();
+    let handle = SupervisorBuilder::new()
+        .start_mode(StartMode::Sequential)
+        .supervisor(
+            "nested",
+            SupervisorSpec::new(nested).restart(RestartPolicy::Never),
+        )
+        .build()
+        .unwrap()
+        .spawn();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), handle.wait_started())
+            .await
+            .unwrap(),
+        Err(tokio_supervisor::SupervisorError::StartupAborted(_))
+    ));
+    tokio::time::timeout(Duration::from_secs(1), sibling_stopped.notified())
+        .await
+        .unwrap();
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn removal_during_pre_ready_group_restart_does_not_stall_later_children() {
+    let trigger = Arc::new(Notify::new());
+    let pre_ready_failure = Arc::new(Notify::new());
+    let sibling_runs = Arc::new(AtomicUsize::new(0));
+    let failing = ChildSpec::new("failing", {
+        let trigger = Arc::clone(&trigger);
+        let pre_ready_failure = Arc::clone(&pre_ready_failure);
+        move |ctx| {
+            let trigger = Arc::clone(&trigger);
+            let pre_ready_failure = Arc::clone(&pre_ready_failure);
+            async move {
+                if ctx.generation() == 0 {
+                    ctx.mark_ready();
+                    trigger.notified().await;
+                } else {
+                    pre_ready_failure.notify_one();
+                }
+                Err(std::io::Error::other("restart failure").into())
+            }
+        }
+    })
+    .restart_intensity(
+        RestartIntensity::new(5, Duration::from_secs(10))
+            .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(50))),
+    )
+    .wait_for_ready();
+    let sibling = ChildSpec::new("sibling", {
+        let sibling_runs = Arc::clone(&sibling_runs);
+        move |ctx| {
+            let sibling_runs = Arc::clone(&sibling_runs);
+            async move {
+                sibling_runs.fetch_add(1, Ordering::SeqCst);
+                ctx.mark_ready();
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .wait_for_ready();
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .start_mode(StartMode::Sequential)
+        .child(failing)
+        .child(sibling)
+        .build()
+        .unwrap()
+        .spawn();
+    handle.wait_started().await.unwrap();
+    trigger.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), pre_ready_failure.notified())
+        .await
+        .unwrap();
+    handle.remove_child("failing").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while sibling_runs.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(sibling_runs.load(Ordering::SeqCst), 2);
+    handle.wait_started().await.unwrap();
     handle.shutdown_and_wait().await.unwrap();
 }

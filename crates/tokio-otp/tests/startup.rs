@@ -157,3 +157,35 @@ async fn drain_processes_continuations_queued_by_drained_messages() {
     handle.shutdown_and_wait().await.unwrap();
     assert_eq!(&*handled.lock().await, &["trigger", "continued"]);
 }
+
+#[derive(Clone)]
+struct PromptRaw;
+
+impl RawActor for PromptRaw {
+    type Msg = ();
+
+    async fn run(&mut self, _ctx: ActorContext<Self::Msg>) -> ActorResult {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn prompt_raw_actor_delivers_readiness_before_completion() {
+    let mut graph = GraphBuilder::new();
+    graph.add(PromptRaw);
+    let handle = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .restart(RestartPolicy::Never)
+        .build()
+        .unwrap()
+        .spawn();
+    tokio::time::timeout(Duration::from_secs(1), handle.wait_started())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        handle.snapshot().children[0].last_exit,
+        Some(ExitStatusView::Completed)
+    ));
+    handle.shutdown_and_wait().await.unwrap();
+}

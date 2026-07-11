@@ -177,6 +177,7 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) commands_open: bool,
     pub(crate) task_map: HashMap<Id, TaskMeta>,
     pub(crate) pending_exit: Option<Result<(), SupervisorError>>,
+    pub(crate) restart_epoch: u64,
 }
 
 impl SupervisorRuntime {
@@ -261,6 +262,7 @@ impl SupervisorRuntime {
             commands_open: true,
             task_map: HashMap::new(),
             pending_exit: None,
+            restart_epoch: 0,
         }
     }
 
@@ -278,9 +280,11 @@ impl SupervisorRuntime {
             } else if let Some(result) = self.pending_exit.take() {
                 return result;
             } else {
-                return Err(SupervisorError::StartupAborted(
+                let error = SupervisorError::StartupAborted(
                     "nested supervisor child failed before startup completed".to_owned(),
-                ));
+                );
+                let _ = self.shutdown_all().await;
+                return Err(error);
             }
         }
 
@@ -335,8 +339,14 @@ impl SupervisorRuntime {
         &mut self,
         keys: Vec<ChildKey>,
     ) -> Result<bool, SupervisorError> {
+        let restart_epoch = self.restart_epoch;
         for key in keys {
-            let (ready, _, _) = self.spawn_child_for_start(key).await?;
+            let Some((ready, _, _)) = self.spawn_child_for_start(key).await? else {
+                continue;
+            };
+            if self.restart_epoch != restart_epoch {
+                return Ok(true);
+            }
             if !ready {
                 return Ok(false);
             }
@@ -347,16 +357,23 @@ impl SupervisorRuntime {
     async fn spawn_child_for_start(
         &mut self,
         key: ChildKey,
-    ) -> Result<(bool, Option<u64>, u64), SupervisorError> {
-        let readiness_gated =
-            self.children[key].runtime.definition.readiness == ChildReadiness::Explicit;
+    ) -> Result<Option<(bool, Option<u64>, u64)>, SupervisorError> {
+        let Some(entry) = self.children.get(key) else {
+            return Ok(None);
+        };
+        if entry.membership != MembershipState::Active
+            || entry.runtime.state != RuntimeChildState::Stopped
+        {
+            return Ok(None);
+        }
+        let readiness_gated = entry.runtime.definition.readiness == ChildReadiness::Explicit;
         let (old_generation, new_generation) = self.spawn_child(key)?;
         let ready = if self.meta.start_mode == StartMode::Sequential && readiness_gated {
             Box::pin(self.wait_until_child_ready(key)).await?
         } else {
             true
         };
-        Ok((ready, old_generation, new_generation))
+        Ok(Some((ready, old_generation, new_generation)))
     }
 
     async fn wait_until_child_ready(&mut self, key: ChildKey) -> Result<bool, SupervisorError> {
@@ -1089,20 +1106,30 @@ impl SupervisorRuntime {
             return Ok(());
         }
         self.group_token = CancellationToken::new();
+        self.restart_epoch = self.restart_epoch.saturating_add(1);
+        let restart_epoch = self.restart_epoch;
         let keys = self.child_order.clone();
         for key in keys {
-            let entry = &self.children[key];
+            let Some(entry) = self.children.get(key) else {
+                continue;
+            };
             if entry.membership != MembershipState::Active
                 || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
             {
                 continue;
             }
-            let (ready, old_generation, new_generation) =
-                Box::pin(self.spawn_child_for_start(key)).await?;
+            let Some((ready, old_generation, new_generation)) =
+                Box::pin(self.spawn_child_for_start(key)).await?
+            else {
+                continue;
+            };
+            if self.restart_epoch != restart_epoch {
+                return Ok(());
+            }
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
             }
-            if !ready {
+            if !ready && self.children.contains(key) {
                 break;
             }
         }
@@ -1159,6 +1186,8 @@ impl SupervisorRuntime {
         if self.pending_exit.is_some() {
             return Ok(());
         }
+        self.restart_epoch = self.restart_epoch.saturating_add(1);
+        let restart_epoch = self.restart_epoch;
         for key in keys {
             let Some(entry) = self.children.get(key) else {
                 continue;
@@ -1168,12 +1197,18 @@ impl SupervisorRuntime {
             {
                 continue;
             }
-            let (ready, old_generation, new_generation) =
-                Box::pin(self.spawn_child_for_start(key)).await?;
+            let Some((ready, old_generation, new_generation)) =
+                Box::pin(self.spawn_child_for_start(key)).await?
+            else {
+                continue;
+            };
+            if self.restart_epoch != restart_epoch {
+                break;
+            }
             if let Some(old_generation) = old_generation {
                 self.send_restart_event(key, old_generation, new_generation);
             }
-            if !ready {
+            if !ready && self.children.contains(key) {
                 break;
             }
         }
@@ -1284,8 +1319,14 @@ impl SupervisorRuntime {
     }
 
     fn send_restart_event(&self, key: ChildKey, old_generation: u64, new_generation: u64) {
+        let Some(entry) = self.children.get(key) else {
+            return;
+        };
+        if entry.runtime.generation != new_generation {
+            return;
+        }
         self.send_event(SupervisorEvent::ChildRestarted {
-            id: self.children[key].id.clone(),
+            id: entry.id.clone(),
             old_generation,
             new_generation,
         });

@@ -303,13 +303,13 @@ impl RunnableActor {
         let result = loop {
             tokio::select! {
                 biased;
-                joined = &mut actor_task => break joined,
                 result = &mut ready_rx, if ready.is_some() => {
                     let ready = ready.take();
                     if result.is_ok() && let Some(ready) = ready {
                         ready();
                     }
                 }
+                joined = &mut actor_task => break joined,
                 _ = shutdown.as_mut(), if !shutdown_requested => {
                     shutdown_requested = true;
                     actor_shutdown.cancel();
