@@ -88,6 +88,32 @@ actor down and terminates its mailbox binding, so senders holding stale refs
 fail fast instead of waiting forever. A runtime can be reduced back to zero
 actors and keeps running until `shutdown()` is requested.
 
+## Adding to a nested supervisor
+
+`RuntimeHandle::add_actor` always targets the root supervisor. To add an actor
+to an already-running nested supervisor, mint the runnable actor and its typed
+ref with `Graph::dynamic_factory`, locate the nested handle, and import
+`SupervisorHandleExt` to add it there:
+
+```rust,ignore
+use tokio_otp::{DynamicActorOptions, SupervisorHandleExt};
+
+let (actor, subscription) = graph
+    .dynamic_factory()
+    .actor("btc-usd", Subscription::new());
+let venue = handle.supervisor("coinbase").expect("venue is running");
+
+venue
+    .add_actor(actor, DynamicActorOptions::default())
+    .await?;
+```
+
+The actor's label (`"btc-usd"` above) is its child id within the nested
+supervisor, so remove it through the same handle with
+`venue.remove_child("btc-usd")`. Actors added this way are supervised and
+restart normally, but they do not appear in `RuntimeHandle::actor_stats()` or
+the console; use `RuntimeHandle::add_actor` when that visibility matters.
+
 ## Name-based discovery, when you want it
 
 When an application genuinely wants name-based discovery — plugins looking

@@ -1,4 +1,10 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use crate::{ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory};
 use tokio::sync::{broadcast, watch};
@@ -62,6 +68,65 @@ impl Default for DynamicActorOptions {
             restart: RestartPolicy::OnFailure,
             shutdown: ShutdownPolicy::default(),
             restart_intensity: None,
+        }
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for tokio_supervisor::SupervisorHandle {}
+}
+
+/// Actor-aware extensions for any supervisor handle, including handles for
+/// nested supervisors.
+///
+/// Import this trait to add a [`RunnableActor`] minted by
+/// [`Graph::dynamic_factory`](crate::Graph::dynamic_factory) directly to a
+/// running supervisor subtree.
+///
+/// This trait is sealed and cannot be implemented outside `tokio-otp`.
+pub trait SupervisorHandleExt: sealed::Sealed {
+    /// Adds a runnable actor as a supervised child.
+    ///
+    /// The actor's label becomes the child id. Its stable binding is rebound
+    /// according to `options.restart`, and is terminated when the supervisor
+    /// can no longer restart the child or the child is removed.
+    ///
+    /// Actors added through this extension are not tracked by
+    /// [`RuntimeHandle::actor_stats`] or the console, even when this is the
+    /// root handle returned by [`RuntimeHandle::supervisor_handle`]. Use
+    /// [`RuntimeHandle::add_actor`] when runtime stats visibility matters.
+    ///
+    /// If adding fails, the actor's binding is left intact so the call can be
+    /// retried with the same actor; senders on its ref keep waiting until an
+    /// add succeeds.
+    fn add_actor(
+        &self,
+        actor: RunnableActor,
+        options: DynamicActorOptions,
+    ) -> impl Future<Output = Result<(), ControlError>> + Send;
+}
+
+impl SupervisorHandleExt for SupervisorHandle {
+    fn add_actor(
+        &self,
+        actor: RunnableActor,
+        options: DynamicActorOptions,
+    ) -> impl Future<Output = Result<(), ControlError>> + Send {
+        let (child, termination) = actor_child_spec_with_termination(
+            actor,
+            options.restart,
+            options.shutdown,
+            options.restart_intensity,
+        );
+
+        async move {
+            let result = self.add_child(child).await;
+            if result.is_err() {
+                termination.disarm();
+            }
+            result
         }
     }
 }
@@ -292,11 +357,27 @@ impl std::fmt::Debug for RuntimeHandle {
 /// senders wait forever for a rebind.
 struct TerminateBindingOnDrop {
     actor: RunnableActor,
+    armed: AtomicBool,
+}
+
+impl TerminateBindingOnDrop {
+    fn new(actor: RunnableActor) -> Self {
+        Self {
+            actor,
+            armed: AtomicBool::new(true),
+        }
+    }
+
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::Release);
+    }
 }
 
 impl Drop for TerminateBindingOnDrop {
     fn drop(&mut self) {
-        self.actor.terminate_binding();
+        if self.armed.load(Ordering::Acquire) {
+            self.actor.terminate_binding();
+        }
     }
 }
 
@@ -306,11 +387,21 @@ pub(crate) fn actor_child_spec(
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
 ) -> ChildSpec {
+    actor_child_spec_with_termination(actor, restart, shutdown, restart_intensity).0
+}
+
+fn actor_child_spec_with_termination(
+    actor: RunnableActor,
+    restart: RestartPolicy,
+    shutdown: ShutdownPolicy,
+    restart_intensity: Option<RestartIntensity>,
+) -> (ChildSpec, Arc<TerminateBindingOnDrop>) {
     let actor_id = actor.label().to_owned();
     let rebind = rebind_policy_for_restart(restart);
-    let guard = Arc::new(TerminateBindingOnDrop { actor });
+    let guard = Arc::new(TerminateBindingOnDrop::new(actor));
+    let child_guard = Arc::clone(&guard);
     let mut child = ChildSpec::new(actor_id, move |ctx| {
-        let actor = guard.actor.clone();
+        let actor = child_guard.actor.clone();
         async move {
             actor
                 .run_until(ctx.shutdown_token().cancelled(), rebind)
@@ -325,7 +416,7 @@ pub(crate) fn actor_child_spec(
         child = child.restart_intensity(intensity);
     }
 
-    child
+    (child, guard)
 }
 
 fn rebind_policy_for_restart(restart: RestartPolicy) -> RebindPolicy {
