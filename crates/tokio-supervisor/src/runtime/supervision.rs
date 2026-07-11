@@ -20,6 +20,7 @@ use crate::{
     handle::{NestedChannels, NestedHandles, StableSupervisorChannels, SupervisorCommand},
     observability::{SupervisorObservability, format_child_path},
     restart::{RestartIntensity, RestartPolicy},
+    shutdown::AutoShutdown,
     snapshot::{
         ChildMembershipView, ChildSnapshot, ChildStateView, NestedSnapshotNotification,
         NestedSnapshotState, SupervisorSnapshot, SupervisorStateView,
@@ -117,6 +118,7 @@ impl ChildEntry {
 /// Read-only configuration and identity, fixed at construction time.
 pub(crate) struct RuntimeMeta {
     pub(crate) strategy: Strategy,
+    pub(crate) auto_shutdown: AutoShutdown,
     pub(crate) default_restart_intensity: RestartIntensity,
     pub(crate) path_prefix: Vec<String>,
     pub(crate) observability: SupervisorObservability,
@@ -219,6 +221,7 @@ impl SupervisorRuntime {
         Self {
             meta: RuntimeMeta {
                 strategy: config.strategy,
+                auto_shutdown: config.auto_shutdown,
                 default_restart_intensity,
                 path_prefix,
                 observability,
@@ -331,6 +334,11 @@ impl SupervisorRuntime {
                 .validate()
                 .map_err(|err| map_build_error_to_control(child.id(), err))?;
         }
+        if child.is_significant() && matches!(child.restart_policy(), RestartPolicy::Always) {
+            return Err(ControlError::InvalidConfig(
+                "significant children cannot use RestartPolicy::Always",
+            ));
+        }
 
         let id = child.id().to_owned();
         if self.children_by_id.contains_key(&id) {
@@ -376,6 +384,11 @@ impl SupervisorRuntime {
             intensity
                 .validate()
                 .map_err(|error| map_build_error_to_control(&id, error))?;
+        }
+        if supervisor.significant && matches!(supervisor.restart, RestartPolicy::Always) {
+            return Err(ControlError::InvalidConfig(
+                "significant children cannot use RestartPolicy::Always",
+            ));
         }
         if self.children_by_id.contains_key(&id) {
             return Err(ControlError::DuplicateChildId(id));
@@ -705,6 +718,16 @@ impl SupervisorRuntime {
             return Ok(());
         }
 
+        if self.auto_shutdown_triggered(classified.key, &classified.status) {
+            let id = self.children[classified.key].id.clone();
+            self.send_event(SupervisorEvent::AutoShutdownTriggered {
+                id,
+                mode: self.meta.auto_shutdown,
+            });
+            self.pending_exit = Some(self.shutdown_all().await);
+            return Ok(());
+        }
+
         let restart_policy = self.children[classified.key].runtime.definition.restart;
 
         if restart_policy.should_restart(classified.status.is_failure()) {
@@ -719,6 +742,31 @@ impl SupervisorRuntime {
         }
 
         Ok(())
+    }
+
+    fn auto_shutdown_triggered(&self, exited_key: ChildKey, status: &ExitStatus) -> bool {
+        if !matches!(status, ExitStatus::Completed)
+            || !self.children[exited_key].runtime.definition.significant
+        {
+            return false;
+        }
+
+        match self.meta.auto_shutdown {
+            AutoShutdown::Never => false,
+            AutoShutdown::AnySignificant => true,
+            AutoShutdown::AllSignificant => {
+                let mut found_significant = false;
+                self.children.iter().all(|(_, child)| {
+                    if child.membership != MembershipState::Active
+                        || !child.runtime.definition.significant
+                    {
+                        return true;
+                    }
+                    found_significant = true;
+                    matches!(child.last_exit, Some(ExitStatusView::Completed))
+                }) && found_significant
+            }
+        }
     }
 
     pub(crate) fn handle_drained_join(
@@ -1198,6 +1246,7 @@ fn event_child_id(event: &SupervisorEvent) -> Option<&str> {
     match event {
         SupervisorEvent::ChildStarted { id, .. }
         | SupervisorEvent::ChildExited { id, .. }
+        | SupervisorEvent::AutoShutdownTriggered { id, .. }
         | SupervisorEvent::ChildRestartScheduled { id, .. }
         | SupervisorEvent::ChildRestarted { id, .. }
         | SupervisorEvent::ChildRemoved { id }

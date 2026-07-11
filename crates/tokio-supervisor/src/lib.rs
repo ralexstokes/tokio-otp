@@ -202,7 +202,7 @@ pub use event::{EventPathSegment, ExitStatusView, SupervisorEvent};
 pub use handle::SupervisorHandle;
 pub use monitor::RestartMonitor;
 pub use restart::{BackoffPolicy, RestartIntensity, RestartPolicy};
-pub use shutdown::{ShutdownMode, ShutdownPolicy};
+pub use shutdown::{AutoShutdown, ShutdownMode, ShutdownPolicy};
 pub use snapshot::{
     ChildMembershipView, ChildSnapshot, ChildStateView, SupervisorSnapshot, SupervisorStateView,
 };

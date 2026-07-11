@@ -15,6 +15,7 @@ use crate::{
     observability::{format_path, strategy_label, supervisor_name_for_path},
     restart::RestartIntensity,
     runtime::SupervisorRuntime,
+    shutdown::AutoShutdown,
     snapshot::{
         ChildMembershipView, ChildSnapshot, ChildStateView, SnapshotCell, SupervisorSnapshot,
         SupervisorStateView,
@@ -36,6 +37,7 @@ pub struct Supervisor {
 pub(crate) struct SupervisorConfig {
     pub(crate) strategy: Strategy,
     pub(crate) restart_intensity: RestartIntensity,
+    pub(crate) auto_shutdown: AutoShutdown,
     pub(crate) children: Vec<ChildDefinition>,
     pub(crate) control_channel_capacity: usize,
     pub(crate) event_channel_capacity: usize,

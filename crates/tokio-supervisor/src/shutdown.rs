@@ -1,5 +1,23 @@
 use std::time::Duration;
 
+/// Controls whether clean exits from significant children automatically stop
+/// their supervisor.
+///
+/// A child is marked significant with
+/// [`ChildSpec::significant`](crate::ChildSpec::significant) or
+/// [`SupervisorSpec::significant`](crate::SupervisorSpec::significant).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AutoShutdown {
+    /// Significant child exits do not stop the supervisor.
+    #[default]
+    Never,
+    /// Stop when any significant child exits cleanly.
+    AnySignificant,
+    /// Stop after every significant child has exited cleanly.
+    AllSignificant,
+}
+
 /// How the supervisor stops a child task during shutdown or removal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShutdownMode {

@@ -239,11 +239,12 @@ pub mod prelude {
         SupervisorHandleExt, TimerRef, TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
     };
     pub use tokio_supervisor::{
-        BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot, ChildSpec,
-        ChildStateView, ControlError, EventPathSegment, ExitStatusView, RestartIntensity,
-        RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode, ShutdownPolicy, Strategy,
-        Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError, SupervisorEvent,
-        SupervisorHandle, SupervisorSnapshot, SupervisorSpec, SupervisorStateView, SupervisorToken,
+        AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
+        ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView,
+        RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode,
+        ShutdownPolicy, Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder,
+        SupervisorError, SupervisorEvent, SupervisorHandle, SupervisorSnapshot, SupervisorSpec,
+        SupervisorStateView, SupervisorToken,
         prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
     };
 }
