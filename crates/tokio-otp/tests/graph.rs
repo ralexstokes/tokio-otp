@@ -1136,6 +1136,7 @@ mod runnable_actor {
                 actor_id: "worker".to_owned(),
                 messages_received: 0,
                 messages_accepted: 2,
+                messages_conflated: 0,
                 sends_rejected: 1,
                 mailbox_depth: 2,
                 mailbox_capacity: 2,

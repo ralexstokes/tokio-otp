@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::actor::{
-    binding::{BindingCore, BindingLifecycle},
+    binding::{BindingCore, BindingLifecycle, MailboxMode},
     context::ActorRef,
     error::GraphBuildError,
     graph::{ErasedRunner, Graph, RunnableActor, RunnableActorParts, TypedRunner},
@@ -48,16 +48,17 @@ impl<M> ActorSlot<M> {
 /// [`slot`](Self::slot) to create refs first and [`define`](Self::define) to
 /// fill the slots once actor values have been wired.
 ///
-/// # Bounded mailboxes and cycles
+/// # Mailboxes and cycles
 ///
-/// Every mailbox is bounded ([`mailbox_capacity`](Self::mailbox_capacity)),
-/// so backpressure propagates through [`send`](ActorRef::send). In a cyclic
-/// graph this can deadlock: two actors that `send` to each other while both
-/// mailboxes are full wait forever, and a [`call`](ActorRef::call) cycle
-/// deadlocks at depth one because the callee cannot answer while the caller
-/// awaits the reply. Idioms: use [`try_send`](ActorRef::try_send) on
-/// feedback edges, and `call` only "downhill" along a DAG ordering of the
-/// graph.
+/// Mailboxes use bounded FIFO queues by default, with capacity configured by
+/// [`mailbox_capacity`](Self::mailbox_capacity). Backpressure through
+/// [`send`](ActorRef::send) can deadlock a cyclic graph: two actors that send
+/// to each other while both queues are full wait forever, and a
+/// [`call`](ActorRef::call) cycle deadlocks at depth one because the callee
+/// cannot answer while the caller awaits the reply. Idioms: use
+/// [`try_send`](ActorRef::try_send) on feedback edges, select a
+/// [`MailboxMode::Conflate`](crate::MailboxMode::Conflate) mailbox for lossy
+/// state snapshots, and call only "downhill" along a DAG ordering.
 pub struct GraphBuilder {
     builder_id: u64,
     name: Option<String>,
@@ -73,6 +74,7 @@ struct Slot {
     message_type: TypeId,
     binding: Arc<dyn Any + Send + Sync>,
     binding_lifecycle: Arc<dyn BindingLifecycle>,
+    mailbox_mode: Option<Box<dyn Any + Send + Sync>>,
     runner: Option<Arc<dyn ErasedRunner>>,
 }
 
@@ -136,7 +138,16 @@ impl GraphBuilder {
     /// The name is fixed when the slot is opened because it is used as the
     /// actor label in observability.
     pub fn slot<M: Send + 'static>(&mut self, actor_id: &str) -> (ActorSlot<M>, ActorRef<M>) {
-        match self.push_slot::<M>(actor_id) {
+        self.slot_with_mailbox(actor_id, MailboxMode::Queue)
+    }
+
+    /// Opens a named slot with an explicit mailbox mode.
+    pub fn slot_with_mailbox<M: Send + 'static>(
+        &mut self,
+        actor_id: &str,
+        mailbox_mode: MailboxMode<M>,
+    ) -> (ActorSlot<M>, ActorRef<M>) {
+        match self.push_slot(actor_id, mailbox_mode) {
             Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
             None => (
                 ActorSlot::new(self.builder_id, None),
@@ -171,19 +182,45 @@ impl GraphBuilder {
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
             unreachable!("message type enforced by ActorSlot")
         };
-        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
+        let mailbox_mode = slot
+            .mailbox_mode
+            .take()
+            .expect("unfilled slot retains mailbox mode")
+            .downcast::<MailboxMode<A::Msg>>()
+            .unwrap_or_else(|_| unreachable!("message type enforced by ActorSlot"));
+        slot.runner = Some(Arc::new(TypedRunner {
+            actor,
+            binding,
+            mailbox_mode: *mailbox_mode,
+        }));
     }
 
     /// Registers an actor and returns its typed, restart-stable ref.
     pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
-        let Some((index, actor_ref)) = self.push_slot::<A::Msg>(actor_id) else {
+        self.actor_with_mailbox(actor_id, actor, MailboxMode::Queue)
+    }
+
+    /// Registers an actor with an explicit mailbox mode.
+    pub fn actor_with_mailbox<A: RawActor>(
+        &mut self,
+        actor_id: &str,
+        actor: A,
+        mailbox_mode: MailboxMode<A::Msg>,
+    ) -> ActorRef<A::Msg> {
+        let runner_mode = mailbox_mode.clone();
+        let Some((index, actor_ref)) = self.push_slot(actor_id, mailbox_mode) else {
             return ActorRef::detached(actor_id.into());
         };
         let slot = &mut self.slots[index];
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
             unreachable!("message type id already verified")
         };
-        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
+        slot.mailbox_mode = None;
+        slot.runner = Some(Arc::new(TypedRunner {
+            actor,
+            binding,
+            mailbox_mode: runner_mode,
+        }));
         actor_ref
     }
 
@@ -194,6 +231,16 @@ impl GraphBuilder {
     /// fields; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
     pub fn add<A: RawActor>(&mut self, actor: A) -> ActorRef<A::Msg> {
+        self.add_with_mailbox(actor, MailboxMode::Queue)
+    }
+
+    /// Registers an actor under its unqualified type name with an explicit
+    /// mailbox mode.
+    pub fn add_with_mailbox<A: RawActor>(
+        &mut self,
+        actor: A,
+        mailbox_mode: MailboxMode<A::Msg>,
+    ) -> ActorRef<A::Msg> {
         let base = short_type_name(type_name::<A>());
         let mut actor_id = base.to_owned();
         let mut suffix = 2;
@@ -201,7 +248,7 @@ impl GraphBuilder {
             actor_id = format!("{base}-{suffix}");
             suffix += 1;
         }
-        self.actor(&actor_id, actor)
+        self.actor_with_mailbox(&actor_id, actor, mailbox_mode)
     }
 
     /// Validates the graph and returns an immutable [`Graph`].
@@ -257,7 +304,11 @@ impl GraphBuilder {
     }
 
     /// Creates a named slot and returns its index plus typed ref.
-    fn push_slot<M: Send + 'static>(&mut self, actor_id: &str) -> Option<(usize, ActorRef<M>)> {
+    fn push_slot<M: Send + 'static>(
+        &mut self,
+        actor_id: &str,
+        mailbox_mode: MailboxMode<M>,
+    ) -> Option<(usize, ActorRef<M>)> {
         if actor_id.is_empty() {
             self.errors
                 .push(GraphBuildError::InvalidConfig("actor id must not be empty"));
@@ -281,6 +332,7 @@ impl GraphBuilder {
             message_type: TypeId::of::<M>(),
             binding: core.clone(),
             binding_lifecycle: core,
+            mailbox_mode: Some(Box::new(mailbox_mode)),
             runner: None,
         });
         Some((index, actor_ref))

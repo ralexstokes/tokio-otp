@@ -1,13 +1,13 @@
 use std::{fmt, sync::Arc};
 
-use tokio::sync::{
-    mpsc::{self, error::TryRecvError},
-    oneshot, watch,
-};
+use tokio::sync::{mpsc::error::TryRecvError, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::actor::{
-    binding::{ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxRef},
+    binding::{
+        ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxReceiver, MailboxRef,
+        SendOutcome,
+    },
     error::{CallError, SendError},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
@@ -103,10 +103,12 @@ impl<M> ActorRef<M> {
 
     /// Sends a message to the target actor.
     ///
-    /// This waits until the actor has a bound mailbox, waits for mailbox
-    /// capacity, and rides through restart windows when the actor is expected
-    /// to rebind. It returns an error only when the actor has terminated with
-    /// no restart scheduled, or when the binding source has been dropped.
+    /// This waits until the actor has a bound mailbox, waits for capacity when
+    /// the actor uses a FIFO queue, and rides through restart windows when the
+    /// actor is expected to rebind. Conflating mailboxes replace stale unread
+    /// state immediately instead of waiting for capacity. This returns an
+    /// error only when the actor has terminated with no restart scheduled, or
+    /// when the binding source has been dropped.
     ///
     /// Cancelling this future while it is waiting drops the message.
     ///
@@ -134,12 +136,13 @@ impl<M> ActorRef<M> {
             };
 
             match mailbox.send_retaining(message).await {
-                Ok(()) => {
+                SendOutcome::Accepted { conflated } => {
                     self.observe_send(MessageOperation::Send, None);
                     self.stats.record_send(true);
+                    self.stats.record_conflated(conflated);
                     return Ok(());
                 }
-                Err(returned) => {
+                SendOutcome::Closed(returned) => {
                     self.observe_send(MessageOperation::Send, Some(SendRejection::MailboxClosed));
                     message = returned;
                     if let Err(error) = self
@@ -156,6 +159,9 @@ impl<M> ActorRef<M> {
     }
 
     /// Attempts to send a message without waiting for mailbox capacity.
+    ///
+    /// A full FIFO queue returns [`SendError::MailboxFull`]. A conflating
+    /// mailbox instead accepts the message and replaces stale unread state.
     pub fn try_send(&self, message: M) -> Result<(), SendError> {
         let result = match self.current_mailbox() {
             Ok(mailbox) => mailbox.try_send(message),
@@ -166,7 +172,13 @@ impl<M> ActorRef<M> {
             result.as_ref().err().map(send_rejection),
         );
         self.stats.record_send(result.is_ok());
-        result
+        match result {
+            Ok(conflated) => {
+                self.stats.record_conflated(conflated);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Sends a request and waits for the actor to answer through the
@@ -174,6 +186,11 @@ impl<M> ActorRef<M> {
     ///
     /// This waits for the same actor binding conditions as [`send`](Self::send).
     /// Cancelling this future while it is waiting drops the request message.
+    ///
+    /// Do not use `call` with a conflating mailbox: a newer message may replace
+    /// the request before it is handled, in which case this returns
+    /// [`CallError::ReplyDropped`]. Conflating mailboxes are for state
+    /// snapshots rather than request/response commands.
     ///
     /// ```ignore
     /// enum Msg { Get(Reply<u64>) }
@@ -280,7 +297,7 @@ impl<T> fmt::Debug for Reply<T> {
 /// [`run_blocking`](Self::run_blocking) for blocking work.
 pub struct ActorContext<M> {
     pub(crate) id: Arc<str>,
-    pub(crate) mailbox: mpsc::Receiver<M>,
+    pub(crate) mailbox: MailboxReceiver<M>,
     pub(crate) myself: ActorRef<M>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,

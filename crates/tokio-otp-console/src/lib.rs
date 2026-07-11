@@ -46,6 +46,7 @@ pub struct ActorStatsView {
     pub actor_id: String,
     pub messages_received: u64,
     pub messages_accepted: u64,
+    pub messages_conflated: u64,
     pub sends_rejected: u64,
     pub mailbox_depth: usize,
     pub mailbox_capacity: usize,

@@ -52,6 +52,7 @@
 //! | [`RawActor`] | Custom-loop typed actor definition (the escape hatch). |
 //! | [`ActorRef`] | Cloneable, restart-stable, typed mailbox sender. |
 //! | [`ActorContext`] | Mailbox, blocking work, and shutdown token visible to one actor. |
+//! | [`MailboxMode`] | FIFO or latest-wins storage policy selected per actor. |
 //! | [`Reply`] | One-shot response channel carried inside request messages. |
 //! | [`RunnableActor`] | One actor plus stable binding — the unit of execution. |
 //!
@@ -228,7 +229,7 @@ pub mod prelude {
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
         CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
-        RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
+        MailboxMode, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
         RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt,
         TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
     };
@@ -249,8 +250,8 @@ pub use tokio_otp_derive::Topology;
 
 pub use actor::{
     Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
-    CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor, RebindPolicy, Reply,
-    RunnableActor, RunnableActorFactory, SendError,
+    CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, MailboxMode, RawActor,
+    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};

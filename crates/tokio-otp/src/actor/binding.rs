@@ -1,9 +1,13 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::VecDeque,
+    fmt,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::actor::{error::SendError, observability::GraphObservability};
 
@@ -20,6 +24,8 @@ pub struct ActorStats {
     pub messages_received: u64,
     /// Messages accepted by `send` or `try_send`.
     pub messages_accepted: u64,
+    /// Previously unread messages replaced by newer messages in a conflating mailbox.
+    pub messages_conflated: u64,
     /// `send` or `try_send` calls that returned an error.
     pub sends_rejected: u64,
     /// Messages currently occupying the bound mailbox.
@@ -32,6 +38,7 @@ pub struct ActorStats {
 pub(crate) struct ActorStatsCounters {
     messages_received: AtomicU64,
     messages_accepted: AtomicU64,
+    messages_conflated: AtomicU64,
     sends_rejected: AtomicU64,
 }
 
@@ -49,6 +56,10 @@ impl ActorStatsCounters {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_conflated(&self, count: u64) {
+        self.messages_conflated.fetch_add(count, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(
         &self,
         actor_id: &str,
@@ -59,6 +70,7 @@ impl ActorStatsCounters {
             actor_id: actor_id.to_owned(),
             messages_received: self.messages_received.load(Ordering::Relaxed),
             messages_accepted: self.messages_accepted.load(Ordering::Relaxed),
+            messages_conflated: self.messages_conflated.load(Ordering::Relaxed),
             sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
             mailbox_depth,
             mailbox_capacity,
@@ -66,10 +78,135 @@ impl ActorStatsCounters {
     }
 }
 
+/// Selects how an actor stores unread messages.
+///
+/// FIFO [`Queue`](Self::Queue) mailboxes apply backpressure at the configured
+/// capacity. Conflating mailboxes never wait for capacity: they replace stale
+/// unread state and are intended for idempotent snapshots, not commands.
+#[derive(Default)]
+pub enum MailboxMode<M> {
+    /// A bounded FIFO queue. This is the default.
+    #[default]
+    Queue,
+    /// One latest-wins slot for the whole mailbox.
+    Conflate,
+    /// One latest-wins slot per key, bounded by the mailbox capacity.
+    ///
+    /// When the capacity is already occupied by distinct keys, a message for
+    /// a new key evicts the oldest unread key. Construct this variant with
+    /// [`conflate_by_key`](Self::conflate_by_key).
+    ConflateByKey {
+        #[doc(hidden)]
+        key_matches: MailboxKeyMatcher<M>,
+    },
+}
+
+type KeyMatcherFn<M> = dyn Fn(&M, &M) -> bool + Send + Sync;
+
+#[doc(hidden)]
+pub struct MailboxKeyMatcher<M>(Arc<KeyMatcherFn<M>>);
+
+impl<M> MailboxMode<M> {
+    /// Creates a keyed latest-wins mailbox using `key` to group messages.
+    pub fn conflate_by_key<K, F>(key: F) -> Self
+    where
+        K: Eq,
+        F: Fn(&M) -> K + Send + Sync + 'static,
+    {
+        Self::ConflateByKey {
+            key_matches: MailboxKeyMatcher(Arc::new(move |left, right| key(left) == key(right))),
+        }
+    }
+}
+
+impl<M> Clone for MailboxMode<M> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Queue => Self::Queue,
+            Self::Conflate => Self::Conflate,
+            Self::ConflateByKey { key_matches } => Self::ConflateByKey {
+                key_matches: MailboxKeyMatcher(Arc::clone(&key_matches.0)),
+            },
+        }
+    }
+}
+
+impl<M> fmt::Debug for MailboxMode<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Queue => f.write_str("Queue"),
+            Self::Conflate => f.write_str("Conflate"),
+            Self::ConflateByKey { .. } => f.write_str("ConflateByKey"),
+        }
+    }
+}
+
+pub(crate) enum MailboxReceiver<M> {
+    Queue(mpsc::Receiver<M>),
+    Conflating(ConflatingReceiver<M>),
+}
+
+impl<M> MailboxReceiver<M> {
+    pub(crate) async fn recv(&mut self) -> Option<M> {
+        match self {
+            Self::Queue(receiver) => receiver.recv().await,
+            Self::Conflating(receiver) => receiver.recv().await,
+        }
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<M, mpsc::error::TryRecvError> {
+        match self {
+            Self::Queue(receiver) => receiver.try_recv(),
+            Self::Conflating(receiver) => receiver.try_recv(),
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        match self {
+            Self::Queue(receiver) => receiver.close(),
+            Self::Conflating(receiver) => receiver.close(),
+        }
+    }
+}
+
+pub(crate) fn mailbox<M>(
+    mode: &MailboxMode<M>,
+    capacity: usize,
+) -> (MailboxSender<M>, MailboxReceiver<M>) {
+    match mode {
+        MailboxMode::Queue => {
+            let (sender, receiver) = mpsc::channel(capacity);
+            (
+                MailboxSender::Queue(sender),
+                MailboxReceiver::Queue(receiver),
+            )
+        }
+        MailboxMode::Conflate => {
+            let (sender, receiver) = conflating_channel(1, None);
+            (
+                MailboxSender::Conflating(sender),
+                MailboxReceiver::Conflating(receiver),
+            )
+        }
+        MailboxMode::ConflateByKey { key_matches } => {
+            let (sender, receiver) = conflating_channel(capacity, Some(Arc::clone(&key_matches.0)));
+            (
+                MailboxSender::Conflating(sender),
+                MailboxReceiver::Conflating(receiver),
+            )
+        }
+    }
+}
+
+pub(crate) enum SendOutcome<M> {
+    Accepted { conflated: u64 },
+    Closed(M),
+}
+
 /// Sender for one bound mailbox instance of an actor.
 pub(crate) struct MailboxRef<M> {
     actor_id: Arc<str>,
-    sender: mpsc::Sender<M>,
+    sender: MailboxSender<M>,
 }
 
 impl<M> Clone for MailboxRef<M> {
@@ -82,25 +219,44 @@ impl<M> Clone for MailboxRef<M> {
 }
 
 impl<M> MailboxRef<M> {
-    pub(crate) fn new(actor_id: Arc<str>, sender: mpsc::Sender<M>) -> Self {
+    pub(crate) fn new(actor_id: Arc<str>, sender: MailboxSender<M>) -> Self {
         Self { actor_id, sender }
     }
 
     /// Sends, returning the message on failure so callers can retry after a
     /// rebind.
-    pub(crate) async fn send_retaining(&self, message: M) -> Result<(), M> {
-        self.sender.send(message).await.map_err(|err| err.0)
+    pub(crate) async fn send_retaining(&self, message: M) -> SendOutcome<M> {
+        match &self.sender {
+            MailboxSender::Queue(sender) => match sender.send(message).await {
+                Ok(()) => SendOutcome::Accepted { conflated: 0 },
+                Err(error) => SendOutcome::Closed(error.0),
+            },
+            MailboxSender::Conflating(sender) => sender.send(message),
+        }
     }
 
-    pub(crate) fn try_send(&self, message: M) -> Result<(), SendError> {
-        self.sender.try_send(message).map_err(|err| match err {
-            mpsc::error::TrySendError::Full(_) => SendError::MailboxFull {
-                actor_id: self.actor_id.to_string(),
+    pub(crate) fn try_send(&self, message: M) -> Result<u64, SendError> {
+        match &self.sender {
+            MailboxSender::Queue(sender) => {
+                sender
+                    .try_send(message)
+                    .map(|()| 0)
+                    .map_err(|err| match err {
+                        mpsc::error::TrySendError::Full(_) => SendError::MailboxFull {
+                            actor_id: self.actor_id.to_string(),
+                        },
+                        mpsc::error::TrySendError::Closed(_) => SendError::MailboxClosed {
+                            actor_id: self.actor_id.to_string(),
+                        },
+                    })
+            }
+            MailboxSender::Conflating(sender) => match sender.send(message) {
+                SendOutcome::Accepted { conflated } => Ok(conflated),
+                SendOutcome::Closed(_) => Err(SendError::MailboxClosed {
+                    actor_id: self.actor_id.to_string(),
+                }),
             },
-            mpsc::error::TrySendError::Closed(_) => SendError::MailboxClosed {
-                actor_id: self.actor_id.to_string(),
-            },
-        })
+        }
     }
 
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
@@ -108,9 +264,225 @@ impl<M> MailboxRef<M> {
     }
 
     pub(crate) fn usage(&self) -> (usize, usize) {
-        let capacity = self.sender.max_capacity();
-        (capacity.saturating_sub(self.sender.capacity()), capacity)
+        self.sender.usage()
     }
+}
+
+pub(crate) enum MailboxSender<M> {
+    Queue(mpsc::Sender<M>),
+    Conflating(ConflatingSender<M>),
+}
+
+impl<M> Clone for MailboxSender<M> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Queue(sender) => Self::Queue(sender.clone()),
+            Self::Conflating(sender) => Self::Conflating(sender.clone()),
+        }
+    }
+}
+
+impl<M> MailboxSender<M> {
+    fn same_channel(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Queue(left), Self::Queue(right)) => left.same_channel(right),
+            (Self::Conflating(left), Self::Conflating(right)) => left.same_channel(right),
+            _ => false,
+        }
+    }
+
+    fn usage(&self) -> (usize, usize) {
+        match self {
+            Self::Queue(sender) => {
+                let capacity = sender.max_capacity();
+                (capacity.saturating_sub(sender.capacity()), capacity)
+            }
+            Self::Conflating(sender) => sender.usage(),
+        }
+    }
+}
+
+type KeyMatcher<M> = Arc<dyn Fn(&M, &M) -> bool + Send + Sync>;
+
+struct ConflatingState<M> {
+    messages: VecDeque<M>,
+    capacity: usize,
+    key_matches: Option<KeyMatcher<M>>,
+    sender_count: usize,
+    receiver_closed: bool,
+}
+
+struct ConflatingShared<M> {
+    state: Mutex<ConflatingState<M>>,
+    notify: Notify,
+}
+
+pub(crate) struct ConflatingSender<M> {
+    shared: Arc<ConflatingShared<M>>,
+}
+
+impl<M> ConflatingSender<M> {
+    fn send(&self, message: M) -> SendOutcome<M> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("conflating mailbox poisoned");
+        if state.receiver_closed {
+            return SendOutcome::Closed(message);
+        }
+
+        let conflated = if let Some(key_matches) = &state.key_matches {
+            if let Some(index) = state
+                .messages
+                .iter()
+                .position(|queued| key_matches(queued, &message))
+            {
+                state.messages[index] = message;
+                1
+            } else {
+                let evicted = u64::from(state.messages.len() == state.capacity);
+                if evicted == 1 {
+                    state.messages.pop_front();
+                }
+                state.messages.push_back(message);
+                evicted
+            }
+        } else if state.messages.is_empty() {
+            state.messages.push_back(message);
+            0
+        } else {
+            state.messages[0] = message;
+            1
+        };
+        drop(state);
+        self.shared.notify.notify_one();
+        SendOutcome::Accepted { conflated }
+    }
+
+    fn same_channel(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    fn usage(&self) -> (usize, usize) {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .expect("conflating mailbox poisoned");
+        (state.messages.len(), state.capacity)
+    }
+}
+
+impl<M> Clone for ConflatingSender<M> {
+    fn clone(&self) -> Self {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("conflating mailbox poisoned");
+        state.sender_count += 1;
+        drop(state);
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl<M> Drop for ConflatingSender<M> {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("conflating mailbox poisoned");
+        state.sender_count -= 1;
+        let last = state.sender_count == 0;
+        drop(state);
+        if last {
+            self.shared.notify.notify_one();
+        }
+    }
+}
+
+pub(crate) struct ConflatingReceiver<M> {
+    shared: Arc<ConflatingShared<M>>,
+}
+
+impl<M> ConflatingReceiver<M> {
+    async fn recv(&mut self) -> Option<M> {
+        loop {
+            let notified = self.shared.notify.notified();
+            {
+                let mut state = self
+                    .shared
+                    .state
+                    .lock()
+                    .expect("conflating mailbox poisoned");
+                if let Some(message) = state.messages.pop_front() {
+                    return Some(message);
+                }
+                if state.receiver_closed || state.sender_count == 0 {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn try_recv(&mut self) -> Result<M, mpsc::error::TryRecvError> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("conflating mailbox poisoned");
+        if let Some(message) = state.messages.pop_front() {
+            Ok(message)
+        } else if state.receiver_closed || state.sender_count == 0 {
+            Err(mpsc::error::TryRecvError::Disconnected)
+        } else {
+            Err(mpsc::error::TryRecvError::Empty)
+        }
+    }
+
+    fn close(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("conflating mailbox poisoned");
+        state.receiver_closed = true;
+        drop(state);
+        self.shared.notify.notify_waiters();
+    }
+}
+
+impl<M> Drop for ConflatingReceiver<M> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn conflating_channel<M>(
+    capacity: usize,
+    key_matches: Option<KeyMatcher<M>>,
+) -> (ConflatingSender<M>, ConflatingReceiver<M>) {
+    let shared = Arc::new(ConflatingShared {
+        state: Mutex::new(ConflatingState {
+            messages: VecDeque::with_capacity(capacity),
+            capacity,
+            key_matches,
+            sender_count: 1,
+            receiver_closed: false,
+        }),
+        notify: Notify::new(),
+    });
+    (
+        ConflatingSender {
+            shared: Arc::clone(&shared),
+        },
+        ConflatingReceiver { shared },
+    )
 }
 
 /// The current lifecycle state of an actor mailbox binding.

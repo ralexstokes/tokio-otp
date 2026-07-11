@@ -335,6 +335,7 @@ impl RuntimeHandle {
                         actor_id: stats.actor_id,
                         messages_received: stats.messages_received,
                         messages_accepted: stats.messages_accepted,
+                        messages_conflated: stats.messages_conflated,
                         sends_rejected: stats.sends_rejected,
                         mailbox_depth: stats.mailbox_depth,
                         mailbox_capacity: stats.mailbox_capacity,

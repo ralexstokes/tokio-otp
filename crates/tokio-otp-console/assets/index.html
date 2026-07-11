@@ -701,6 +701,7 @@
     [
       ["received", actor.messages_received, false],
       ["accepted", actor.messages_accepted, false],
+      ["conflated", actor.messages_conflated, actor.messages_conflated > 0],
       ["rejected", actor.sends_rejected, actor.sends_rejected > 0],
     ].forEach(function (entry) {
       const stat = el("div", "actor-stat");
