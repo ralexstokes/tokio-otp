@@ -31,6 +31,14 @@
 //! println!("Console at http://{}", handle.local_addr());
 //! # }
 //! ```
+//!
+//! # Security
+//!
+//! The token-free default is restricted to loopback. The server validates
+//! every request's `Host` and rejects browser WebSocket connections whose
+//! `Origin` does not match that host. Non-loopback binds require an access
+//! token. Console snapshots and events are operationally sensitive: child
+//! identifiers and failed-exit strings may contain application details.
 
 mod server;
 mod ws;
@@ -62,6 +70,8 @@ pub struct ConsoleBuilder {
     events: Option<broadcast::Sender<SupervisorEvent>>,
     stats: StatsSource,
     bind: SocketAddr,
+    access_token: Option<String>,
+    allowed_hosts: Vec<String>,
 }
 
 impl ConsoleBuilder {
@@ -71,6 +81,8 @@ impl ConsoleBuilder {
             events: None,
             stats: Arc::new(Vec::new),
             bind: ([127, 0, 0, 1], 9100).into(),
+            access_token: None,
+            allowed_hosts: Vec::new(),
         }
     }
 
@@ -102,17 +114,55 @@ impl ConsoleBuilder {
         self
     }
 
+    /// Requires this bearer token for HTTP and WebSocket access.
+    ///
+    /// A token is required when binding to a non-loopback address. Browser
+    /// users can establish an HTTP-only session cookie by opening
+    /// `http://HOST/?token=TOKEN`; the token is removed from the URL by an
+    /// immediate redirect. Tokens must contain only URL-safe ASCII characters.
+    pub fn access_token(mut self, token: impl Into<String>) -> Self {
+        self.access_token = Some(token.into());
+        self
+    }
+
+    /// Allows an additional HTTP `Host` authority (for example,
+    /// `console.example.test:9100`).
+    ///
+    /// The listener address is always allowed. Loopback listeners also allow
+    /// `localhost` on the listener port. Add the externally visible authority
+    /// when serving through a wildcard bind, hostname, or reverse proxy.
+    pub fn allowed_host(mut self, authority: impl Into<String>) -> Self {
+        self.allowed_hosts.push(authority.into());
+        self
+    }
+
     /// Validates the builder and returns a [`Console`].
     ///
     /// # Panics
     ///
-    /// Panics if `snapshots` or `events` have not been set.
+    /// Panics if `snapshots` or `events` have not been set, a non-loopback bind
+    /// has no access token, or the access token contains non-URL-safe bytes.
     pub fn build(self) -> Console {
+        assert!(
+            self.bind.ip().is_loopback() || self.access_token.is_some(),
+            "ConsoleBuilder: access_token required for non-loopback binds"
+        );
+        if let Some(token) = &self.access_token {
+            assert!(
+                !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte)),
+                "ConsoleBuilder: access_token must be non-empty URL-safe ASCII"
+            );
+        }
         Console {
             snapshots: self.snapshots.expect("ConsoleBuilder: snapshots required"),
             events: self.events.expect("ConsoleBuilder: events required"),
             stats: self.stats,
             bind: self.bind,
+            access_token: self.access_token,
+            allowed_hosts: self.allowed_hosts,
         }
     }
 }
@@ -123,6 +173,8 @@ pub struct Console {
     events: broadcast::Sender<SupervisorEvent>,
     stats: StatsSource,
     bind: SocketAddr,
+    access_token: Option<String>,
+    allowed_hosts: Vec<String>,
 }
 
 impl Console {
@@ -136,12 +188,28 @@ impl Console {
     /// Returns a [`ConsoleHandle`] that can be used to query the local address
     /// or shut the server down.
     pub async fn spawn(self) -> std::io::Result<ConsoleHandle> {
-        server::spawn(self.snapshots, self.events, self.stats, self.bind).await
+        server::spawn(
+            self.snapshots,
+            self.events,
+            self.stats,
+            self.bind,
+            self.access_token,
+            self.allowed_hosts,
+        )
+        .await
     }
 
     /// Runs the server on the current task until shut down.
     pub async fn run(self) -> std::io::Result<()> {
-        server::run(self.snapshots, self.events, self.stats, self.bind).await
+        server::run(
+            self.snapshots,
+            self.events,
+            self.stats,
+            self.bind,
+            self.access_token,
+            self.allowed_hosts,
+        )
+        .await
     }
 }
 

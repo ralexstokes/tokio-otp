@@ -1,6 +1,7 @@
 use axum::{
     extract::{State, WebSocketUpgrade, ws::Message},
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use tokio::{
     sync::{broadcast, watch},
@@ -14,9 +15,37 @@ type WebSocket = axum::extract::ws::WebSocket;
 
 pub(crate) async fn handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    if !origin_matches_host(&headers) {
+        return (StatusCode::FORBIDDEN, "websocket origin not allowed").into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
+}
+
+fn origin_matches_host(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        // Non-browser WebSocket clients generally omit Origin and cannot mount
+        // a browser-based cross-site WebSocket attack.
+        return true;
+    };
+    let (Ok(origin), Some(host)) = (
+        origin.to_str(),
+        headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok()),
+    ) else {
+        return false;
+    };
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri
+            .authority()
+            .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
 }
 
 fn snapshot_message(snapshot: SupervisorSnapshot) -> Message {

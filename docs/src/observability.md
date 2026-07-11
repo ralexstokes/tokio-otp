@@ -99,3 +99,26 @@ println!("console at http://{}", console.local_addr());
 ```
 
 Run `cargo run -p tokio-otp --example console --features console` to try it.
+The default loopback bind remains token-free for convenient local development,
+but every request is restricted to the listener address (or `localhost`) and
+WebSocket browser origins must match the request host.
+
+Non-loopback binds require an access token. Add the externally visible host
+when it differs from the listener address:
+
+```rust,ignore
+let console = handle
+    .console()
+    .bind(([0, 0, 0, 0], 8080))
+    .access_token("replace-with-a-random-url-safe-token")
+    .allowed_host("console.internal:8080")
+    .build()
+    .spawn()
+    .await?;
+```
+
+API clients can send `Authorization: Bearer TOKEN`. To use the dashboard in a
+browser, open `http://console.internal:8080/?token=TOKEN` once; the console
+redirects to remove the token from the URL and uses an HTTP-only, same-site
+cookie afterward. Treat the console as sensitive operational access: snapshots
+and events include child identifiers and may include application error strings.
