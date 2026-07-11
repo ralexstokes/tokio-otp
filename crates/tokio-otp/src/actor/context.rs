@@ -1,8 +1,11 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
-use tokio::sync::{
-    mpsc::{self, error::TryRecvError},
-    oneshot, watch,
+use tokio::{
+    sync::{
+        mpsc::{self, error::TryRecvError},
+        oneshot, watch,
+    },
+    time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -258,6 +261,34 @@ pub struct Reply<T> {
     sender: oneshot::Sender<T>,
 }
 
+/// Handle for a message timer created by [`ActorContext`].
+///
+/// Clones refer to the same timer. Dropping the handle does not cancel the
+/// timer; call [`cancel`](Self::cancel) explicitly. Timers are also cancelled
+/// automatically when their actor incarnation stops or restarts.
+#[derive(Clone, Debug)]
+pub struct TimerRef {
+    cancellation: CancellationToken,
+}
+
+impl TimerRef {
+    /// Cancels the timer.
+    ///
+    /// Cancellation is idempotent. A message already accepted by the mailbox
+    /// cannot be retracted.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Returns `true` if this timer has been cancelled.
+    ///
+    /// Completion is distinct from cancellation: a one-shot timer that has
+    /// already fired is not considered cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+}
+
 impl<T> Reply<T> {
     /// Sends the reply to the caller.
     ///
@@ -275,7 +306,8 @@ impl<T> fmt::Debug for Reply<T> {
 
 /// Runtime context passed to a graph actor each time the graph is run.
 ///
-/// Provides the actor's incoming [`mailbox`](Self::recv), a
+/// Provides the actor's incoming [`mailbox`](Self::recv), self-message
+/// [`timers`](Self::send_after), a
 /// [`shutdown_token`](Self::shutdown_token) for cooperative shutdown, and
 /// [`run_blocking`](Self::run_blocking) for blocking work.
 pub struct ActorContext<M> {
@@ -284,6 +316,7 @@ pub struct ActorContext<M> {
     pub(crate) myself: ActorRef<M>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
+    pub(crate) timers: ActorTimers,
 }
 
 impl<M: Send + 'static> ActorContext<M> {
@@ -305,6 +338,83 @@ impl<M: Send + 'static> ActorContext<M> {
     /// Returns a sender targeting this actor's own mailbox.
     pub fn myself(&self) -> ActorRef<M> {
         self.myself.clone()
+    }
+
+    /// Sends `message` to this actor after `delay` has elapsed.
+    ///
+    /// Delivery uses the ordinary mailbox and waits for capacity. The timer is
+    /// cancelled automatically if this actor incarnation stops or restarts.
+    pub fn send_after(&self, message: M, delay: Duration) -> TimerRef {
+        let cancellation = self.timers.child_token();
+        let timer = TimerRef {
+            cancellation: cancellation.clone(),
+        };
+        let myself = self.myself();
+
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {}
+                () = tokio::time::sleep(delay) => {
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => {}
+                        _ = myself.send(message) => {}
+                    }
+                }
+            }
+        });
+
+        timer
+    }
+
+    /// Sends a clone of `message` to this actor after every `period`.
+    ///
+    /// The first message is sent after one full period. Delivery waits for
+    /// mailbox capacity, and missed ticks are skipped rather than accumulated.
+    /// The timer stops on cancellation, delivery failure, or when this actor
+    /// incarnation stops or restarts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `period` is zero.
+    pub fn interval(&self, message: M, period: Duration) -> TimerRef
+    where
+        M: Clone,
+    {
+        assert!(!period.is_zero(), "timer period must be non-zero");
+
+        let cancellation = self.timers.child_token();
+        let timer = TimerRef {
+            cancellation: cancellation.clone(),
+        };
+        let myself = self.myself();
+
+        tokio::spawn(async move {
+            let start = Instant::now() + period;
+            let mut interval = tokio::time::interval_at(start, period);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break,
+                    _ = interval.tick() => {
+                        let sent = tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => break,
+                            sent = myself.send(message.clone()) => sent,
+                        };
+                        if sent.is_err() {
+                            cancellation.cancel();
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        timer
     }
 
     /// Waits for the next mailbox message, or `None` once shutdown has been
@@ -396,6 +506,24 @@ impl<M: Send + 'static> ActorContext<M> {
 struct CancelOnDrop(CancellationToken);
 
 impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+pub(crate) struct ActorTimers(CancellationToken);
+
+impl ActorTimers {
+    pub(crate) fn new(shutdown: &CancellationToken) -> Self {
+        Self(shutdown.child_token())
+    }
+
+    fn child_token(&self) -> CancellationToken {
+        self.0.child_token()
+    }
+}
+
+impl Drop for ActorTimers {
     fn drop(&mut self) {
         self.0.cancel();
     }
