@@ -339,6 +339,11 @@ impl SupervisorRuntime {
                 "significant children cannot use RestartPolicy::Always",
             ));
         }
+        if child.is_significant() && matches!(self.meta.auto_shutdown, AutoShutdown::Never) {
+            return Err(ControlError::InvalidConfig(
+                "significant children require automatic shutdown",
+            ));
+        }
 
         let id = child.id().to_owned();
         if self.children_by_id.contains_key(&id) {
@@ -388,6 +393,11 @@ impl SupervisorRuntime {
         if supervisor.significant && matches!(supervisor.restart, RestartPolicy::Always) {
             return Err(ControlError::InvalidConfig(
                 "significant children cannot use RestartPolicy::Always",
+            ));
+        }
+        if supervisor.significant && matches!(self.meta.auto_shutdown, AutoShutdown::Never) {
+            return Err(ControlError::InvalidConfig(
+                "significant children require automatic shutdown",
             ));
         }
         if self.children_by_id.contains_key(&id) {
@@ -709,7 +719,7 @@ impl SupervisorRuntime {
         &mut self,
         classified: ClassifiedExit,
     ) -> Result<(), SupervisorError> {
-        if self.state == SupervisorState::Stopping {
+        if self.state != SupervisorState::Running {
             return Ok(());
         }
 
@@ -754,18 +764,15 @@ impl SupervisorRuntime {
         match self.meta.auto_shutdown {
             AutoShutdown::Never => false,
             AutoShutdown::AnySignificant => true,
-            AutoShutdown::AllSignificant => {
-                let mut found_significant = false;
-                self.children.iter().all(|(_, child)| {
-                    if child.membership != MembershipState::Active
-                        || !child.runtime.definition.significant
-                    {
-                        return true;
-                    }
-                    found_significant = true;
-                    matches!(child.last_exit, Some(ExitStatusView::Completed))
-                }) && found_significant
-            }
+            AutoShutdown::AllSignificant => self.children.iter().all(|(_, child)| {
+                if child.membership != MembershipState::Active
+                    || !child.runtime.definition.significant
+                {
+                    return true;
+                }
+                !child.runtime.state.is_active()
+                    && matches!(child.last_exit, Some(ExitStatusView::Completed))
+            }),
         }
     }
 
@@ -963,6 +970,9 @@ impl SupervisorRuntime {
             }
         }
         for classified in deferred {
+            if self.pending_exit.is_some() {
+                break;
+            }
             // A deferred child may already have been respawned (or removed) by
             // an earlier deferred dispatch's suffix restart; its recorded exit
             // is then stale and must not be applied to the fresh generation.

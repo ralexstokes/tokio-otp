@@ -132,6 +132,7 @@ impl SupervisorBuilder {
     /// - Any channel capacity is zero.
     /// - Any restart intensity or backoff configuration is invalid.
     /// - A significant child uses [`RestartPolicy::Always`](crate::RestartPolicy::Always).
+    /// - A child is significant while automatic shutdown is disabled.
     pub fn build(self) -> Result<Supervisor, SupervisorBuildError> {
         self.restart_intensity.validate()?;
         if self.control_channel_capacity == 0 {
@@ -158,6 +159,11 @@ impl SupervisorBuilder {
             if child.significant && matches!(child.restart, crate::RestartPolicy::Always) {
                 return Err(SupervisorBuildError::InvalidConfig(
                     "significant children cannot use RestartPolicy::Always",
+                ));
+            }
+            if child.significant && matches!(self.auto_shutdown, AutoShutdown::Never) {
+                return Err(SupervisorBuildError::InvalidConfig(
+                    "significant children require automatic shutdown",
                 ));
             }
             if !ids.insert(child.id.as_str()) {

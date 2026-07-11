@@ -129,6 +129,34 @@ A child stuck in a non-yielding loop cannot be preempted — isolate truly
 blocking work behind a blocking pool (as the actor layer's `run_blocking`
 does, see the next chapter) or an external process.
 
+## Automatic shutdown for finite work
+
+Pipeline and batch subtrees often have a natural completion point. Mark those
+children with `ChildSpec::significant()` and select an [`AutoShutdown`] mode on
+the supervisor:
+
+```rust,ignore
+let batch = SupervisorBuilder::new()
+    .auto_shutdown(AutoShutdown::AllSignificant)
+    .child(source.restart(RestartPolicy::OnFailure).significant())
+    .child(indexer.restart(RestartPolicy::Never).significant())
+    .child(metrics_reporter)
+    .build()?;
+```
+
+`AnySignificant` stops the remaining children after the first significant
+child returns `Ok(())`; `AllSignificant` waits until every significant child
+has returned `Ok(())`. Failures still follow the normal restart policy and do
+not trigger automatic shutdown. Consequently, a significant `Never` child
+that fails cannot later satisfy `AllSignificant`; the supervisor continues
+until explicitly stopped.
+
+Significant children must use `OnFailure` or `Never`, and a supervisor with
+significant children must select a non-`Never` automatic shutdown mode. Nested
+supervisors can be marked significant through `SupervisorSpec::significant()`,
+so a completed subtree is observed by its parent as an ordinary clean child
+exit.
+
 ## Supervision trees
 
 A supervisor is a first-class child kind, giving each subsystem its own
@@ -175,3 +203,4 @@ actors](dynamic-actors.md) chapter.
 [`BackoffPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.BackoffPolicy.html
 [`Strategy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.Strategy.html
 [`ShutdownPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ShutdownPolicy.html
+[`AutoShutdown`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.AutoShutdown.html

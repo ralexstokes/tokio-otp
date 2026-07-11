@@ -4,12 +4,12 @@ use std::sync::{
 };
 
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot},
     time::timeout,
 };
 use tokio_supervisor::{
-    AutoShutdown, ChildSpec, ExitStatusView, RestartPolicy, SupervisorBuilder, SupervisorEvent,
-    SupervisorSpec,
+    AutoShutdown, ChildSpec, ControlError, ExitStatusView, RestartPolicy, Strategy,
+    SupervisorBuilder, SupervisorEvent, SupervisorSpec,
 };
 
 mod common;
@@ -36,21 +36,22 @@ async fn any_significant_clean_exit_stops_siblings_and_supervisor() {
     handle.wait().await.expect("auto-shutdown should be clean");
     common::recv_event(&mut cancelled_rx).await;
 
-    let mut saw_trigger = false;
+    let mut sequence = Vec::new();
     while let Ok(event) = events.try_recv() {
-        if event
-            == (SupervisorEvent::AutoShutdownTriggered {
-                id: "trigger".to_owned(),
-                mode: AutoShutdown::AnySignificant,
-            })
-        {
-            saw_trigger = true;
+        match event {
+            SupervisorEvent::ChildExited { id, .. } if id == "trigger" => {
+                sequence.push("exited");
+            }
+            SupervisorEvent::AutoShutdownTriggered { id, mode }
+                if id == "trigger" && mode == AutoShutdown::AnySignificant =>
+            {
+                sequence.push("auto_shutdown");
+            }
+            SupervisorEvent::SupervisorStopping => sequence.push("stopping"),
+            _ => {}
         }
     }
-    assert!(
-        saw_trigger,
-        "auto-shutdown event should identify its trigger"
-    );
+    assert_eq!(sequence, ["exited", "auto_shutdown", "stopping"]);
 }
 
 #[tokio::test]
@@ -169,4 +170,170 @@ async fn nested_auto_shutdown_is_a_clean_child_exit_to_parent() {
         .shutdown_and_wait()
         .await
         .expect("parent shutdown succeeds");
+}
+
+#[tokio::test]
+async fn significant_nested_supervisor_triggers_parent_auto_shutdown() {
+    let inner = SupervisorBuilder::new()
+        .auto_shutdown(AutoShutdown::AnySignificant)
+        .child(ChildSpec::new("done", |_| async { Ok(()) }).significant())
+        .build()
+        .expect("valid inner supervisor");
+    let parent = SupervisorBuilder::new()
+        .auto_shutdown(AutoShutdown::AnySignificant)
+        .supervisor("job", SupervisorSpec::new(inner).significant())
+        .build()
+        .expect("valid parent supervisor");
+
+    parent
+        .spawn()
+        .wait()
+        .await
+        .expect("significant nested completion should stop parent");
+}
+
+#[tokio::test]
+async fn dynamic_significant_child_triggers_and_is_validated() {
+    let disabled = SupervisorBuilder::new()
+        .build()
+        .expect("valid empty supervisor")
+        .spawn();
+    let err = disabled
+        .add_child(ChildSpec::new("invalid", |_| async { Ok(()) }).significant())
+        .await
+        .expect_err("significant child requires automatic shutdown");
+    assert_eq!(
+        err,
+        ControlError::InvalidConfig("significant children require automatic shutdown")
+    );
+    disabled
+        .shutdown_and_wait()
+        .await
+        .expect("disabled supervisor shuts down");
+
+    let enabled = SupervisorBuilder::new()
+        .auto_shutdown(AutoShutdown::AnySignificant)
+        .build()
+        .expect("valid empty supervisor")
+        .spawn();
+    enabled
+        .add_child(ChildSpec::new("dynamic", |_| async { Ok(()) }).significant())
+        .await
+        .expect("valid significant child");
+    enabled
+        .wait()
+        .await
+        .expect("dynamic significant completion should stop supervisor");
+}
+
+#[tokio::test]
+async fn failed_never_child_does_not_satisfy_all_significant() {
+    let supervisor = SupervisorBuilder::new()
+        .auto_shutdown(AutoShutdown::AllSignificant)
+        .child(
+            ChildSpec::new("failed", |_| async { Err(common::test_error("failed")) })
+                .restart(RestartPolicy::Never)
+                .significant(),
+        )
+        .child(
+            ChildSpec::new("completed", |_| async { Ok(()) })
+                .restart(RestartPolicy::Never)
+                .significant(),
+        )
+        .build()
+        .expect("valid supervisor");
+
+    let handle = supervisor.spawn();
+    assert!(
+        timeout(common::QUIET_TIMEOUT, handle.wait()).await.is_err(),
+        "a failed Never child must not count as a clean completion"
+    );
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("explicit shutdown succeeds");
+}
+
+#[tokio::test]
+async fn all_significant_ignores_stale_completion_after_group_restart() {
+    let fail_group = Arc::new(Notify::new());
+    let finish_a = Arc::new(Notify::new());
+    let finish_b = Arc::new(Notify::new());
+    let (restarted_tx, mut restarted_rx) = mpsc::unbounded_channel();
+
+    let a = ChildSpec::new("a", {
+        let finish_a = finish_a.clone();
+        let restarted_tx = restarted_tx.clone();
+        move |ctx| {
+            let finish_a = finish_a.clone();
+            let restarted_tx = restarted_tx.clone();
+            async move {
+                if ctx.generation() == 0 {
+                    return Ok(());
+                }
+                restarted_tx.send("a").expect("test receiver dropped");
+                finish_a.notified().await;
+                Ok(())
+            }
+        }
+    })
+    .significant();
+    let b = ChildSpec::new("b", {
+        let finish_b = finish_b.clone();
+        let restarted_tx = restarted_tx.clone();
+        move |ctx| {
+            let finish_b = finish_b.clone();
+            let restarted_tx = restarted_tx.clone();
+            async move {
+                if ctx.generation() == 0 {
+                    ctx.shutdown_token().cancelled().await;
+                    return Ok(());
+                }
+                restarted_tx.send("b").expect("test receiver dropped");
+                finish_b.notified().await;
+                Ok(())
+            }
+        }
+    })
+    .significant();
+    let failing = ChildSpec::new("failing", {
+        let fail_group = fail_group.clone();
+        move |ctx| {
+            let fail_group = fail_group.clone();
+            async move {
+                if ctx.generation() == 0 {
+                    fail_group.notified().await;
+                    return Err(common::test_error("restart group"));
+                }
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    });
+
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .auto_shutdown(AutoShutdown::AllSignificant)
+        .child(a)
+        .child(b)
+        .child(failing)
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+
+    fail_group.notify_one();
+    let mut restarted = common::recv_n(&mut restarted_rx, 2).await;
+    restarted.sort_unstable();
+    assert_eq!(restarted, ["a", "b"]);
+
+    finish_b.notify_one();
+    assert!(
+        timeout(common::QUIET_TIMEOUT, handle.wait()).await.is_err(),
+        "a running significant child with a stale completed exit must not count"
+    );
+    finish_a.notify_one();
+    handle
+        .wait()
+        .await
+        .expect("both current generations completed cleanly");
 }

@@ -33,6 +33,19 @@ fn significant_always_child_is_rejected() {
 }
 
 #[test]
+fn significant_child_requires_automatic_shutdown() {
+    let err = SupervisorBuilder::new()
+        .child(ChildSpec::new("worker", |_| async { Ok(()) }).significant())
+        .build()
+        .expect_err("significant child without automatic shutdown must be rejected");
+
+    assert_eq!(
+        err,
+        SupervisorBuildError::InvalidConfig("significant children require automatic shutdown")
+    );
+}
+
+#[test]
 fn duplicate_child_ids_are_rejected() {
     let err = SupervisorBuilder::new()
         .child(ChildSpec::new("dup", |_| async { Ok(()) }))
