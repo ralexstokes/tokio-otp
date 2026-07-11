@@ -1,0 +1,5 @@
+error: expected `=`
+  --> tests/ui/topology/options_malformed.rs:16:23
+   |
+16 |     #[topology(options)]
+   |                       ^

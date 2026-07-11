@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_otp::{
-    Actor, ActorContext, ActorRef, ActorResult, ActorRunError, Graph, GraphBuildError,
-    GraphBuilder, RawActor, RebindPolicy, SendError, Topology, TopologyEdge, TopologyMetadata,
-    TopologyNode,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, Graph,
+    GraphBuildError, GraphBuilder, MailboxMode, MessageSize, RawActor, RebindPolicy, SendError,
+    Topology, TopologyEdge, TopologyMetadata, TopologyNode,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -279,6 +279,92 @@ impl RawActor for Park {
 #[derive(Topology)]
 struct ParkGraph {
     park: Park,
+}
+
+struct SizedMessage(Vec<u8>);
+
+impl MessageSize for SizedMessage {
+    fn size_hint(&self) -> usize {
+        self.0.len()
+    }
+}
+
+#[derive(Clone)]
+struct OptionsActor;
+
+impl RawActor for OptionsActor {
+    type Msg = SizedMessage;
+
+    async fn run(&mut self, ctx: ActorContext<SizedMessage>) -> ActorResult {
+        ctx.shutdown_token().cancelled().await;
+        Ok(())
+    }
+}
+
+#[derive(Topology)]
+struct OptionsGraph {
+    #[topology(options = ActorOptions::new().mailbox(MailboxMode::Conflate))]
+    mailbox_only: OptionsActor,
+    #[topology(options = ActorOptions::new().message_size())]
+    message_size_only: OptionsActor,
+    #[topology(
+        options = ActorOptions::new()
+            .mailbox(MailboxMode::Conflate)
+            .message_size()
+    )]
+    combined: OptionsActor,
+    defaults: OptionsActor,
+}
+
+#[tokio::test]
+async fn derived_topology_applies_per_actor_options() {
+    let mut refs = None;
+    let graph = OptionsGraph::graph(|actor_refs| {
+        refs = Some((
+            actor_refs.mailbox_only.clone(),
+            actor_refs.message_size_only.clone(),
+            actor_refs.combined.clone(),
+            actor_refs.defaults.clone(),
+        ));
+        OptionsGraph {
+            mailbox_only: OptionsActor,
+            message_size_only: OptionsActor,
+            combined: OptionsActor,
+            defaults: OptionsActor,
+        }
+    })
+    .expect("options graph builds");
+    let (mailbox_only, message_size_only, combined, defaults) =
+        refs.expect("wiring closure captured refs");
+    let (stop, tasks) = start_graph(&graph);
+    tokio::task::yield_now().await;
+
+    mailbox_only
+        .try_send(SizedMessage(vec![0; 2]))
+        .expect("conflating mailbox accepts first message");
+    mailbox_only
+        .try_send(SizedMessage(vec![0; 3]))
+        .expect("conflating mailbox replaces unread message");
+    message_size_only
+        .try_send(SizedMessage(vec![0; 5]))
+        .expect("sized queue accepts message");
+    combined
+        .try_send(SizedMessage(vec![0; 7]))
+        .expect("combined mailbox accepts first message");
+    combined
+        .try_send(SizedMessage(vec![0; 11]))
+        .expect("combined mailbox replaces unread message");
+
+    assert_eq!(mailbox_only.stats().messages_conflated, 1);
+    assert_eq!(mailbox_only.stats().message_bytes_accepted, None);
+    assert_eq!(message_size_only.stats().messages_conflated, 0);
+    assert_eq!(message_size_only.stats().message_bytes_accepted, Some(5));
+    assert_eq!(combined.stats().messages_conflated, 1);
+    assert_eq!(combined.stats().message_bytes_accepted, Some(18));
+    assert_eq!(defaults.stats().messages_conflated, 0);
+    assert_eq!(defaults.stats().message_bytes_accepted, None);
+
+    stop_graph(stop, tasks).await;
 }
 
 #[tokio::test]

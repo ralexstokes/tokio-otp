@@ -1,10 +1,11 @@
 # Compile-fail UI tests
 
-`topology/` holds [trybuild](https://github.com/dtolnay/trybuild) cases run by
-`tests/topology_ui.rs`: the `#[derive(Topology)]` shape errors plus the two
-token-API guarantees (wrong-type `define` is E0271, reusing a consumed
-`ActorSlot` is E0382). Each `.rs` case has a checked-in `.stderr` snapshot of
-the exact compiler output, spans included.
+`topology/` holds [trybuild](https://github.com/dtolnay/trybuild) compile-fail
+cases run by `tests/topology_ui.rs`: the `#[derive(Topology)]` shape and
+attribute errors plus the two token-API guarantees (wrong-type `define` is
+E0271, reusing a consumed `ActorSlot` is E0382). Each `.rs` case has a
+checked-in `.stderr` snapshot of the exact compiler output, spans included.
+`topology-pass/` holds compile-pass cases for supported derive attributes.
 
 ## Updating snapshots on a toolchain bump
 

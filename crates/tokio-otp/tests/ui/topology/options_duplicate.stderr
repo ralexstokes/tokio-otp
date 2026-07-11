@@ -1,0 +1,5 @@
+error: duplicate `options` option
+  --> tests/ui/topology/options_duplicate.rs:17:16
+   |
+17 |     #[topology(options = tokio_otp::ActorOptions::new())]
+   |                ^^^^^^^

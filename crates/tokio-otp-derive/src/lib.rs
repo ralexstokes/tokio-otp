@@ -9,7 +9,7 @@ use quote::{format_ident, quote, quote_spanned};
 use std::collections::HashSet;
 
 use syn::{
-    Attribute, Data, DeriveInput, Field, Fields, Ident, parse_macro_input, spanned::Spanned,
+    Attribute, Data, DeriveInput, Expr, Field, Fields, Ident, parse_macro_input, spanned::Spanned,
 };
 
 /// Derives a static actor topology from a named-field struct.
@@ -142,6 +142,39 @@ use syn::{
 /// For dynamic graphs — actors created in a loop, or ids chosen at runtime —
 /// use `GraphBuilder` directly instead of this derive.
 ///
+/// # Per-actor options
+///
+/// Add `#[topology(options = expression)]` to a field to pass an
+/// `ActorOptions` expression to `GraphBuilder::slot_with_options`. Fields
+/// without this attribute continue to use the default options:
+///
+/// ```
+/// # use tokio_otp::{
+/// #     ActorContext, ActorOptions, ActorResult, MailboxMode, MessageSize, RawActor,
+/// # };
+/// # struct Snapshot(Vec<u8>);
+/// # impl MessageSize for Snapshot {
+/// #     fn size_hint(&self) -> usize {
+/// #         self.0.len()
+/// #     }
+/// # }
+/// # #[derive(Clone)]
+/// # struct SnapshotActor;
+/// # impl RawActor for SnapshotActor {
+/// #     type Msg = Snapshot;
+/// #     async fn run(&mut self, _: ActorContext<Snapshot>) -> ActorResult {
+/// #         Ok(())
+/// #     }
+/// # }
+/// #[derive(tokio_otp::Topology)]
+/// struct MarketData {
+///     #[topology(options = ActorOptions::new()
+///         .mailbox(MailboxMode::Conflate)
+///         .message_size())]
+///     snapshots: SnapshotActor,
+/// }
+/// ```
+///
 /// # Optional metadata
 ///
 /// Add `#[topology(metadata)]` to generate `topology_metadata()`. Outgoing
@@ -210,7 +243,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let field_vis: Vec<_> = fields.iter().map(|field| &field.vis).collect();
     let field_types: Vec<_> = fields.iter().map(|field| &field.ty).collect();
     let field_names: Vec<_> = field_idents.iter().map(|ident| ident.to_string()).collect();
-    let edges = parse_edges(&fields, emit_metadata, &field_idents)?;
+    let (actor_options, edges) = parse_field_attributes(&fields, emit_metadata, &field_idents)?;
     let slot_idents: Vec<_> = field_idents
         .iter()
         .map(|ident| format_ident!("{ident}_slot"))
@@ -233,10 +266,18 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         .zip(&slot_idents)
         .zip(&field_idents)
         .zip(&field_names)
-        .map(|(((ty, slot), ident), name)| {
-            quote_spanned! {ty.span()=>
-                let (#slot, #ident) =
-                    builder.slot::<<#ty as ::tokio_otp::RawActor>::Msg>(#name);
+        .zip(&actor_options)
+        .map(|((((ty, slot), ident), name), options)| {
+            if let Some(options) = options {
+                quote_spanned! {ty.span()=>
+                    let (#slot, #ident) = builder.slot_with_options::
+                        <<#ty as ::tokio_otp::RawActor>::Msg>(#name, #options);
+                }
+            } else {
+                quote_spanned! {ty.span()=>
+                    let (#slot, #ident) =
+                        builder.slot::<<#ty as ::tokio_otp::RawActor>::Msg>(#name);
+                }
             }
         })
         .collect();
@@ -347,24 +388,35 @@ fn parse_topology_attributes(attrs: &[Attribute]) -> syn::Result<bool> {
     Ok(emit_metadata)
 }
 
-fn parse_edges(
+fn parse_field_attributes(
     fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
     emit_metadata: bool,
     field_idents: &[&Ident],
-) -> syn::Result<Vec<Edge>> {
+) -> syn::Result<(Vec<Option<Expr>>, Vec<Edge>)> {
+    let mut actor_options = Vec::with_capacity(fields.len());
     let mut edges = Vec::new();
     let mut seen = HashSet::new();
 
     for field in fields {
         let source = field.ident.as_ref().expect("named fields");
+        let mut options = None;
         for attr in field
             .attrs
             .iter()
             .filter(|attr| attr.path().is_ident("topology"))
         {
             attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("options") {
+                    if options.is_some() {
+                        return Err(meta.error("duplicate `options` option"));
+                    }
+                    let value = meta.value()?;
+                    options = Some(value.parse()?);
+                    return Ok(());
+                }
+
                 if !meta.path.is_ident("sends_to") {
-                    return Err(meta.error("expected `sends_to(...)`"));
+                    return Err(meta.error("expected `sends_to(...)` or `options = <expression>`"));
                 }
                 if !emit_metadata {
                     return Err(meta.error(
@@ -415,7 +467,8 @@ fn parse_edges(
                 Ok(())
             })?;
         }
+        actor_options.push(options);
     }
 
-    Ok(edges)
+    Ok((actor_options, edges))
 }

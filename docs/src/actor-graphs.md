@@ -142,6 +142,28 @@ The derive keeps topology shape in the type system:
   one actor value per field
 - a topology with no actors is a compile error
 
+Configure an individual actor's mailbox or message-size observation with a
+normal Rust expression in `#[topology(options = ...)]`. Annotated fields use
+`GraphBuilder::slot_with_options`; other fields retain the default FIFO
+mailbox without message-size observation:
+
+```rust,ignore
+use tokio_otp::{ActorOptions, MailboxMode, Topology};
+
+#[derive(Topology)]
+struct MarketData {
+    #[topology(options = ActorOptions::new()
+        .mailbox(MailboxMode::Conflate)
+        .message_size())]
+    snapshots: SnapshotActor,
+    orders: OrderActor,
+}
+```
+
+The expression is type-checked against the field actor's message type, so
+options that require `MessageSize` add that requirement only to the annotated
+actor message.
+
 Graph visualizers can opt in to a descriptive snapshot of that shape. Add
 `#[topology(metadata)]` to the topology and declare each source actor's
 outgoing edges with `#[topology(sends_to(...))]`:
