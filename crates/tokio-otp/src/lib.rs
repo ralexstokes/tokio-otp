@@ -166,6 +166,10 @@
 //! live mailbox usage are available through [`ActorRef::stats`] and
 //! [`RuntimeHandle::actor_stats`]; exporting time-series is a user-side
 //! sampler task over those surfaces (see `examples/actor_metrics.rs`).
+//! Actors registered with [`GraphBuilder::actor_with_message_size`] or
+//! [`GraphBuilder::slot_with_message_size`] also expose application-defined
+//! accepted-byte totals through [`ActorStats`] and emit size metrics when the
+//! `metrics` feature is enabled.
 //! Install subscribers and samplers at the application boundary, not inside
 //! the library.
 //!
@@ -200,7 +204,7 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
-//! | `metrics` | no | Forwards to `tokio-supervisor/metrics` lifecycle metrics. |
+//! | `metrics` | no | Supervisor lifecycle metrics plus opt-in actor message-size metrics. |
 //! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
 //! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries; serialization for topology metadata. |
 
@@ -228,7 +232,7 @@ pub mod prelude {
     pub use crate::{
         Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
         CallError, DrainPolicy, DynamicActorOptions, Graph, GraphBuildError, GraphBuilder,
-        RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
+        MessageSize, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
         RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt,
         TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
     };
@@ -249,8 +253,8 @@ pub use tokio_otp_derive::Topology;
 
 pub use actor::{
     Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats, BoxError,
-    CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor, RebindPolicy, Reply,
-    RunnableActor, RunnableActorFactory, SendError,
+    CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, MessageSize, RawActor,
+    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};

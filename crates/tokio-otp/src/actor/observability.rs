@@ -5,6 +5,9 @@ use std::sync::{
 
 use tracing::{Span, debug, info, info_span, trace, warn};
 
+#[cfg(feature = "metrics")]
+use metrics::{counter, histogram};
+
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn anonymous_graph_name() -> Arc<str> {
@@ -146,6 +149,16 @@ pub(crate) fn trace_actor_message(
         ),
     }
 }
+
+#[cfg(feature = "metrics")]
+pub(crate) fn record_message_size(actor_id: &Arc<str>, size: usize) {
+    counter!("actor.message.bytes_accepted", "actor_id" => actor_id.to_string())
+        .increment(size as u64);
+    histogram!("actor.message.size", "actor_id" => actor_id.to_string()).record(size as f64);
+}
+
+#[cfg(not(feature = "metrics"))]
+pub(crate) fn record_message_size(_actor_id: &Arc<str>, _size: usize) {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActorExitStatus {

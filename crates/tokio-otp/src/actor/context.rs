@@ -22,6 +22,7 @@ pub struct ActorRef<M> {
     actor_id: Arc<str>,
     binding: watch::Receiver<BindingState<M>>,
     stats: Arc<ActorStatsCounters>,
+    message_size: Option<fn(&M) -> usize>,
     source_actor_id: Option<Arc<str>>,
 }
 
@@ -31,6 +32,7 @@ impl<M> Clone for ActorRef<M> {
             actor_id: Arc::clone(&self.actor_id),
             binding: self.binding.clone(),
             stats: Arc::clone(&self.stats),
+            message_size: self.message_size,
             source_actor_id: self.source_actor_id.clone(),
         }
     }
@@ -50,6 +52,7 @@ impl<M> ActorRef<M> {
             core.actor_id().clone(),
             core.subscribe(),
             core.stats_counters(),
+            core.message_size(),
             source_actor_id,
         )
     }
@@ -58,12 +61,14 @@ impl<M> ActorRef<M> {
         actor_id: Arc<str>,
         binding: watch::Receiver<BindingState<M>>,
         stats: Arc<ActorStatsCounters>,
+        message_size: Option<fn(&M) -> usize>,
         source_actor_id: Option<Arc<str>>,
     ) -> Self {
         Self {
             actor_id,
             binding,
             stats,
+            message_size,
             source_actor_id,
         }
     }
@@ -122,6 +127,7 @@ impl<M> ActorRef<M> {
     pub async fn send(&self, message: M) -> Result<(), SendError> {
         let mut binding = self.binding.clone();
         let mut message = message;
+        let message_size = self.message_size.map(|size_hint| size_hint(&message));
 
         loop {
             let mailbox = match self.wait_for_next_mailbox(&mut binding).await {
@@ -137,6 +143,7 @@ impl<M> ActorRef<M> {
                 Ok(()) => {
                     self.observe_send(MessageOperation::Send, None);
                     self.stats.record_send(true);
+                    self.record_message_size(message_size);
                     return Ok(());
                 }
                 Err(returned) => {
@@ -157,6 +164,7 @@ impl<M> ActorRef<M> {
 
     /// Attempts to send a message without waiting for mailbox capacity.
     pub fn try_send(&self, message: M) -> Result<(), SendError> {
+        let message_size = self.message_size.map(|size_hint| size_hint(&message));
         let result = match self.current_mailbox() {
             Ok(mailbox) => mailbox.try_send(message),
             Err(error) => Err(error),
@@ -166,6 +174,9 @@ impl<M> ActorRef<M> {
             result.as_ref().err().map(send_rejection),
         );
         self.stats.record_send(result.is_ok());
+        if result.is_ok() {
+            self.record_message_size(message_size);
+        }
         result
     }
 
@@ -242,6 +253,13 @@ impl<M> ActorRef<M> {
             operation,
             rejection,
         );
+    }
+
+    fn record_message_size(&self, message_size: Option<usize>) {
+        if let Some(message_size) = message_size {
+            self.stats.record_message_size(message_size);
+            crate::actor::observability::record_message_size(&self.actor_id, message_size);
+        }
     }
 
     pub(crate) fn record_received(&self) {

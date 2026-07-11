@@ -20,6 +20,12 @@ pub struct ActorStats {
     pub messages_received: u64,
     /// Messages accepted by `send` or `try_send`.
     pub messages_accepted: u64,
+    /// Total bytes reported for accepted messages when message-size
+    /// observation is enabled for this actor.
+    ///
+    /// `None` means the actor did not opt in. The total accumulates across
+    /// actor restarts, like the message counters.
+    pub message_bytes_accepted: Option<u64>,
     /// `send` or `try_send` calls that returned an error.
     pub sends_rejected: u64,
     /// Messages currently occupying the bound mailbox.
@@ -28,14 +34,24 @@ pub struct ActorStats {
     pub mailbox_capacity: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ActorStatsCounters {
     messages_received: AtomicU64,
     messages_accepted: AtomicU64,
     sends_rejected: AtomicU64,
+    message_bytes_accepted: Option<AtomicU64>,
 }
 
 impl ActorStatsCounters {
+    pub(crate) fn new(observe_message_size: bool) -> Self {
+        Self {
+            messages_received: AtomicU64::new(0),
+            messages_accepted: AtomicU64::new(0),
+            sends_rejected: AtomicU64::new(0),
+            message_bytes_accepted: observe_message_size.then(|| AtomicU64::new(0)),
+        }
+    }
+
     pub(crate) fn record_received(&self) {
         self.messages_received.fetch_add(1, Ordering::Relaxed);
     }
@@ -49,6 +65,12 @@ impl ActorStatsCounters {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_message_size(&self, size: usize) {
+        if let Some(total) = &self.message_bytes_accepted {
+            total.fetch_add(size as u64, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn snapshot(
         &self,
         actor_id: &str,
@@ -59,6 +81,10 @@ impl ActorStatsCounters {
             actor_id: actor_id.to_owned(),
             messages_received: self.messages_received.load(Ordering::Relaxed),
             messages_accepted: self.messages_accepted.load(Ordering::Relaxed),
+            message_bytes_accepted: self
+                .message_bytes_accepted
+                .as_ref()
+                .map(|total| total.load(Ordering::Relaxed)),
             sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
             mailbox_depth,
             mailbox_capacity,
@@ -159,15 +185,24 @@ pub(crate) struct BindingCore<M> {
     actor_id: Arc<str>,
     current: watch::Sender<BindingState<M>>,
     stats: Arc<ActorStatsCounters>,
+    message_size: Option<fn(&M) -> usize>,
 }
 
 impl<M> BindingCore<M> {
     pub(crate) fn new(actor_id: Arc<str>) -> Self {
+        Self::with_message_size(actor_id, None)
+    }
+
+    pub(crate) fn with_message_size(
+        actor_id: Arc<str>,
+        message_size: Option<fn(&M) -> usize>,
+    ) -> Self {
         let (current, _receiver) = watch::channel(BindingState::Unbound);
         Self {
             actor_id,
             current,
-            stats: Arc::new(ActorStatsCounters::default()),
+            stats: Arc::new(ActorStatsCounters::new(message_size.is_some())),
+            message_size,
         }
     }
 
@@ -181,6 +216,10 @@ impl<M> BindingCore<M> {
 
     pub(crate) fn stats_counters(&self) -> Arc<ActorStatsCounters> {
         Arc::clone(&self.stats)
+    }
+
+    pub(crate) fn message_size(&self) -> Option<fn(&M) -> usize> {
+        self.message_size
     }
 
     pub(crate) fn stats(&self) -> ActorStats {

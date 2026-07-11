@@ -43,6 +43,7 @@ fn actor_stats() -> Vec<ActorStatsView> {
         actor_id: "worker".into(),
         messages_received: 11,
         messages_accepted: 10,
+        message_bytes_accepted: None,
         sends_rejected: 1,
         mailbox_depth: 3,
         mailbox_capacity: 32,

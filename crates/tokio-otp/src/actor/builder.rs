@@ -18,6 +18,17 @@ use crate::actor::{
     raw::RawActor,
 };
 
+/// Provides an application-defined size for a typed actor message.
+///
+/// The value is an observability hint, normally the size of payload buffers
+/// owned by the message. It is sampled only when the target actor opts in via
+/// [`GraphBuilder::actor_with_message_size`] or
+/// [`GraphBuilder::slot_with_message_size`].
+pub trait MessageSize {
+    /// Returns the message size to report, in bytes.
+    fn size_hint(&self) -> usize;
+}
+
 static NEXT_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Unfilled position for one actor in a graph builder.
@@ -145,6 +156,24 @@ impl GraphBuilder {
         }
     }
 
+    /// Opens a named slot with message-size observation enabled.
+    ///
+    /// Each message's [`MessageSize::size_hint`] is recorded only after the
+    /// mailbox accepts it. Actors registered with [`slot`](Self::slot) have no
+    /// message-size sampling or accounting overhead.
+    pub fn slot_with_message_size<M: MessageSize + Send + 'static>(
+        &mut self,
+        actor_id: &str,
+    ) -> (ActorSlot<M>, ActorRef<M>) {
+        match self.push_sized_slot::<M>(actor_id) {
+            Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
+            None => (
+                ActorSlot::new(self.builder_id, None),
+                ActorRef::detached(actor_id.into()),
+            ),
+        }
+    }
+
     /// Fills a previously opened actor slot.
     ///
     /// The slot token's message type must match the actor's message type, so a
@@ -177,6 +206,27 @@ impl GraphBuilder {
     /// Registers an actor and returns its typed, restart-stable ref.
     pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
         let Some((index, actor_ref)) = self.push_slot::<A::Msg>(actor_id) else {
+            return ActorRef::detached(actor_id.into());
+        };
+        let slot = &mut self.slots[index];
+        let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
+            unreachable!("message type id already verified")
+        };
+        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
+        actor_ref
+    }
+
+    /// Registers an actor with message-size observation enabled.
+    ///
+    /// Accepted message sizes are accumulated in [`ActorStats`](crate::ActorStats)
+    /// and, with the `metrics` feature, emitted as an `actor.message.size`
+    /// histogram and `actor.message.bytes_accepted` counter.
+    pub fn actor_with_message_size<A>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg>
+    where
+        A: RawActor,
+        A::Msg: MessageSize,
+    {
+        let Some((index, actor_ref)) = self.push_sized_slot::<A::Msg>(actor_id) else {
             return ActorRef::detached(actor_id.into());
         };
         let slot = &mut self.slots[index];
@@ -258,6 +308,23 @@ impl GraphBuilder {
 
     /// Creates a named slot and returns its index plus typed ref.
     fn push_slot<M: Send + 'static>(&mut self, actor_id: &str) -> Option<(usize, ActorRef<M>)> {
+        self.push_slot_with_core(actor_id, BindingCore::<M>::new)
+    }
+
+    fn push_sized_slot<M: MessageSize + Send + 'static>(
+        &mut self,
+        actor_id: &str,
+    ) -> Option<(usize, ActorRef<M>)> {
+        self.push_slot_with_core(actor_id, |actor_id| {
+            BindingCore::<M>::with_message_size(actor_id, Some(MessageSize::size_hint))
+        })
+    }
+
+    fn push_slot_with_core<M: Send + 'static>(
+        &mut self,
+        actor_id: &str,
+        make_core: impl FnOnce(Arc<str>) -> BindingCore<M>,
+    ) -> Option<(usize, ActorRef<M>)> {
         if actor_id.is_empty() {
             self.errors
                 .push(GraphBuildError::InvalidConfig("actor id must not be empty"));
@@ -272,7 +339,7 @@ impl GraphBuilder {
         }
 
         let actor_id: Arc<str> = actor_id.into();
-        let core = Arc::new(BindingCore::<M>::new(actor_id.clone()));
+        let core = Arc::new(make_core(actor_id.clone()));
         let actor_ref = ActorRef::from_core(&core, None);
         let index = self.slots.len();
         self.index.insert(actor_id.clone(), index);

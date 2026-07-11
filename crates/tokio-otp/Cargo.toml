@@ -12,10 +12,11 @@ categories = ["asynchronous", "concurrency"]
 default = ["derive"]
 console = ["dep:tokio-otp-console"]
 derive = ["dep:tokio-otp-derive"]
-metrics = ["tokio-supervisor/metrics"]
+metrics = ["dep:metrics", "tokio-supervisor/metrics"]
 serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
+metrics = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 thiserror.workspace = true

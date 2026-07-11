@@ -4,7 +4,7 @@ The crates expose four views into a running system:
 
 1. supervisor events
 2. supervisor snapshots
-3. `tracing`, pull-based actor stats, and optional supervisor metrics
+3. `tracing`, pull-based actor stats, and optional metrics
 4. the `tokio-otp-console` web UI
 
 ## Events And Snapshots
@@ -44,9 +44,25 @@ the supervisor snapshot — a ~10-line task you own, not a framework pipeline.
 The `tokio-otp` `actor_metrics` example prints the result in
 Prometheus-shaped text without an actor-layer metrics backend.
 
-The `metrics` feature of `tokio-otp` forwards only to `tokio-supervisor`,
-which continues to emit supervisor lifecycle counters, gauges, and
-histograms.
+Message sizes are application-defined and fully opt-in. Implement
+`MessageSize` for a message type and register its actor with
+`actor_with_message_size` (or a cyclic slot with `slot_with_message_size`):
+
+```rust,ignore
+impl MessageSize for Upload {
+    fn size_hint(&self) -> usize {
+        self.payload.len()
+    }
+}
+
+let uploads = graph.actor_with_message_size("uploads", UploadActor::new());
+```
+
+`ActorStats::message_bytes_accepted` is then `Some(total)`; ordinary actors
+report `None` and do not sample message sizes. With the `metrics` feature,
+each accepted sized message also updates the `actor.message.size` histogram
+and `actor.message.bytes_accepted` counter. The feature continues to enable
+the supervisor lifecycle counters, gauges, and histograms as well.
 
 ## Web Console
 
