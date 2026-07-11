@@ -1,4 +1,8 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::{
     sync::{mpsc::error::TryRecvError, oneshot, watch},
@@ -370,6 +374,7 @@ pub struct ActorContext<M> {
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
     pub(crate) timers: ActorTimers,
+    pub(crate) state_timeout: Mutex<Option<TimerRef>>,
     pub(crate) monitors: ActorMonitors,
 }
 
@@ -469,6 +474,25 @@ impl<M: Send + 'static> ActorContext<M> {
             }
         });
 
+        timer
+    }
+
+    /// Sends `message` after `delay`, replacing the current state timeout.
+    ///
+    /// Scheduling a new state timeout cancels the previous one. Call this when
+    /// entering a state to model an OTP-style state timeout without keeping a
+    /// timer handle in the actor. Like other timers, the timeout is cancelled
+    /// automatically if this actor incarnation stops or restarts.
+    pub fn state_timeout(&self, message: M, delay: Duration) -> TimerRef {
+        let timer = self.send_after(message, delay);
+        let previous = self
+            .state_timeout
+            .lock()
+            .expect("state timeout lock poisoned")
+            .replace(timer.clone());
+        if let Some(previous) = previous {
+            previous.cancel();
+        }
         timer
     }
 
