@@ -384,10 +384,16 @@ impl SupervisorRuntime {
     }
 
     async fn wait_until_child_ready(&mut self, key: ChildKey) -> Result<bool, SupervisorError> {
+        let Some(instance) = self.children.get(key).map(|entry| entry.instance) else {
+            return Ok(false);
+        };
         loop {
             let Some(entry) = self.children.get(key) else {
                 return Ok(false);
             };
+            if entry.instance != instance {
+                return Ok(false);
+            }
             match entry.runtime.state {
                 RuntimeChildState::Running => return Ok(true),
                 RuntimeChildState::Stopped => return Ok(false),
@@ -467,6 +473,28 @@ impl SupervisorRuntime {
             id,
             generation: ready.generation,
         });
+    }
+
+    fn should_skip_group_respawn(&mut self, key: ChildKey) -> bool {
+        let Some(entry) = self.children.get_mut(key) else {
+            return true;
+        };
+        if entry.membership != MembershipState::Active {
+            return true;
+        }
+        if entry.runtime.has_started
+            && matches!(entry.runtime.definition.restart, RestartPolicy::Never)
+        {
+            let startup_aborted = !entry.runtime.has_reported_ready;
+            if startup_aborted {
+                entry.runtime.startup_aborted = true;
+            }
+            if startup_aborted {
+                self.publish_snapshot();
+            }
+            return true;
+        }
+        false
     }
 
     async fn handle_command(&mut self, command: SupervisorCommand) {
@@ -1108,13 +1136,7 @@ impl SupervisorRuntime {
         let restart_epoch = self.restart_epoch;
         let keys = self.child_order.clone();
         for key in keys {
-            let Some(entry) = self.children.get(key) else {
-                continue;
-            };
-            if entry.membership != MembershipState::Active
-                || (entry.runtime.has_started
-                    && matches!(entry.runtime.definition.restart, RestartPolicy::Never))
-            {
+            if self.should_skip_group_respawn(key) {
                 continue;
             }
             let Some((ready, old_generation, new_generation)) =
@@ -1188,13 +1210,7 @@ impl SupervisorRuntime {
         self.restart_epoch = self.restart_epoch.saturating_add(1);
         let restart_epoch = self.restart_epoch;
         for key in keys {
-            let Some(entry) = self.children.get(key) else {
-                continue;
-            };
-            if entry.membership != MembershipState::Active
-                || (entry.runtime.has_started
-                    && matches!(entry.runtime.definition.restart, RestartPolicy::Never))
-            {
+            if self.should_skip_group_respawn(key) {
                 continue;
             }
             let Some((ready, old_generation, new_generation)) =

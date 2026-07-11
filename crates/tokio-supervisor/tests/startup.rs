@@ -748,3 +748,44 @@ async fn fatal_error_during_dynamic_start_stops_the_supervisor() {
         Err(tokio_supervisor::SupervisorError::RestartIntensityExceeded)
     );
 }
+
+#[tokio::test]
+async fn drained_pre_ready_never_child_reports_startup_aborted() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let never = ChildSpec::new("never", |ctx| async move {
+        ctx.shutdown_token().cancelled().await;
+        Ok(())
+    })
+    .restart(RestartPolicy::Never)
+    .wait_for_ready();
+    let failing = ChildSpec::new("failing", {
+        let attempts = Arc::clone(&attempts);
+        move |ctx| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return Err(std::io::Error::other("restart group").into());
+                }
+                ctx.mark_ready();
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .wait_for_ready();
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .child(never)
+        .child(failing)
+        .build()
+        .unwrap()
+        .spawn();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), handle.wait_started())
+            .await
+            .unwrap(),
+        Err(tokio_supervisor::SupervisorError::StartupAborted(_))
+    ));
+    assert!(handle.snapshot().child("never").unwrap().startup_aborted);
+    handle.shutdown_and_wait().await.unwrap();
+}
