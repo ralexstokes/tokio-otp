@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant as StdInstant},
 };
 
@@ -30,7 +30,9 @@ use crate::{
 };
 
 use super::{
-    child_runtime::{ChildRuntime, RuntimeChildState},
+    child_runtime::{
+        COMPLETION_CANCELLED, COMPLETION_CLEAN, COMPLETION_PENDING, ChildRuntime, RuntimeChildState,
+    },
     exit::ExitStatus,
 };
 
@@ -634,12 +636,32 @@ impl SupervisorRuntime {
     }
 
     fn cancel_child(&mut self, key: ChildKey) {
+        self.children[key]
+            .runtime
+            .completion_state
+            .compare_exchange(
+                COMPLETION_PENDING,
+                COMPLETION_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok();
         if let Some(token) = self.children[key].runtime.active_token.as_ref() {
             token.cancel();
         }
     }
 
     fn abort_child(&mut self, key: ChildKey) {
+        self.children[key]
+            .runtime
+            .completion_state
+            .compare_exchange(
+                COMPLETION_PENDING,
+                COMPLETION_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok();
         if let Some(abort_handle) = self.children[key].runtime.abort_handle.as_ref() {
             abort_handle.abort();
         }
@@ -771,20 +793,10 @@ impl SupervisorRuntime {
                     return true;
                 }
                 !child.runtime.state.is_active()
+                    && child.runtime.completion_state.load(Ordering::Acquire) == COMPLETION_CLEAN
                     && matches!(child.last_exit, Some(ExitStatusView::Completed))
             }),
         }
-    }
-
-    pub(crate) fn handle_drained_join(
-        &mut self,
-        joined: Result<(Id, ChildEnvelope), JoinError>,
-    ) -> Result<(), SupervisorError> {
-        let Some(classified) = self.consume_joined_child(joined)? else {
-            return Ok(());
-        };
-        self.record_exit(classified.key, classified.generation, &classified.status);
-        Ok(())
     }
 
     fn classify_join(
@@ -905,7 +917,20 @@ impl SupervisorRuntime {
         );
         // Drain the old generation completely before creating a fresh group
         // token so `OneForAll` restarts never overlap old and new tasks.
-        self.drain_for_group_restart().await?;
+        let completed = self.drain_for_group_restart().await?;
+        for classified in completed {
+            if !self.current_child_matches(
+                classified.key,
+                classified.instance,
+                classified.generation,
+            ) {
+                continue;
+            }
+            Box::pin(self.apply_exit_policy(classified)).await?;
+        }
+        if self.pending_exit.is_some() {
+            return Ok(());
+        }
         self.group_token = CancellationToken::new();
         let keys = self.child_order.clone();
         for key in keys {
@@ -957,6 +982,22 @@ impl SupervisorRuntime {
             failing_child.id
         );
         let deferred = self.drain_for_rest_for_one_restart(&keys).await?;
+        let (completed_in_suffix, deferred): (Vec<_>, Vec<_>) = deferred
+            .into_iter()
+            .partition(|classified| keys.contains(&classified.key));
+        for classified in completed_in_suffix {
+            if !self.current_child_matches(
+                classified.key,
+                classified.instance,
+                classified.generation,
+            ) {
+                continue;
+            }
+            Box::pin(self.apply_exit_policy(classified)).await?;
+        }
+        if self.pending_exit.is_some() {
+            return Ok(());
+        }
         for key in keys {
             let entry = &self.children[key];
             if entry.membership != MembershipState::Active
@@ -1153,7 +1194,7 @@ impl SupervisorRuntime {
     pub(crate) async fn drain_ready_joins(&mut self) -> Result<(), SupervisorError> {
         loop {
             match tokio::time::timeout(Duration::ZERO, self.join_set.join_next_with_id()).await {
-                Ok(Some(joined)) => self.handle_drained_join(joined)?,
+                Ok(Some(joined)) => self.handle_joined_child(joined).await?,
                 Ok(None) | Err(_) => return Ok(()),
             }
         }

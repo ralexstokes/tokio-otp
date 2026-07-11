@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Instant as StdInstant};
+use std::{collections::HashSet, sync::atomic::Ordering, time::Instant as StdInstant};
 
 use slab::Slab;
 use tokio::time::{Instant, sleep_until};
@@ -8,7 +8,9 @@ use crate::{
     error::SupervisorError,
     event::SupervisorEvent,
     runtime::{
-        child_runtime::RuntimeChildState,
+        child_runtime::{
+            COMPLETION_CANCELLED, COMPLETION_CLEAN, COMPLETION_PENDING, RuntimeChildState,
+        },
         supervision::{
             ChildEntry, ChildKey, ClassifiedExit, DrainReason, MembershipState, SupervisorState,
         },
@@ -65,11 +67,12 @@ impl SupervisorRuntime {
         .await
     }
 
-    pub(crate) async fn drain_for_group_restart(&mut self) -> Result<(), SupervisorError> {
+    pub(crate) async fn drain_for_group_restart(
+        &mut self,
+    ) -> Result<Vec<ClassifiedExit>, SupervisorError> {
         self.cancel_running_children();
         self.drain_children(DrainReason::GroupRestart, DrainScope::All)
             .await
-            .map(|_| ())
     }
 
     pub(crate) async fn drain_for_rest_for_one_restart(
@@ -89,6 +92,16 @@ impl SupervisorRuntime {
                 child.runtime.state,
                 RuntimeChildState::Running | RuntimeChildState::Starting
             ) {
+                child
+                    .runtime
+                    .completion_state
+                    .compare_exchange(
+                        COMPLETION_PENDING,
+                        COMPLETION_CANCELLED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .ok();
                 child.runtime.state = RuntimeChildState::Stopping;
                 if let Some(token) = child.runtime.active_token.as_ref() {
                     token.cancel();
@@ -112,6 +125,16 @@ impl SupervisorRuntime {
                 child.runtime.state,
                 RuntimeChildState::Running | RuntimeChildState::Starting
             ) {
+                child
+                    .runtime
+                    .completion_state
+                    .compare_exchange(
+                        COMPLETION_PENDING,
+                        COMPLETION_CANCELLED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .ok();
                 child.runtime.state = RuntimeChildState::Stopping;
                 cancelled = cancelled.saturating_add(1);
             }
@@ -242,7 +265,13 @@ impl SupervisorRuntime {
         // entry must not look Running once its join is consumed, or a nested
         // drain that includes this key would wait on a join that never comes.
         self.record_exit(classified.key, classified.generation, &classified.status);
-        if !scope.contains(classified.key) {
+        let naturally_completed = matches!(classified.status, super::exit::ExitStatus::Completed)
+            && self.children[classified.key]
+                .runtime
+                .completion_state
+                .load(Ordering::Acquire)
+                == COMPLETION_CLEAN;
+        if !scope.contains(classified.key) || naturally_completed {
             deferred.push(classified);
         }
         Ok(())

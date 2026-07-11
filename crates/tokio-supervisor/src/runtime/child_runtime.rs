@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU8};
 
 use tokio::{task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -6,6 +6,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     child::ChildDefinition, restart::RestartIntensity, runtime::intensity::RestartTracker,
 };
+
+pub(crate) const COMPLETION_PENDING: u8 = 0;
+pub(crate) const COMPLETION_CANCELLED: u8 = 1;
+pub(crate) const COMPLETION_CLEAN: u8 = 2;
 
 /// Mutable per-child state managed by the supervisor runtime.
 ///
@@ -20,6 +24,9 @@ pub(crate) struct ChildRuntime {
     pub(crate) abort_handle: Option<AbortHandle>,
     pub(crate) has_started: bool,
     pub(crate) next_restart_deadline: Option<Instant>,
+    /// Atomically orders a natural clean return against supervisor-driven
+    /// cancellation.
+    pub(crate) completion_state: Arc<AtomicU8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +60,7 @@ impl ChildRuntime {
             abort_handle: None,
             has_started: false,
             next_restart_deadline: None,
+            completion_state: Arc::new(AtomicU8::new(COMPLETION_PENDING)),
         }
     }
 }

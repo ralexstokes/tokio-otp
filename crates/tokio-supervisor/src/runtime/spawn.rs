@@ -1,10 +1,15 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
+
 use crate::{
     child::ChildKind,
     context::{ChildContext, SupervisorToken},
     error::SupervisorError,
     event::{EventSink, SupervisorEvent},
     runtime::{
-        child_runtime::RuntimeChildState,
+        child_runtime::{COMPLETION_CLEAN, COMPLETION_PENDING, RuntimeChildState},
         supervision::{ChildEnvelope, SupervisorRuntime, TaskMeta},
     },
     snapshot::{NestedSnapshotState, SnapshotCell},
@@ -27,6 +32,7 @@ impl SupervisorRuntime {
             instance,
             snapshot_state,
             nested_channels,
+            completion_state,
         ) = {
             let entry = self.children.get_mut(key).ok_or_else(|| {
                 SupervisorError::Internal(format!("missing child slot for key {key}"))
@@ -55,6 +61,8 @@ impl SupervisorRuntime {
             child.active_token = Some(child_token.clone());
             child.state = RuntimeChildState::Starting;
             child.next_restart_deadline = None;
+            let completion_state = Arc::new(AtomicU8::new(COMPLETION_PENDING));
+            child.completion_state = completion_state.clone();
             entry.nested_snapshot = None;
             let snapshot_state = if matches!(&child.definition.kind, ChildKind::Supervisor(_)) {
                 let state = NestedSnapshotState::default();
@@ -85,6 +93,7 @@ impl SupervisorRuntime {
                 instance,
                 snapshot_state,
                 nested_channels,
+                completion_state,
             )
         };
         let child_path_segments = self.child_path(key);
@@ -146,6 +155,14 @@ impl SupervisorRuntime {
                             .await
                     }
                 };
+                if result.is_ok() {
+                    let _ = completion_state.compare_exchange(
+                        COMPLETION_PENDING,
+                        COMPLETION_CLEAN,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                }
                 ChildEnvelope {
                     key,
                     instance,
