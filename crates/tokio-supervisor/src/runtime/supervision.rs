@@ -273,9 +273,13 @@ impl SupervisorRuntime {
         self.publish_snapshot();
         self.send_event(SupervisorEvent::SupervisorStarted);
         let initial_children = self.child_order.clone();
+        let initial_instances: Vec<_> = initial_children
+            .iter()
+            .filter_map(|&key| self.children.get(key).map(|entry| (key, entry.instance)))
+            .collect();
         let startup_completed = self.start_children(initial_children.clone()).await?;
         if let Some(startup_ready) = startup_ready {
-            if startup_completed && self.wait_until_children_ready(&initial_children).await? {
+            if startup_completed && self.wait_until_children_ready(&initial_instances).await? {
                 startup_ready.mark_ready();
             } else if let Some(result) = self.pending_exit.take() {
                 return result;
@@ -348,7 +352,10 @@ impl SupervisorRuntime {
                 return Ok(true);
             }
             if !ready {
-                return Ok(false);
+                if self.children.contains(key) {
+                    return Ok(false);
+                }
+                continue;
             }
         }
         Ok(true)
@@ -423,12 +430,15 @@ impl SupervisorRuntime {
 
     async fn wait_until_children_ready(
         &mut self,
-        keys: &[ChildKey],
+        children: &[(ChildKey, u64)],
     ) -> Result<bool, SupervisorError> {
-        for &key in keys {
+        for &(key, instance) in children {
             let Some(entry) = self.children.get(key) else {
-                return Ok(false);
+                continue;
             };
+            if entry.instance != instance {
+                continue;
+            }
             if entry.runtime.has_reported_ready {
                 continue;
             }
@@ -521,11 +531,9 @@ impl SupervisorRuntime {
         self.children_by_id.insert(id.clone(), key);
         self.child_order.push(key);
 
-        if let Err(err) = self.start_children(vec![key]).await {
-            self.children_by_id.remove(&id);
-            self.child_order.retain(|&existing| existing != key);
-            self.children.remove(key);
-            return Err(map_supervisor_error_to_control(err));
+        if let Err(error) = self.start_children(vec![key]).await {
+            self.pending_exit = Some(Err(error.clone()));
+            return Err(map_supervisor_error_to_control(error));
         }
 
         Ok(())
@@ -585,17 +593,7 @@ impl SupervisorRuntime {
             .insert(id.clone(), stable);
 
         if let Err(error) = self.start_children(vec![key]).await {
-            self.children_by_id.remove(&id);
-            self.child_order.retain(|&existing| existing != key);
-            self.children.remove(key);
-            self.nested_handles
-                .lock()
-                .expect("nested handle map poisoned")
-                .remove(&id);
-            self.nested_channels
-                .lock()
-                .expect("nested channel map poisoned")
-                .remove(&id);
+            self.pending_exit = Some(Err(error.clone()));
             return Err(map_supervisor_error_to_control(error));
         }
 
@@ -1114,7 +1112,8 @@ impl SupervisorRuntime {
                 continue;
             };
             if entry.membership != MembershipState::Active
-                || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
+                || (entry.runtime.has_started
+                    && matches!(entry.runtime.definition.restart, RestartPolicy::Never))
             {
                 continue;
             }
@@ -1193,7 +1192,8 @@ impl SupervisorRuntime {
                 continue;
             };
             if entry.membership != MembershipState::Active
-                || matches!(entry.runtime.definition.restart, RestartPolicy::Never)
+                || (entry.runtime.has_started
+                    && matches!(entry.runtime.definition.restart, RestartPolicy::Never))
             {
                 continue;
             }

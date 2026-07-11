@@ -236,8 +236,10 @@ impl ChildSpec {
     /// If the child exits before reporting readiness, its ordinary restart
     /// policy applies and later sequential siblings remain unstarted. There is
     /// no built-in readiness timeout; use a timeout inside the child when
-    /// initialization must be bounded. While a sequential supervisor waits,
-    /// shutdown remains responsive and control commands remain queued.
+    /// initialization must be bounded. While a supervisor waits for readiness,
+    /// shutdown remains responsive and control commands remain queued; do not
+    /// await a control command on that same supervisor before calling
+    /// `mark_ready`.
     #[must_use]
     pub fn wait_for_ready(self) -> Self {
         self.map_inner(|inner| inner.readiness = ChildReadiness::Explicit)

@@ -126,7 +126,10 @@ children are gated automatically: their `on_start` hook is the readiness
 boundary. Use `ActorContext::continue_with(message)` inside `on_start` to queue
 expensive follow-up work as the actor's next message without delaying later
 siblings. Call `handle.wait_started().await` when code outside the tree needs
-to wait until all current children are running.
+to wait until all current children are running. Readiness-gated startup queues
+control commands even for a concurrent nested supervisor, so initialization
+must not await a control command on its own supervisor before reporting ready.
+There is no implicit readiness timeout.
 
 ## Strategies
 

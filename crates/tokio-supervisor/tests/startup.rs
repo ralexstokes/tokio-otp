@@ -512,6 +512,7 @@ async fn pre_ready_one_for_all_failure_does_not_duplicate_children() {
             }
         }
     })
+    .restart(RestartPolicy::Never)
     .wait_for_ready();
     let handle = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
@@ -642,4 +643,108 @@ async fn removal_during_pre_ready_group_restart_does_not_stall_later_children() 
     assert_eq!(sibling_runs.load(Ordering::SeqCst), 2);
     handle.wait_started().await.unwrap();
     handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn removal_during_initial_readiness_wait_continues_later_children() {
+    let failing_exited = Arc::new(Notify::new());
+    let later_started = Arc::new(Notify::new());
+    let failing = ChildSpec::new("failing", {
+        let failing_exited = Arc::clone(&failing_exited);
+        move |_ctx| {
+            let failing_exited = Arc::clone(&failing_exited);
+            async move {
+                failing_exited.notify_one();
+                Err(std::io::Error::other("init failed").into())
+            }
+        }
+    })
+    .restart_intensity(
+        RestartIntensity::new(5, Duration::from_secs(10))
+            .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(50))),
+    )
+    .wait_for_ready();
+    let later = ChildSpec::new("later", {
+        let later_started = Arc::clone(&later_started);
+        move |ctx| {
+            let later_started = Arc::clone(&later_started);
+            async move {
+                later_started.notify_one();
+                ctx.mark_ready();
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .wait_for_ready();
+    let handle = SupervisorBuilder::new()
+        .start_mode(StartMode::Sequential)
+        .child(failing)
+        .child(later)
+        .build()
+        .unwrap()
+        .spawn();
+    failing_exited.notified().await;
+    handle.remove_child("failing").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), later_started.notified())
+        .await
+        .unwrap();
+    handle.wait_started().await.unwrap();
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn fatal_error_during_dynamic_start_stops_the_supervisor() {
+    let trigger_failure = Arc::new(Notify::new());
+    let dynamic_started = Arc::new(Notify::new());
+    let sibling = ChildSpec::new("sibling", {
+        let trigger_failure = Arc::clone(&trigger_failure);
+        move |ctx| {
+            let trigger_failure = Arc::clone(&trigger_failure);
+            async move {
+                if ctx.generation() == 0 {
+                    trigger_failure.notified().await;
+                }
+                Err(std::io::Error::other("fatal restart loop").into())
+            }
+        }
+    });
+    let handle = SupervisorBuilder::new()
+        .start_mode(StartMode::Sequential)
+        .restart_intensity(RestartIntensity::new(1, Duration::from_secs(10)))
+        .child(sibling)
+        .build()
+        .unwrap()
+        .spawn();
+    let dynamic = ChildSpec::new("dynamic", {
+        let dynamic_started = Arc::clone(&dynamic_started);
+        move |ctx| {
+            let dynamic_started = Arc::clone(&dynamic_started);
+            async move {
+                dynamic_started.notify_one();
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .wait_for_ready();
+    let add = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.add_child(dynamic).await }
+    });
+    dynamic_started.notified().await;
+    trigger_failure.notify_one();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), add)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(tokio_supervisor::ControlError::SupervisorStopping)
+    ));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .unwrap(),
+        Err(tokio_supervisor::SupervisorError::RestartIntensityExceeded)
+    );
 }
