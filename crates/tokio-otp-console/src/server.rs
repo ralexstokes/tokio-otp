@@ -26,16 +26,41 @@ pub(crate) struct AppState {
 struct SecurityState {
     allowed_hosts: Arc<HashSet<String>>,
     access_token: Option<Arc<str>>,
+    session: Option<Session>,
 }
 
-fn authority_for(addr: SocketAddr) -> String {
-    addr.to_string().to_ascii_lowercase()
+#[derive(Clone)]
+struct Session {
+    cookie_name: Arc<str>,
+    value: Arc<str>,
 }
 
-fn host_allowed(headers: &HeaderMap, state: &SecurityState) -> bool {
-    headers
+fn insert_authority(hosts: &mut HashSet<String>, authority: impl Into<String>) {
+    let authority = authority.into().to_ascii_lowercase();
+    if let Some(host) = authority
+        .strip_suffix(":80")
+        .or_else(|| authority.strip_suffix(":443"))
+    {
+        hosts.insert(host.to_owned());
+    }
+    hosts.insert(authority);
+}
+
+fn request_authority(request: &Request<Body>) -> Option<&str> {
+    request
+        .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(axum::http::uri::Authority::as_str)
+        })
+}
+
+fn host_allowed(request: &Request<Body>, state: &SecurityState) -> bool {
+    request_authority(request)
         .is_some_and(|host| state.allowed_hosts.contains(&host.to_ascii_lowercase()))
 }
 
@@ -46,24 +71,38 @@ fn token_from_query(request: &Request<Body>) -> Option<&str> {
     })
 }
 
-fn token_from_headers(headers: &HeaderMap) -> Option<&str> {
-    if let Some(token) = headers
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    {
-        return Some(token);
-    }
+        .and_then(|value| value.split_once(' '))
+        .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("Bearer").then_some(token))
+}
 
+fn cookie_value<'a>(headers: &'a HeaderMap, cookie_name: &str) -> Option<&'a str> {
     headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .and_then(|cookies| {
             cookies.split(';').find_map(|cookie| {
                 let (name, value) = cookie.trim().split_once('=')?;
-                (name == "tokio_otp_console_session").then_some(value)
+                (name == cookie_name).then_some(value)
             })
         })
+}
+
+fn new_session(port: u16) -> std::io::Result<Session> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(value, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(Session {
+        cookie_name: Arc::from(format!("tokio_otp_console_session_{port}")),
+        value: Arc::from(value),
+    })
 }
 
 fn token_matches(candidate: Option<&str>, expected: &str) -> bool {
@@ -86,7 +125,7 @@ async fn security(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !host_allowed(request.headers(), &state) {
+    if !host_allowed(&request, &state) {
         return (StatusCode::FORBIDDEN, "host not allowed").into_response();
     }
 
@@ -99,8 +138,14 @@ async fn security(
         && token_matches(token_from_query(&request), expected)
     {
         let mut response = (StatusCode::SEE_OTHER, [(header::LOCATION, "/")]).into_response();
-        let cookie =
-            format!("tokio_otp_console_session={expected}; HttpOnly; SameSite=Strict; Path=/");
+        let session = state
+            .session
+            .as_ref()
+            .expect("access token must have a browser session");
+        let cookie = format!(
+            "{}={}; HttpOnly; SameSite=Lax; Path=/",
+            session.cookie_name, session.value
+        );
         response.headers_mut().insert(
             header::SET_COOKIE,
             HeaderValue::from_str(&cookie).expect("validated access token produced invalid cookie"),
@@ -115,8 +160,20 @@ async fn security(
         return response;
     }
 
-    if !token_matches(token_from_headers(request.headers()), expected) {
-        return (StatusCode::UNAUTHORIZED, "valid bearer token required").into_response();
+    let bearer_matches = token_matches(bearer_token(request.headers()), expected);
+    let session_matches = state.session.as_ref().is_some_and(|session| {
+        token_matches(
+            cookie_value(request.headers(), &session.cookie_name),
+            &session.value,
+        )
+    });
+    if !bearer_matches && !session_matches {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "valid bearer token required",
+        )
+            .into_response();
     }
 
     next.run(request).await
@@ -144,14 +201,24 @@ async fn bind_app(
 ) -> std::io::Result<(tokio::net::TcpListener, Router, SocketAddr)> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local_addr = listener.local_addr()?;
-    let mut hosts = allowed_hosts
-        .into_iter()
-        .map(|host| host.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-    hosts.insert(authority_for(local_addr));
-    if local_addr.ip().is_loopback() {
-        hosts.insert(format!("localhost:{}", local_addr.port()));
+    if local_addr.ip().is_unspecified() && allowed_hosts.is_empty() {
+        tracing::warn!(
+            %local_addr,
+            "wildcard console bind requires allowed_host for normal client access"
+        );
     }
+    let mut hosts = HashSet::new();
+    for host in allowed_hosts {
+        insert_authority(&mut hosts, host);
+    }
+    insert_authority(&mut hosts, local_addr.to_string());
+    if local_addr.ip().is_loopback() {
+        insert_authority(&mut hosts, format!("localhost:{}", local_addr.port()));
+    }
+    let session = access_token
+        .as_ref()
+        .map(|_| new_session(local_addr.port()))
+        .transpose()?;
     let app = router(
         AppState {
             snapshots,
@@ -161,6 +228,7 @@ async fn bind_app(
         SecurityState {
             allowed_hosts: Arc::new(hosts),
             access_token: access_token.map(Arc::from),
+            session,
         },
     );
     Ok((listener, app, local_addr))
@@ -213,4 +281,18 @@ pub(crate) async fn run(
     tracing::info!(%local_addr, "tokio-otp-console listening");
 
     axum::serve(listener, app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_authority_falls_back_to_http2_uri_authority() {
+        let request = Request::builder()
+            .uri("http://console.example:9100/")
+            .body(Body::empty())
+            .expect("failed to build request");
+        assert_eq!(request_authority(&request), Some("console.example:9100"));
+    }
 }

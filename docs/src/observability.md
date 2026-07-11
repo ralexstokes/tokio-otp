@@ -122,3 +122,9 @@ browser, open `http://console.internal:8080/?token=TOKEN` once; the console
 redirects to remove the token from the URL and uses an HTTP-only, same-site
 cookie afterward. Treat the console as sensitive operational access: snapshots
 and events include child identifiers and may include application error strings.
+
+Host checks also apply through an SSH tunnel. Forward the same port and allow
+the browser-visible authority—for example, `ssh -L 8080:host:8080 host` with
+`.allowed_host("localhost:8080")`. A different local forwarding port must be
+listed instead. For non-local deployments, terminate TLS at a trusted reverse
+proxy so the token and console data are encrypted in transit.

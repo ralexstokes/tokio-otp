@@ -130,7 +130,9 @@ impl ConsoleBuilder {
     ///
     /// The listener address is always allowed. Loopback listeners also allow
     /// `localhost` on the listener port. Add the externally visible authority
-    /// when serving through a wildcard bind, hostname, or reverse proxy.
+    /// when serving through a hostname or reverse proxy. A wildcard bind
+    /// (`0.0.0.0` or `[::]`) rejects normal client hosts until at least one
+    /// externally visible authority is added here.
     pub fn allowed_host(mut self, authority: impl Into<String>) -> Self {
         self.allowed_hosts.push(authority.into());
         self

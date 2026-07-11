@@ -19,6 +19,7 @@ name = "tokio-otp"
 [workspace.dependencies]
 axum = "0.8"
 futures-util = "0.3"
+getrandom = "0.3"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 metrics-util = { version = "0.20", features = ["debugging"] }
