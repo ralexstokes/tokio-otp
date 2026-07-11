@@ -1,9 +1,12 @@
-use std::{future::pending, marker::PhantomData, time::Duration};
+use std::{future::pending, marker::PhantomData, sync::Arc, time::Duration};
 
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::{Notify, mpsc},
+    time::timeout,
+};
 use tokio_otp::{
-    ActorContext, ActorRef, ActorResult, DynamicActorOptions, GraphBuilder, MessageSize, RawActor,
-    Runtime, SendError, SupervisedActors,
+    ActorContext, ActorOptions, ActorRef, ActorResult, DynamicActorOptions, GraphBuilder,
+    MailboxMode, MessageSize, RawActor, Runtime, SendError, SupervisedActors,
 };
 use tokio_supervisor::{ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder};
 
@@ -143,9 +146,10 @@ async fn runtime_added_actor_can_observe_message_sizes() {
         .expect("graphless runtime builds")
         .spawn();
     let sink = handle
-        .add_actor_with_message_size(
+        .add_actor_with_options(
             "sink",
             Drain::<SizedMessage>::new(),
+            ActorOptions::new().message_size(),
             DynamicActorOptions::default(),
         )
         .await
@@ -161,6 +165,52 @@ async fn runtime_added_actor_can_observe_message_sizes() {
         .expect("dynamic actor stats available");
     assert_eq!(stats.message_bytes_accepted, Some(12));
 
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
+struct GatedDrain {
+    release: Arc<Notify>,
+}
+
+impl RawActor for GatedDrain {
+    type Msg = u64;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        self.release.notified().await;
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn runtime_added_actor_uses_non_default_mailbox_options() {
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+    let release = Arc::new(Notify::new());
+    let sink = handle
+        .add_actor_with_options(
+            "sink",
+            GatedDrain {
+                release: Arc::clone(&release),
+            },
+            ActorOptions::new().mailbox(MailboxMode::Conflate),
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("conflating actor added");
+
+    for message in 0..3 {
+        sink.send(message).await.expect("message accepted");
+    }
+    let stats = sink.stats();
+    assert_eq!(stats.messages_accepted, 3);
+    assert_eq!(stats.messages_conflated, 2);
+    assert_eq!(stats.mailbox_capacity, 1);
+
+    release.notify_one();
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }
 

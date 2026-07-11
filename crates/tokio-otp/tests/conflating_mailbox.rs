@@ -8,8 +8,8 @@ use std::{
 
 use tokio::sync::{Notify, mpsc};
 use tokio_otp::{
-    Actor, ActorContext, ActorResult, CallError, DrainPolicy, GraphBuilder, MailboxMode, RawActor,
-    RebindPolicy, Reply,
+    Actor, ActorContext, ActorOptions, ActorResult, CallError, DrainPolicy, GraphBuilder,
+    MailboxMode, MessageSize, RawActor, RebindPolicy, Reply,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -50,14 +50,14 @@ async fn conflate_keeps_only_the_newest_unread_message() {
     let (received_tx, mut received_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
-    let actor_ref = builder.actor_with_mailbox(
+    let actor_ref = builder.actor_with_options(
         "ticks",
         GatedCollector {
             started: started_tx,
             release: Arc::clone(&release),
             received: received_tx,
         },
-        MailboxMode::Conflate,
+        ActorOptions::new().mailbox(MailboxMode::Conflate),
     );
     let graph = builder.build().expect("valid graph");
     let actor = graph.actors()[0].clone();
@@ -95,6 +95,61 @@ async fn conflate_keeps_only_the_newest_unread_message() {
     task.await.expect("actor task joins").expect("actor stops");
 }
 
+struct SizedSnapshot(Vec<u8>);
+
+impl MessageSize for SizedSnapshot {
+    fn size_hint(&self) -> usize {
+        self.0.len()
+    }
+}
+
+#[tokio::test]
+async fn actor_options_combine_conflation_and_message_size_observation() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    let actor_ref = builder.actor_with_options(
+        "snapshots",
+        GatedCollector {
+            started: started_tx,
+            release: Arc::clone(&release),
+            received: received_tx,
+        },
+        ActorOptions::new()
+            .mailbox(MailboxMode::Conflate)
+            .message_size(),
+    );
+    let graph = builder.build().expect("valid graph");
+    let actor = graph.actors()[0].clone();
+    let stop = CancellationToken::new();
+    let task = tokio::spawn({
+        let stop = stop.clone();
+        async move { actor.run_until(stop.cancelled(), RebindPolicy::Never).await }
+    });
+    started_rx.recv().await.expect("actor started");
+
+    for size in 1..=3 {
+        actor_ref
+            .send(SizedSnapshot(vec![0; size]))
+            .await
+            .expect("snapshot accepted");
+    }
+
+    let stats = actor_ref.stats();
+    assert_eq!(stats.messages_accepted, 3);
+    assert_eq!(stats.messages_conflated, 2);
+    assert_eq!(stats.message_bytes_accepted, Some(6));
+
+    release.notify_one();
+    assert_eq!(
+        received_rx.recv().await.map(|message| message.0.len()),
+        Some(3)
+    );
+    stop.cancel();
+    task.await.expect("actor task joins").expect("actor stops");
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct Tick {
     symbol: &'static str,
@@ -108,9 +163,9 @@ async fn conflate_by_key_replaces_values_and_evicts_the_oldest_key_at_capacity()
     let release = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
     builder.mailbox_capacity(2);
-    let (slot, actor_ref) = builder.slot_with_mailbox(
+    let (slot, actor_ref) = builder.slot_with_options(
         "market-data",
-        MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol),
+        ActorOptions::new().mailbox(MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol)),
     );
     builder.define(
         slot,
@@ -192,14 +247,14 @@ async fn replaced_call_reports_reply_dropped() {
     let (received_tx, mut received_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
-    let actor_ref = builder.actor_with_mailbox(
+    let actor_ref = builder.actor_with_options(
         "requests",
         GatedCollector {
             started: started_tx,
             release: Arc::clone(&release),
             received: received_tx,
         },
-        MailboxMode::Conflate,
+        ActorOptions::new().mailbox(MailboxMode::Conflate),
     );
     let graph = builder.build().expect("valid graph");
     let actor = graph.actors()[0].clone();
@@ -275,14 +330,14 @@ async fn drain_policy_handles_latest_message_after_shutdown() {
     let (received_tx, mut received_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
-    let actor_ref = builder.actor_with_mailbox(
+    let actor_ref = builder.actor_with_options(
         "drain",
         GatedDrainActor {
             started: started_tx,
             release: Arc::clone(&release),
             received: received_tx,
         },
-        MailboxMode::Conflate,
+        ActorOptions::new().mailbox(MailboxMode::Conflate),
     );
     let graph = builder.build().expect("valid graph");
     let actor = graph.actors()[0].clone();
@@ -311,14 +366,14 @@ async fn poisoned_key_match_lock_recovers_without_panicking_in_drop() {
     let release = Arc::new(Notify::new());
     let panic_once = Arc::new(AtomicBool::new(true));
     let mut builder = GraphBuilder::new();
-    let actor_ref = builder.actor_with_mailbox(
+    let actor_ref = builder.actor_with_options(
         "poison-recovery",
         GatedCollector {
             started: started_tx,
             release: Arc::clone(&release),
             received: received_tx,
         },
-        MailboxMode::conflate_by_key({
+        ActorOptions::new().mailbox(MailboxMode::conflate_by_key({
             let panic_once = Arc::clone(&panic_once);
             move |value: &u64| {
                 assert!(
@@ -327,7 +382,7 @@ async fn poisoned_key_match_lock_recovers_without_panicking_in_drop() {
                 );
                 value % 2
             }
-        }),
+        })),
     );
     let graph = builder.build().expect("valid graph");
     let actor = graph.actors()[0].clone();

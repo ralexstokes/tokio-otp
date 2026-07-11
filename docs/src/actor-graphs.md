@@ -175,8 +175,8 @@ need explicit observability names:
 - `builder.add(actor)` registers an actor under its unqualified type name,
   suffixing repeats as `Worker-2`, `Worker-3`, and so on
 - `builder.actor(id, actor)` registers an actor under an explicit id
-- `builder.actor_with_mailbox(id, actor, mode)` registers an actor with FIFO,
-  latest-wins, or keyed latest-wins delivery
+- `builder.actor_with_options(id, actor, options)` combines per-actor settings
+  such as mailbox delivery and message-size observation
 - `builder.slot::<M>(id)` plus `builder.define(slot, actor)` opens and fills a
   token-protected slot for hand-written cyclic wiring
 
@@ -199,18 +199,20 @@ opposite policy—a slow consumer should skip stale updates instead of making
 the producer fall behind. Configure those actors explicitly:
 
 ```rust,ignore
-use tokio_otp::MailboxMode;
+use tokio_otp::{ActorOptions, MailboxMode};
 
-let latest = builder.actor_with_mailbox(
+let latest = builder.actor_with_options(
     "latest-market",
     market_actor,
-    MailboxMode::Conflate,
+    ActorOptions::new().mailbox(MailboxMode::Conflate),
 );
 
-let per_symbol = builder.actor_with_mailbox(
+let per_symbol = builder.actor_with_options(
     "market-by-symbol",
     keyed_market_actor,
-    MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol_id),
+    ActorOptions::new().mailbox(MailboxMode::conflate_by_key(
+        |tick: &Tick| tick.symbol_id,
+    )),
 );
 ```
 

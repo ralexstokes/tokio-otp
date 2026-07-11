@@ -23,7 +23,7 @@ use crate::actor::{
         ActorStats, BindingCore, BindingGuard, BindingLifecycle, MailboxMode, MailboxRef,
         RebindPolicy, mailbox,
     },
-    builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY, MessageSize},
+    builder::{ActorOptions, DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
     context::{ActorContext, ActorRef, ActorTimers},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     raw::{ActorResult, BoxError, RawActor},
@@ -433,38 +433,25 @@ impl RunnableActorFactory {
         label: impl Into<String>,
         actor: A,
     ) -> (RunnableActor, ActorRef<A::Msg>) {
-        self.actor_with_mailbox(label, actor, MailboxMode::Queue)
+        self.actor_with_options(label, actor, ActorOptions::new())
     }
 
-    /// Constructs a runnable actor with an explicit mailbox mode and its
+    /// Constructs a runnable actor with explicit per-actor options and its
     /// stable typed ref.
-    pub fn actor_with_mailbox<A: RawActor>(
+    pub fn actor_with_options<A: RawActor>(
         &self,
         label: impl Into<String>,
         actor: A,
-        mailbox_mode: MailboxMode<A::Msg>,
+        options: ActorOptions<A::Msg>,
     ) -> (RunnableActor, ActorRef<A::Msg>) {
         let actor_id: Arc<str> = label.into().into();
-        let binding = Arc::new(BindingCore::<A::Msg>::new(actor_id.clone()));
-        self.actor_with_binding(actor_id, actor, binding, mailbox_mode)
-    }
-
-    /// Constructs a runnable actor with message-size observation enabled.
-    pub fn actor_with_message_size<A>(
-        &self,
-        label: impl Into<String>,
-        actor: A,
-    ) -> (RunnableActor, ActorRef<A::Msg>)
-    where
-        A: RawActor,
-        A::Msg: MessageSize,
-    {
-        let actor_id: Arc<str> = label.into().into();
-        let binding = Arc::new(BindingCore::<A::Msg>::with_message_size(
-            actor_id.clone(),
-            MessageSize::size_hint,
-        ));
-        self.actor_with_binding(actor_id, actor, binding, MailboxMode::Queue)
+        let binding = Arc::new(match options.size_hint {
+            Some(size_hint) => {
+                BindingCore::<A::Msg>::with_message_size(actor_id.clone(), size_hint)
+            }
+            None => BindingCore::<A::Msg>::new(actor_id.clone()),
+        });
+        self.actor_with_binding(actor_id, actor, binding, options.mailbox_mode)
     }
 
     fn actor_with_binding<A: RawActor>(

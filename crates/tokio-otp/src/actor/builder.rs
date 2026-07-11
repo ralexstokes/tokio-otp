@@ -1,6 +1,7 @@
 use std::{
     any::{Any, TypeId, type_name},
     collections::HashMap,
+    fmt,
     marker::PhantomData,
     sync::{
         Arc,
@@ -22,13 +23,84 @@ use crate::actor::{
 ///
 /// The value is an observability hint, normally the size of payload buffers
 /// owned by the message. It is sampled only when the target actor opts in via
-/// [`GraphBuilder::actor_with_message_size`] or
-/// [`GraphBuilder::slot_with_message_size`], or the corresponding dynamic
-/// actor methods on [`RunnableActorFactory`](crate::RunnableActorFactory) and
-/// [`RuntimeHandle`](crate::RuntimeHandle).
+/// [`ActorOptions::message_size`] when registering the actor.
 pub trait MessageSize {
     /// Returns the message size to report, in bytes.
     fn size_hint(&self) -> usize;
+}
+
+/// Per-actor registration options.
+///
+/// Options compose independently, so an actor can use a non-default mailbox
+/// and message-size observation together:
+///
+/// ```
+/// use tokio_otp::{ActorOptions, MailboxMode, MessageSize};
+///
+/// struct Snapshot(Vec<u8>);
+///
+/// impl MessageSize for Snapshot {
+///     fn size_hint(&self) -> usize {
+///         self.0.len()
+///     }
+/// }
+///
+/// let options: ActorOptions<Snapshot> = ActorOptions::new()
+///     .mailbox(MailboxMode::Conflate)
+///     .message_size();
+/// ```
+pub struct ActorOptions<M> {
+    pub(crate) mailbox_mode: MailboxMode<M>,
+    pub(crate) size_hint: Option<fn(&M) -> usize>,
+}
+
+impl<M> Clone for ActorOptions<M> {
+    fn clone(&self) -> Self {
+        Self {
+            mailbox_mode: self.mailbox_mode.clone(),
+            size_hint: self.size_hint,
+        }
+    }
+}
+
+impl<M> fmt::Debug for ActorOptions<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActorOptions")
+            .field("mailbox_mode", &self.mailbox_mode)
+            .field("size_hint", &self.size_hint)
+            .finish()
+    }
+}
+
+impl<M> ActorOptions<M> {
+    /// Creates options using a FIFO queue without message-size observation.
+    pub fn new() -> Self {
+        Self {
+            mailbox_mode: MailboxMode::Queue,
+            size_hint: None,
+        }
+    }
+
+    /// Selects the actor's mailbox storage policy.
+    pub fn mailbox(mut self, mailbox_mode: MailboxMode<M>) -> Self {
+        self.mailbox_mode = mailbox_mode;
+        self
+    }
+
+    /// Enables accepted-message byte observation using `M`'s size hint.
+    pub fn message_size(mut self) -> Self
+    where
+        M: MessageSize,
+    {
+        self.size_hint = Some(MessageSize::size_hint);
+        self
+    }
+}
+
+impl<M> Default for ActorOptions<M> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 static NEXT_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
@@ -155,41 +227,21 @@ impl GraphBuilder {
     /// The name is fixed when the slot is opened because it is used as the
     /// actor label in observability.
     pub fn slot<M: Send + 'static>(&mut self, actor_id: &str) -> (ActorSlot<M>, ActorRef<M>) {
-        self.slot_with_mailbox(actor_id, MailboxMode::Queue)
+        self.slot_with_options(actor_id, ActorOptions::new())
     }
 
-    /// Opens a named slot with an explicit mailbox mode.
-    pub fn slot_with_mailbox<M: Send + 'static>(
+    /// Opens a named slot with explicit per-actor options.
+    pub fn slot_with_options<M: Send + 'static>(
         &mut self,
         actor_id: &str,
-        mailbox_mode: MailboxMode<M>,
+        options: ActorOptions<M>,
     ) -> (ActorSlot<M>, ActorRef<M>) {
-        match self.push_slot_with_mailbox(actor_id, mailbox_mode) {
+        let size_hint = options.size_hint;
+        match self.push_slot_with_options(actor_id, options) {
             Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
             None => (
                 ActorSlot::new(self.builder_id, None),
-                ActorRef::detached(actor_id.into()),
-            ),
-        }
-    }
-
-    /// Opens a named slot with message-size observation enabled.
-    ///
-    /// Each message's [`MessageSize::size_hint`] is recorded only after the
-    /// mailbox accepts it. Actors registered with [`slot`](Self::slot) have no
-    /// message-size sampling or accounting overhead.
-    pub fn slot_with_message_size<M: MessageSize + Send + 'static>(
-        &mut self,
-        actor_id: &str,
-    ) -> (ActorSlot<M>, ActorRef<M>) {
-        match self.push_sized_slot::<M>(actor_id) {
-            Some((index, actor_ref)) => {
-                self.slots[index].mailbox_mode = Some(Box::new(MailboxMode::<M>::Queue));
-                (ActorSlot::new(self.builder_id, Some(index)), actor_ref)
-            }
-            None => (
-                ActorSlot::new(self.builder_id, None),
-                ActorRef::detached_with_message_size(actor_id.into()),
+                Self::detached_ref(actor_id, size_hint),
             ),
         }
     }
@@ -235,38 +287,20 @@ impl GraphBuilder {
 
     /// Registers an actor and returns its typed, restart-stable ref.
     pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
-        let registration = self.push_slot::<A::Msg>(actor_id);
-        self.finish_actor_registration(registration, actor, MailboxMode::Queue, || {
-            ActorRef::detached(actor_id.into())
-        })
+        self.actor_with_options(actor_id, actor, ActorOptions::new())
     }
 
-    /// Registers an actor with an explicit mailbox mode.
-    pub fn actor_with_mailbox<A: RawActor>(
+    /// Registers an actor with explicit per-actor options.
+    pub fn actor_with_options<A: RawActor>(
         &mut self,
         actor_id: &str,
         actor: A,
-        mailbox_mode: MailboxMode<A::Msg>,
+        options: ActorOptions<A::Msg>,
     ) -> ActorRef<A::Msg> {
-        let registration = self.push_slot::<A::Msg>(actor_id);
-        self.finish_actor_registration(registration, actor, mailbox_mode, || {
-            ActorRef::detached(actor_id.into())
-        })
-    }
-
-    /// Registers an actor with message-size observation enabled.
-    ///
-    /// Accepted message sizes are accumulated in [`ActorStats`](crate::ActorStats)
-    /// and, with the `metrics` feature, emitted as an `actor.message.size`
-    /// histogram and `actor.message.bytes_accepted` counter.
-    pub fn actor_with_message_size<A>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg>
-    where
-        A: RawActor,
-        A::Msg: MessageSize,
-    {
-        let registration = self.push_sized_slot::<A::Msg>(actor_id);
-        self.finish_actor_registration(registration, actor, MailboxMode::Queue, || {
-            ActorRef::detached_with_message_size(actor_id.into())
+        let size_hint = options.size_hint;
+        let registration = self.push_slot_with_options(actor_id, options);
+        self.finish_actor_registration(registration, actor, || {
+            Self::detached_ref(actor_id, size_hint)
         })
     }
 
@@ -274,7 +308,6 @@ impl GraphBuilder {
         &mut self,
         registration: Option<(usize, ActorRef<A::Msg>)>,
         actor: A,
-        mailbox_mode: MailboxMode<A::Msg>,
         detached: impl FnOnce() -> ActorRef<A::Msg>,
     ) -> ActorRef<A::Msg> {
         let Some((index, actor_ref)) = registration else {
@@ -284,10 +317,16 @@ impl GraphBuilder {
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
             unreachable!("message type id already verified")
         };
+        let mailbox_mode = slot
+            .mailbox_mode
+            .take()
+            .expect("new actor retains mailbox mode")
+            .downcast::<MailboxMode<A::Msg>>()
+            .unwrap_or_else(|_| unreachable!("message type id already verified"));
         slot.runner = Some(Arc::new(TypedRunner {
             actor,
             binding,
-            mailbox_mode,
+            mailbox_mode: *mailbox_mode,
         }));
         actor_ref
     }
@@ -299,15 +338,15 @@ impl GraphBuilder {
     /// fields; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
     pub fn add<A: RawActor>(&mut self, actor: A) -> ActorRef<A::Msg> {
-        self.add_with_mailbox(actor, MailboxMode::Queue)
+        self.add_with_options(actor, ActorOptions::new())
     }
 
-    /// Registers an actor under its unqualified type name with an explicit
-    /// mailbox mode.
-    pub fn add_with_mailbox<A: RawActor>(
+    /// Registers an actor under its unqualified type name with explicit
+    /// per-actor options.
+    pub fn add_with_options<A: RawActor>(
         &mut self,
         actor: A,
-        mailbox_mode: MailboxMode<A::Msg>,
+        options: ActorOptions<A::Msg>,
     ) -> ActorRef<A::Msg> {
         let base = short_type_name(type_name::<A>());
         let mut actor_id = base.to_owned();
@@ -316,7 +355,7 @@ impl GraphBuilder {
             actor_id = format!("{base}-{suffix}");
             suffix += 1;
         }
-        self.actor_with_mailbox(&actor_id, actor, mailbox_mode)
+        self.actor_with_options(&actor_id, actor, options)
     }
 
     /// Validates the graph and returns an immutable [`Graph`].
@@ -371,28 +410,29 @@ impl GraphBuilder {
         ))
     }
 
-    fn push_slot_with_mailbox<M: Send + 'static>(
+    fn push_slot_with_options<M: Send + 'static>(
         &mut self,
         actor_id: &str,
-        mailbox_mode: MailboxMode<M>,
+        options: ActorOptions<M>,
     ) -> Option<(usize, ActorRef<M>)> {
-        let (index, actor_ref) = self.push_slot(actor_id)?;
+        let ActorOptions {
+            mailbox_mode,
+            size_hint,
+        } = options;
+        let (index, actor_ref) =
+            self.push_slot_with_core(actor_id, |actor_id| match size_hint {
+                Some(size_hint) => BindingCore::<M>::with_message_size(actor_id, size_hint),
+                None => BindingCore::<M>::new(actor_id),
+            })?;
         self.slots[index].mailbox_mode = Some(Box::new(mailbox_mode));
         Some((index, actor_ref))
     }
 
-    /// Creates a named slot and returns its index plus typed ref.
-    fn push_slot<M: Send + 'static>(&mut self, actor_id: &str) -> Option<(usize, ActorRef<M>)> {
-        self.push_slot_with_core(actor_id, BindingCore::<M>::new)
-    }
-
-    fn push_sized_slot<M: MessageSize + Send + 'static>(
-        &mut self,
-        actor_id: &str,
-    ) -> Option<(usize, ActorRef<M>)> {
-        self.push_slot_with_core(actor_id, |actor_id| {
-            BindingCore::<M>::with_message_size(actor_id, MessageSize::size_hint)
-        })
+    fn detached_ref<M>(actor_id: &str, size_hint: Option<fn(&M) -> usize>) -> ActorRef<M> {
+        match size_hint {
+            Some(size_hint) => ActorRef::detached_with_size_hint(actor_id.into(), size_hint),
+            None => ActorRef::detached(actor_id.into()),
+        }
     }
 
     fn push_slot_with_core<M: Send + 'static>(
@@ -439,7 +479,18 @@ fn short_type_name(type_name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::short_type_name;
+    use super::{ActorOptions, MailboxMode, short_type_name};
+
+    struct OpaqueMessage;
+
+    #[test]
+    fn actor_options_clone_and_debug_do_not_bound_the_message_type() {
+        let options: ActorOptions<OpaqueMessage> =
+            ActorOptions::new().mailbox(MailboxMode::Conflate);
+
+        let cloned = options.clone();
+        assert_eq!(format!("{cloned:?}"), format!("{options:?}"));
+    }
 
     #[test]
     fn short_type_name_handles_plain_path_qualified_and_generics() {

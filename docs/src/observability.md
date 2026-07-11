@@ -45,8 +45,7 @@ The `tokio-otp` `actor_metrics` example prints the result in
 Prometheus-shaped text without an actor-layer metrics backend.
 
 Message sizes are application-defined and fully opt-in. Implement
-`MessageSize` for a message type and register its actor with
-`actor_with_message_size` (or a cyclic slot with `slot_with_message_size`):
+`MessageSize` for a message type and enable it in the actor's `ActorOptions`:
 
 ```rust,ignore
 impl MessageSize for Upload {
@@ -55,12 +54,18 @@ impl MessageSize for Upload {
     }
 }
 
-let uploads = graph.actor_with_message_size("uploads", UploadActor::new());
+let uploads = graph.actor_with_options(
+    "uploads",
+    UploadActor::new(),
+    ActorOptions::new().message_size(),
+);
 ```
 
-For runtime-added actors, use
-`RuntimeHandle::add_actor_with_message_size`; lower-level dynamic factories
-provide the corresponding `RunnableActorFactory::actor_with_message_size`.
+The same options value works with `GraphBuilder::slot_with_options`,
+`GraphBuilder::add_with_options`, `RunnableActorFactory::actor_with_options`,
+and `RuntimeHandle::add_actor_with_options`. Mailbox and size settings can be
+combined, for example with
+`ActorOptions::new().mailbox(MailboxMode::Conflate).message_size()`.
 
 `ActorStats::message_bytes_accepted` is then `Some(total)`; ordinary actors
 report `None` and do not sample message sizes. With the `metrics` feature,
@@ -68,9 +73,11 @@ each accepted sized message also updates the `actor.message.size` histogram
 and `actor.message.bytes_accepted` counter. Metric handles and actor-id labels
 are registered lazily on the first accepted message and cached per actor; later
 accepted sends only sample `size_hint` and update those handles. Because the
-cached handles bind to whichever recorder is installed when that first message
-is accepted, install your metrics recorder at startup, before actors begin
-receiving messages. The feature
+byte total follows `messages_accepted`, a conflated message that is accepted
+and later replaced still contributes its size even though it is never received.
+Since the cached handles bind to whichever recorder is installed when the first
+message is accepted, install your metrics recorder at startup, before actors
+begin receiving messages. The feature
 continues to enable the supervisor lifecycle counters, gauges, and histograms
 as well.
 
