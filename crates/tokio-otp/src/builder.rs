@@ -1,6 +1,6 @@
 use crate::{Graph, RunnableActorFactory};
 use tokio_supervisor::{
-    RestartIntensity, RestartPolicy, ShutdownPolicy, Strategy, SupervisorBuilder,
+    RestartIntensity, RestartPolicy, ShutdownPolicy, StartMode, Strategy, SupervisorBuilder,
 };
 
 use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
@@ -68,6 +68,7 @@ use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 pub struct RuntimeBuilder {
     graph: Option<Graph>,
     strategy: Strategy,
+    start_mode: StartMode,
     restart: RestartPolicy,
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
@@ -92,6 +93,14 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn strategy(mut self, strategy: Strategy) -> Self {
         self.strategy = strategy;
+        self
+    }
+
+    /// Sets whether actors start concurrently or wait for `on_start` in
+    /// declaration order.
+    #[must_use]
+    pub fn start_mode(mut self, start_mode: StartMode) -> Self {
+        self.start_mode = start_mode;
         self
     }
 
@@ -120,7 +129,9 @@ impl RuntimeBuilder {
     ///
     /// Returns an error if the supervisor configuration is invalid.
     pub fn build(self) -> Result<Runtime, tokio_supervisor::SupervisorBuildError> {
-        let mut supervisor = SupervisorBuilder::new().strategy(self.strategy);
+        let mut supervisor = SupervisorBuilder::new()
+            .strategy(self.strategy)
+            .start_mode(self.start_mode);
         if let Some(intensity) = self.restart_intensity {
             supervisor = supervisor.restart_intensity(intensity);
         }
@@ -148,6 +159,7 @@ impl std::fmt::Debug for RuntimeBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeBuilder")
             .field("strategy", &self.strategy)
+            .field("start_mode", &self.start_mode)
             .field("restart", &self.restart)
             .field("shutdown", &self.shutdown)
             .field("restart_intensity", &self.restart_intensity)

@@ -12,6 +12,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
+    sync::oneshot,
     task::JoinHandle,
     time::{Instant as TokioInstant, sleep_until},
 };
@@ -37,6 +38,7 @@ pub(crate) struct RunnerStart {
     pub(crate) mailbox_capacity: usize,
     pub(crate) observability: GraphObservability,
     pub(crate) rebind_policy: RebindPolicy,
+    pub(crate) ready: oneshot::Sender<()>,
 }
 
 /// Type-erased actor runner.
@@ -79,8 +81,13 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             timers,
             state_timeout: Mutex::new(None),
             monitors,
+            ready: Mutex::new(Some(start.ready)),
+            continuations: Mutex::new(Default::default()),
         };
         let mut actor = self.actor.clone();
+        if !actor.readiness_gated() {
+            ctx.mark_ready();
+        }
         let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
 
         Box::pin(async move {
@@ -254,11 +261,25 @@ impl RunnableActor {
     where
         F: Future<Output = ()>,
     {
+        self.run_until_ready(shutdown, rebind, || {}).await
+    }
+
+    pub(crate) async fn run_until_ready<F, R>(
+        &self,
+        shutdown: F,
+        rebind: RebindPolicy,
+        ready: R,
+    ) -> Result<(), ActorRunError>
+    where
+        F: Future<Output = ()>,
+        R: FnOnce(),
+    {
         let _active_run = ActiveActorRun::start(&self.inner)?;
         let actor_id = self.inner.actor_id.clone();
         let actor_shutdown = CancellationToken::new();
         let mut shutdown = std::pin::pin!(shutdown);
         let actor_span = self.inner.observability.actor_span(&actor_id);
+        let (ready_tx, mut ready_rx) = oneshot::channel();
         let mut actor_task = AbortOnDrop::new(tokio::spawn(
             self.inner
                 .runner
@@ -267,6 +288,7 @@ impl RunnableActor {
                     mailbox_capacity: self.inner.mailbox_capacity,
                     observability: self.inner.observability.clone(),
                     rebind_policy: rebind,
+                    ready: ready_tx,
                 })
                 .instrument(actor_span),
         ));
@@ -277,10 +299,16 @@ impl RunnableActor {
         let mut shutdown_requested = false;
         let mut shutdown_deadline = None;
         let mut aborted_after_timeout = false;
+        let mut ready = Some(ready);
         let result = loop {
             tokio::select! {
                 biased;
                 joined = &mut actor_task => break joined,
+                result = &mut ready_rx, if ready.is_some() => {
+                    if result.is_ok() && let Some(ready) = ready.take() {
+                        ready();
+                    }
+                }
                 _ = shutdown.as_mut(), if !shutdown_requested => {
                     shutdown_requested = true;
                     actor_shutdown.cancel();

@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use crate::{
-    child::ChildKind,
-    context::{ChildContext, SupervisorToken},
+    child::{ChildKind, ChildReadiness},
+    context::{ChildContext, ChildReady, ReadySignal, SupervisorToken},
     error::SupervisorError,
     event::{EventSink, SupervisorEvent},
     runtime::{
@@ -79,6 +79,16 @@ impl SupervisorRuntime {
                 generation,
                 child_token,
                 SupervisorToken::new(self.group_token.clone()),
+                (child.definition.readiness == ChildReadiness::Explicit).then(|| {
+                    ReadySignal::new(
+                        self.ready_tx.clone(),
+                        ChildReady {
+                            key,
+                            instance,
+                            generation,
+                        },
+                    )
+                }),
             );
             let kind = child.definition.kind.clone();
             let nested_channels = entry.nested_channels.clone();
@@ -180,7 +190,11 @@ impl SupervisorRuntime {
             })?;
             let child = &mut entry.runtime;
             child.has_started = true;
-            child.state = RuntimeChildState::Running;
+            child.state = if child.definition.readiness == ChildReadiness::Immediate {
+                RuntimeChildState::Running
+            } else {
+                RuntimeChildState::Starting
+            };
             child.abort_handle = Some(abort_handle);
         }
         if !counted_before {
@@ -195,10 +209,14 @@ impl SupervisorRuntime {
                 generation,
             },
         );
-        self.send_event(SupervisorEvent::ChildStarted {
-            id: child_id,
-            generation,
-        });
+        if self.children[key].runtime.state == RuntimeChildState::Running {
+            self.send_event(SupervisorEvent::ChildStarted {
+                id: child_id,
+                generation,
+            });
+        } else {
+            self.publish_snapshot();
+        }
 
         Ok((old_generation, generation))
     }

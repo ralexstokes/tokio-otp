@@ -1,4 +1,38 @@
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug)]
+pub(crate) struct ChildReady {
+    pub(crate) key: usize,
+    pub(crate) instance: u64,
+    pub(crate) generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReadySignal(Arc<Mutex<Option<ReadySignalInner>>>);
+
+#[derive(Debug)]
+struct ReadySignalInner {
+    sender: mpsc::UnboundedSender<ChildReady>,
+    ready: ChildReady,
+}
+
+impl ReadySignal {
+    pub(crate) fn new(sender: mpsc::UnboundedSender<ChildReady>, ready: ChildReady) -> Self {
+        Self(Arc::new(Mutex::new(Some(ReadySignalInner {
+            sender,
+            ready,
+        }))))
+    }
+
+    fn send(&self) {
+        if let Some(signal) = self.0.lock().expect("ready signal poisoned").take() {
+            let _ = signal.sender.send(signal.ready);
+        }
+    }
+}
 
 /// Runtime context passed to a child function on each (re)start.
 ///
@@ -12,6 +46,7 @@ pub struct ChildContext {
     generation: u64,
     token: CancellationToken,
     supervisor: SupervisorToken,
+    ready: Option<ReadySignal>,
 }
 
 impl ChildContext {
@@ -20,12 +55,14 @@ impl ChildContext {
         generation: u64,
         token: CancellationToken,
         supervisor: SupervisorToken,
+        ready: Option<ReadySignal>,
     ) -> Self {
         Self {
             id,
             generation,
             token,
             supervisor,
+            ready,
         }
     }
 
@@ -49,6 +86,18 @@ impl ChildContext {
     /// Returns a read-only view of the supervisor's cancellation state.
     pub fn supervisor_token(&self) -> &SupervisorToken {
         &self.supervisor
+    }
+
+    /// Reports that this child has completed initialization.
+    ///
+    /// The first call for an explicitly readiness-gated child transitions it
+    /// from starting to running. Further calls, and calls made by children
+    /// without [`ChildSpec::wait_for_ready`](crate::ChildSpec::wait_for_ready),
+    /// are harmless.
+    pub fn mark_ready(&self) {
+        if let Some(ready) = &self.ready {
+            ready.send();
+        }
     }
 }
 

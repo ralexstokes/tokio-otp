@@ -13,7 +13,7 @@ use crate::{
     error::{ControlError, RestartMonitorError, SupervisorError},
     event::SupervisorEvent,
     monitor::RestartMonitor,
-    snapshot::{ChildMembershipView, SupervisorSnapshot},
+    snapshot::{ChildMembershipView, ChildStateView, SupervisorSnapshot, SupervisorStateView},
 };
 
 type SupervisorJoinHandle = JoinHandle<Result<(), SupervisorError>>;
@@ -388,6 +388,38 @@ impl SupervisorHandle {
                 "missing supervisor completion result".to_owned(),
             ))
         })
+    }
+
+    /// Waits until every current child has completed startup.
+    ///
+    /// Explicitly gated children complete startup when they call
+    /// [`ChildContext::mark_ready`](crate::ChildContext::mark_ready); ordinary
+    /// children are ready as soon as they are spawned. An empty supervisor is
+    /// ready immediately.
+    pub async fn wait_started(&self) -> Result<(), SupervisorError> {
+        let mut snapshots = self.snapshots_rx();
+        loop {
+            let snapshot = snapshots.borrow().clone();
+            if snapshot
+                .children
+                .iter()
+                .filter(|child| child.membership == ChildMembershipView::Active)
+                .all(|child| child.state == ChildStateView::Running)
+            {
+                return Ok(());
+            }
+            if snapshot.state == SupervisorStateView::Stopped {
+                self.wait().await?;
+                return Err(SupervisorError::Internal(
+                    "supervisor stopped before all children reported readiness".to_owned(),
+                ));
+            }
+            snapshots.changed().await.map_err(|_| {
+                SupervisorError::Internal(
+                    "supervisor stopped before all children reported readiness".to_owned(),
+                )
+            })?;
+        }
     }
 
     /// Captures a direct child's current generation and returns an awaitable

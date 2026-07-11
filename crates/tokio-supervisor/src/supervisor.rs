@@ -4,6 +4,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{Instrument, info_span};
 
 use crate::{
+    StartMode,
     child::{ChildDefinition, ChildKind, ChildResult},
     context::ChildContext,
     error::SupervisorError,
@@ -36,6 +37,7 @@ pub struct Supervisor {
 #[derive(Clone)]
 pub(crate) struct SupervisorConfig {
     pub(crate) strategy: Strategy,
+    pub(crate) start_mode: StartMode,
     pub(crate) restart_intensity: RestartIntensity,
     pub(crate) auto_shutdown: AutoShutdown,
     pub(crate) children: Vec<ChildDefinition>,

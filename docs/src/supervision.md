@@ -97,6 +97,37 @@ Intensity can be set on the supervisor as a whole
 (`SupervisorBuilder::restart_intensity`) or overridden per child, as we did
 for the press.
 
+## Ordered startup and readiness
+
+Supervisors start children concurrently by default. For dependency-ordered
+pipelines, select `StartMode::Sequential` and opt each plain task into a
+readiness signal:
+
+```rust,ignore
+let database = ChildSpec::new("database", |ctx| async move {
+    connect_and_migrate().await?;
+    ctx.mark_ready();
+    ctx.shutdown_token().cancelled().await;
+    Ok(())
+})
+.wait_for_ready();
+
+let supervisor = SupervisorBuilder::new()
+    .start_mode(StartMode::Sequential)
+    .child(database)
+    .child(api)
+    .build()?;
+```
+
+The API child is not spawned until the database reports readiness. The same
+ordering is used when `OneForAll` or `RestForOne` restarts multiple children.
+Plain children without `wait_for_ready()` count as ready immediately. Actor
+children are gated automatically: their `on_start` hook is the readiness
+boundary. Use `ActorContext::continue_with(message)` inside `on_start` to queue
+expensive follow-up work as the actor's next message without delaying later
+siblings. Call `handle.wait_started().await` when code outside the tree needs
+to wait until all current children are running.
+
 ## Strategies
 
 The [`Strategy`] decides who is affected when a child fails:
