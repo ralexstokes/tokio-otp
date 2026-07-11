@@ -106,6 +106,123 @@ async fn cancelling_send_after_prevents_delivery() {
 }
 
 #[derive(Clone)]
+struct StateTimeout {
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for StateTimeout {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let _timer = ctx.state_timeout("timeout", Duration::from_millis(20));
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn state_timeout_fires() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, _) = build_runtime(StateTimeout {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("state timeout fired"),
+        Some("timeout")
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
+struct ReplacedStateTimeout {
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for ReplacedStateTimeout {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let old = ctx.state_timeout("old", Duration::from_millis(20));
+        let _new = ctx.state_timeout("new", Duration::from_millis(40));
+        assert!(old.is_cancelled());
+
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_state_timeout_cancels_previous_timeout() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, _) = build_runtime(ReplacedStateTimeout {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("replacement state timeout fired"),
+        Some("new")
+    );
+    assert!(
+        timeout(Duration::from_millis(40), observed_rx.recv())
+            .await
+            .is_err(),
+        "replaced state timeout delivered a stale message"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
+struct ClearedStateTimeout {
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for ClearedStateTimeout {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let timer = ctx.state_timeout("stale", Duration::from_millis(20));
+        ctx.clear_state_timeout();
+        assert!(timer.is_cancelled());
+
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn clearing_state_timeout_prevents_delivery() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, _) = build_runtime(ClearedStateTimeout {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    assert!(
+        timeout(Duration::from_millis(60), observed_rx.recv())
+            .await
+            .is_err(),
+        "cleared state timeout delivered a message"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
 struct Interval {
     observed: mpsc::UnboundedSender<usize>,
 }
@@ -196,6 +313,54 @@ async fn restart_cancels_previous_incarnations_timers() {
             .await
             .is_err(),
         "a previous incarnation delivered a stale timer message"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
+struct RestartingStateTimeout {
+    runs: Arc<AtomicUsize>,
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for RestartingStateTimeout {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
+            let _old = ctx.state_timeout("old", Duration::from_millis(150));
+            return Err::<(), BoxError>(Box::new(io::Error::other("restart")));
+        }
+
+        let _new = ctx.state_timeout("new", Duration::from_millis(10));
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_cancels_previous_incarnations_state_timeout() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, _) = build_runtime(RestartingStateTimeout {
+        runs: Arc::new(AtomicUsize::new(0)),
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("new incarnation state timeout fired"),
+        Some("new")
+    );
+    assert!(
+        timeout(Duration::from_millis(200), observed_rx.recv())
+            .await
+            .is_err(),
+        "a previous incarnation delivered a stale state timeout message"
     );
 
     handle.shutdown_and_wait().await.expect("clean shutdown");

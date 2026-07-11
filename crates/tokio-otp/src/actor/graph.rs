@@ -77,6 +77,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             shutdown: actor_shutdown,
             observability,
             timers,
+            state_timeout: std::sync::Mutex::new(None),
             monitors,
         };
         let mut actor = self.actor.clone();

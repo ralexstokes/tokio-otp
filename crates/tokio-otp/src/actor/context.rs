@@ -1,4 +1,8 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::{
     sync::{mpsc::error::TryRecvError, oneshot, watch},
@@ -370,6 +374,7 @@ pub struct ActorContext<M> {
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
     pub(crate) timers: ActorTimers,
+    pub(crate) state_timeout: Mutex<Option<TimerRef>>,
     pub(crate) monitors: ActorMonitors,
 }
 
@@ -453,6 +458,12 @@ impl<M: Send + 'static> ActorContext<M> {
         let timer = TimerRef {
             cancellation: cancellation.clone(),
         };
+        self.spawn_send_after(message, delay, cancellation);
+
+        timer
+    }
+
+    fn spawn_send_after(&self, message: M, delay: Duration, cancellation: CancellationToken) {
         let myself = self.myself();
 
         tokio::spawn(async move {
@@ -468,8 +479,53 @@ impl<M: Send + 'static> ActorContext<M> {
                 }
             }
         });
+    }
+
+    /// Sends `message` after `delay`, replacing the current state timeout.
+    ///
+    /// Scheduling a new state timeout cancels the previous one. Call this when
+    /// entering a timed state, and call [`clear_state_timeout`](Self::clear_state_timeout)
+    /// when entering an untimed state. Like other timers, the timeout is
+    /// cancelled automatically if this actor incarnation stops or restarts.
+    ///
+    /// Cancellation cannot retract a timeout message already accepted by the
+    /// mailbox. The message should identify the state (or a generation) it was
+    /// scheduled for so the handler can reject stale timeouts. Replacing or
+    /// clearing the slot cancels its token even if it already fired, so a
+    /// retained handle will then report [`TimerRef::is_cancelled`] as `true`.
+    pub fn state_timeout(&self, message: M, delay: Duration) -> TimerRef {
+        self.clear_state_timeout();
+
+        let cancellation = self.timers.child_token();
+        let timer = TimerRef {
+            cancellation: cancellation.clone(),
+        };
+        let previous = self
+            .state_timeout
+            .lock()
+            .expect("state timeout lock poisoned")
+            .replace(timer.clone());
+        if let Some(previous) = previous {
+            previous.cancel();
+        }
+        self.spawn_send_after(message, delay, cancellation);
 
         timer
+    }
+
+    /// Cancels and clears the current state timeout, if any.
+    ///
+    /// Call this when entering a state that has no timeout. A timeout message
+    /// already accepted by the mailbox cannot be retracted.
+    pub fn clear_state_timeout(&self) {
+        let timeout = self
+            .state_timeout
+            .lock()
+            .expect("state timeout lock poisoned")
+            .take();
+        if let Some(timeout) = timeout {
+            timeout.cancel();
+        }
     }
 
     /// Sends a clone of `message` to this actor after every `period`.
