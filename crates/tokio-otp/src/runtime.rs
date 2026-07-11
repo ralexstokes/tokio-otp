@@ -272,13 +272,13 @@ impl RuntimeHandle {
         label: impl Into<String>,
         actor: A,
         actor_options: ActorOptions<A::Msg>,
-        options: DynamicActorOptions,
+        dynamic_options: DynamicActorOptions,
     ) -> Result<ActorRef<A::Msg>, ControlError> {
         let actor = self
             .actors
             .actor_factory
             .actor_with_options(label, actor, actor_options);
-        self.add_constructed_actor(actor, options).await
+        self.add_constructed_actor(actor, dynamic_options).await
     }
 
     async fn add_constructed_actor<M>(

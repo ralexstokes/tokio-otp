@@ -1,6 +1,7 @@
 use std::{
     any::{Any, TypeId, type_name},
     collections::HashMap,
+    fmt,
     marker::PhantomData,
     sync::{
         Arc,
@@ -29,10 +30,46 @@ pub trait MessageSize {
 }
 
 /// Per-actor registration options.
-#[derive(Clone, Debug)]
+///
+/// Options compose independently, so an actor can use a non-default mailbox
+/// and message-size observation together:
+///
+/// ```
+/// use tokio_otp::{ActorOptions, MailboxMode, MessageSize};
+///
+/// struct Snapshot(Vec<u8>);
+///
+/// impl MessageSize for Snapshot {
+///     fn size_hint(&self) -> usize {
+///         self.0.len()
+///     }
+/// }
+///
+/// let options: ActorOptions<Snapshot> = ActorOptions::new()
+///     .mailbox(MailboxMode::Conflate)
+///     .message_size();
+/// ```
 pub struct ActorOptions<M> {
     pub(crate) mailbox_mode: MailboxMode<M>,
     pub(crate) size_hint: Option<fn(&M) -> usize>,
+}
+
+impl<M> Clone for ActorOptions<M> {
+    fn clone(&self) -> Self {
+        Self {
+            mailbox_mode: self.mailbox_mode.clone(),
+            size_hint: self.size_hint,
+        }
+    }
+}
+
+impl<M> fmt::Debug for ActorOptions<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActorOptions")
+            .field("mailbox_mode", &self.mailbox_mode)
+            .field("size_hint", &self.size_hint)
+            .finish()
+    }
 }
 
 impl<M> ActorOptions<M> {
@@ -442,7 +479,18 @@ fn short_type_name(type_name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::short_type_name;
+    use super::{ActorOptions, MailboxMode, short_type_name};
+
+    struct OpaqueMessage;
+
+    #[test]
+    fn actor_options_clone_and_debug_do_not_bound_the_message_type() {
+        let options: ActorOptions<OpaqueMessage> =
+            ActorOptions::new().mailbox(MailboxMode::Conflate);
+
+        let cloned = options.clone();
+        assert_eq!(format!("{cloned:?}"), format!("{options:?}"));
+    }
 
     #[test]
     fn short_type_name_handles_plain_path_qualified_and_generics() {
