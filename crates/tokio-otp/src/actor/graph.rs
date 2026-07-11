@@ -3,7 +3,7 @@ use std::{
     io::Error as IoError,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
@@ -77,7 +77,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
             shutdown: actor_shutdown,
             observability,
             timers,
-            state_timeout: std::sync::Mutex::new(None),
+            state_timeout: Mutex::new(None),
             monitors,
         };
         let mut actor = self.actor.clone();

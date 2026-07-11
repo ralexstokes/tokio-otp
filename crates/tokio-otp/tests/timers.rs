@@ -223,6 +223,86 @@ async fn clearing_state_timeout_prevents_delivery() {
 }
 
 #[derive(Clone)]
+struct SequentialStateTimeouts {
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for SequentialStateTimeouts {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        ctx.state_timeout("first", Duration::from_millis(20));
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+            if message == "first" {
+                ctx.state_timeout("second", Duration::from_millis(20));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn state_timeout_can_be_rescheduled_after_firing() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, _) = build_runtime(SequentialStateTimeouts {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("first state timeout fired"),
+        Some("first")
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("second state timeout fired"),
+        Some("second")
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
+struct ClearsEmptyStateTimeout {
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for ClearsEmptyStateTimeout {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        ctx.clear_state_timeout();
+        ctx.state_timeout("timeout", Duration::from_millis(20));
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn clearing_empty_state_timeout_is_a_noop() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (runtime, _) = build_runtime(ClearsEmptyStateTimeout {
+        observed: observed_tx,
+    });
+    let handle = runtime.spawn();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("state timeout fired after empty clear"),
+        Some("timeout")
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
 struct Interval {
     observed: mpsc::UnboundedSender<usize>,
 }
