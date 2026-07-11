@@ -1,17 +1,15 @@
 use std::{fmt, sync::Arc, time::Duration};
 
 use tokio::{
-    sync::{
-        mpsc::{self, error::TryRecvError},
-        oneshot, watch,
-    },
+    sync::{mpsc::error::TryRecvError, oneshot, watch},
     time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::actor::{
     binding::{
-        ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxRef, MessageSizeObserver,
+        ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxReceiver, MailboxRef,
+        MessageSizeObserver, SendOutcome,
     },
     builder::MessageSize,
     error::{CallError, SendError},
@@ -125,10 +123,12 @@ impl<M> ActorRef<M> {
 
     /// Sends a message to the target actor.
     ///
-    /// This waits until the actor has a bound mailbox, waits for mailbox
-    /// capacity, and rides through restart windows when the actor is expected
-    /// to rebind. It returns an error only when the actor has terminated with
-    /// no restart scheduled, or when the binding source has been dropped.
+    /// This waits until the actor has a bound mailbox, waits for capacity when
+    /// the actor uses a FIFO queue, and rides through restart windows when the
+    /// actor is expected to rebind. Conflating mailboxes replace stale unread
+    /// state immediately instead of waiting for capacity. This returns an
+    /// error only when the actor has terminated with no restart scheduled, or
+    /// when the binding source has been dropped.
     ///
     /// Cancelling this future while it is waiting drops the message.
     ///
@@ -160,13 +160,14 @@ impl<M> ActorRef<M> {
             };
 
             match mailbox.send_retaining(message).await {
-                Ok(()) => {
+                SendOutcome::Accepted { conflated } => {
                     self.observe_send(MessageOperation::Send, None);
                     self.stats.record_send(true);
+                    self.stats.record_conflated(conflated);
                     self.record_message_size(message_size);
                     return Ok(());
                 }
-                Err(returned) => {
+                SendOutcome::Closed(returned) => {
                     self.observe_send(MessageOperation::Send, Some(SendRejection::MailboxClosed));
                     message = returned;
                     if let Err(error) = self
@@ -183,6 +184,9 @@ impl<M> ActorRef<M> {
     }
 
     /// Attempts to send a message without waiting for mailbox capacity.
+    ///
+    /// A full FIFO queue returns [`SendError::MailboxFull`]. A conflating
+    /// mailbox instead accepts the message and replaces stale unread state.
     pub fn try_send(&self, message: M) -> Result<(), SendError> {
         let message_size = self
             .message_size
@@ -197,10 +201,14 @@ impl<M> ActorRef<M> {
             result.as_ref().err().map(send_rejection),
         );
         self.stats.record_send(result.is_ok());
-        if result.is_ok() {
-            self.record_message_size(message_size);
+        match result {
+            Ok(conflated) => {
+                self.stats.record_conflated(conflated);
+                self.record_message_size(message_size);
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
-        result
     }
 
     /// Sends a request and waits for the actor to answer through the
@@ -208,6 +216,11 @@ impl<M> ActorRef<M> {
     ///
     /// This waits for the same actor binding conditions as [`send`](Self::send).
     /// Cancelling this future while it is waiting drops the request message.
+    ///
+    /// Do not use `call` with a conflating mailbox: a newer message may replace
+    /// the request before it is handled, in which case this returns
+    /// [`CallError::ReplyDropped`]. Conflating mailboxes are for state
+    /// snapshots rather than request/response commands.
     ///
     /// ```ignore
     /// enum Msg { Get(Reply<u64>) }
@@ -353,7 +366,7 @@ impl<T> fmt::Debug for Reply<T> {
 /// [`run_blocking`](Self::run_blocking) for blocking work.
 pub struct ActorContext<M> {
     pub(crate) id: Arc<str>,
-    pub(crate) mailbox: mpsc::Receiver<M>,
+    pub(crate) mailbox: MailboxReceiver<M>,
     pub(crate) myself: ActorRef<M>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
@@ -383,8 +396,10 @@ impl<M: Send + 'static> ActorContext<M> {
 
     /// Sends `message` to this actor after `delay` has elapsed.
     ///
-    /// Delivery uses the ordinary mailbox and waits for capacity. The timer is
-    /// cancelled automatically if this actor incarnation stops or restarts.
+    /// Delivery uses the actor's ordinary mailbox policy: FIFO queues wait for
+    /// capacity, while conflating mailboxes replace stale unread state. The
+    /// timer is cancelled automatically if this actor incarnation stops or
+    /// restarts.
     pub fn send_after(&self, message: M, delay: Duration) -> TimerRef {
         let cancellation = self.timers.child_token();
         let timer = TimerRef {
@@ -411,10 +426,11 @@ impl<M: Send + 'static> ActorContext<M> {
 
     /// Sends a clone of `message` to this actor after every `period`.
     ///
-    /// The first message is sent after one full period. Delivery waits for
-    /// mailbox capacity, and missed ticks are skipped rather than accumulated.
-    /// The timer stops on cancellation, delivery failure, or when this actor
-    /// incarnation stops or restarts.
+    /// The first message is sent after one full period. FIFO delivery waits
+    /// for mailbox capacity; conflating delivery replaces stale unread state.
+    /// Missed ticks are skipped rather than accumulated. The timer stops on
+    /// cancellation, delivery failure, or when this actor incarnation stops or
+    /// restarts.
     ///
     /// # Panics
     ///

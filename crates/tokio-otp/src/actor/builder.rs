@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::actor::{
-    binding::{BindingCore, BindingLifecycle},
+    binding::{BindingCore, BindingLifecycle, MailboxMode},
     context::ActorRef,
     error::GraphBuildError,
     graph::{ErasedRunner, Graph, RunnableActor, RunnableActorParts, TypedRunner},
@@ -61,16 +61,17 @@ impl<M> ActorSlot<M> {
 /// [`slot`](Self::slot) to create refs first and [`define`](Self::define) to
 /// fill the slots once actor values have been wired.
 ///
-/// # Bounded mailboxes and cycles
+/// # Mailboxes and cycles
 ///
-/// Every mailbox is bounded ([`mailbox_capacity`](Self::mailbox_capacity)),
-/// so backpressure propagates through [`send`](ActorRef::send). In a cyclic
-/// graph this can deadlock: two actors that `send` to each other while both
-/// mailboxes are full wait forever, and a [`call`](ActorRef::call) cycle
-/// deadlocks at depth one because the callee cannot answer while the caller
-/// awaits the reply. Idioms: use [`try_send`](ActorRef::try_send) on
-/// feedback edges, and `call` only "downhill" along a DAG ordering of the
-/// graph.
+/// Mailboxes use bounded FIFO queues by default, with capacity configured by
+/// [`mailbox_capacity`](Self::mailbox_capacity). Backpressure through
+/// [`send`](ActorRef::send) can deadlock a cyclic graph: two actors that send
+/// to each other while both queues are full wait forever, and a
+/// [`call`](ActorRef::call) cycle deadlocks at depth one because the callee
+/// cannot answer while the caller awaits the reply. Idioms: use
+/// [`try_send`](ActorRef::try_send) on feedback edges, select a
+/// [`MailboxMode::Conflate`](crate::MailboxMode::Conflate) mailbox for lossy
+/// state snapshots, and call only "downhill" along a DAG ordering.
 pub struct GraphBuilder {
     builder_id: u64,
     name: Option<String>,
@@ -86,6 +87,7 @@ struct Slot {
     message_type: TypeId,
     binding: Arc<dyn Any + Send + Sync>,
     binding_lifecycle: Arc<dyn BindingLifecycle>,
+    mailbox_mode: Option<Box<dyn Any + Send + Sync>>,
     runner: Option<Arc<dyn ErasedRunner>>,
 }
 
@@ -123,6 +125,10 @@ impl GraphBuilder {
     }
 
     /// Sets the bounded mailbox capacity used for every actor in the graph.
+    ///
+    /// This is the FIFO queue capacity and the maximum number of distinct
+    /// unread keys for keyed conflation. Unkeyed conflation always has
+    /// capacity 1 and ignores this setting.
     pub fn mailbox_capacity(&mut self, capacity: usize) -> &mut Self {
         self.mailbox_capacity = capacity;
         self
@@ -149,7 +155,16 @@ impl GraphBuilder {
     /// The name is fixed when the slot is opened because it is used as the
     /// actor label in observability.
     pub fn slot<M: Send + 'static>(&mut self, actor_id: &str) -> (ActorSlot<M>, ActorRef<M>) {
-        match self.push_slot::<M>(actor_id) {
+        self.slot_with_mailbox(actor_id, MailboxMode::Queue)
+    }
+
+    /// Opens a named slot with an explicit mailbox mode.
+    pub fn slot_with_mailbox<M: Send + 'static>(
+        &mut self,
+        actor_id: &str,
+        mailbox_mode: MailboxMode<M>,
+    ) -> (ActorSlot<M>, ActorRef<M>) {
+        match self.push_slot_with_mailbox(actor_id, mailbox_mode) {
             Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
             None => (
                 ActorSlot::new(self.builder_id, None),
@@ -168,7 +183,10 @@ impl GraphBuilder {
         actor_id: &str,
     ) -> (ActorSlot<M>, ActorRef<M>) {
         match self.push_sized_slot::<M>(actor_id) {
-            Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
+            Some((index, actor_ref)) => {
+                self.slots[index].mailbox_mode = Some(Box::new(MailboxMode::<M>::Queue));
+                (ActorSlot::new(self.builder_id, Some(index)), actor_ref)
+            }
             None => (
                 ActorSlot::new(self.builder_id, None),
                 ActorRef::detached_with_message_size(actor_id.into()),
@@ -202,13 +220,38 @@ impl GraphBuilder {
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
             unreachable!("message type enforced by ActorSlot")
         };
-        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
+        let mailbox_mode = slot
+            .mailbox_mode
+            .take()
+            .expect("unfilled slot retains mailbox mode")
+            .downcast::<MailboxMode<A::Msg>>()
+            .unwrap_or_else(|_| unreachable!("message type enforced by ActorSlot"));
+        slot.runner = Some(Arc::new(TypedRunner {
+            actor,
+            binding,
+            mailbox_mode: *mailbox_mode,
+        }));
     }
 
     /// Registers an actor and returns its typed, restart-stable ref.
     pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
         let registration = self.push_slot::<A::Msg>(actor_id);
-        self.finish_actor_registration(registration, actor, || ActorRef::detached(actor_id.into()))
+        self.finish_actor_registration(registration, actor, MailboxMode::Queue, || {
+            ActorRef::detached(actor_id.into())
+        })
+    }
+
+    /// Registers an actor with an explicit mailbox mode.
+    pub fn actor_with_mailbox<A: RawActor>(
+        &mut self,
+        actor_id: &str,
+        actor: A,
+        mailbox_mode: MailboxMode<A::Msg>,
+    ) -> ActorRef<A::Msg> {
+        let registration = self.push_slot::<A::Msg>(actor_id);
+        self.finish_actor_registration(registration, actor, mailbox_mode, || {
+            ActorRef::detached(actor_id.into())
+        })
     }
 
     /// Registers an actor with message-size observation enabled.
@@ -222,7 +265,7 @@ impl GraphBuilder {
         A::Msg: MessageSize,
     {
         let registration = self.push_sized_slot::<A::Msg>(actor_id);
-        self.finish_actor_registration(registration, actor, || {
+        self.finish_actor_registration(registration, actor, MailboxMode::Queue, || {
             ActorRef::detached_with_message_size(actor_id.into())
         })
     }
@@ -231,6 +274,7 @@ impl GraphBuilder {
         &mut self,
         registration: Option<(usize, ActorRef<A::Msg>)>,
         actor: A,
+        mailbox_mode: MailboxMode<A::Msg>,
         detached: impl FnOnce() -> ActorRef<A::Msg>,
     ) -> ActorRef<A::Msg> {
         let Some((index, actor_ref)) = registration else {
@@ -240,7 +284,11 @@ impl GraphBuilder {
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
             unreachable!("message type id already verified")
         };
-        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
+        slot.runner = Some(Arc::new(TypedRunner {
+            actor,
+            binding,
+            mailbox_mode,
+        }));
         actor_ref
     }
 
@@ -251,6 +299,16 @@ impl GraphBuilder {
     /// fields; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
     pub fn add<A: RawActor>(&mut self, actor: A) -> ActorRef<A::Msg> {
+        self.add_with_mailbox(actor, MailboxMode::Queue)
+    }
+
+    /// Registers an actor under its unqualified type name with an explicit
+    /// mailbox mode.
+    pub fn add_with_mailbox<A: RawActor>(
+        &mut self,
+        actor: A,
+        mailbox_mode: MailboxMode<A::Msg>,
+    ) -> ActorRef<A::Msg> {
         let base = short_type_name(type_name::<A>());
         let mut actor_id = base.to_owned();
         let mut suffix = 2;
@@ -258,7 +316,7 @@ impl GraphBuilder {
             actor_id = format!("{base}-{suffix}");
             suffix += 1;
         }
-        self.actor(&actor_id, actor)
+        self.actor_with_mailbox(&actor_id, actor, mailbox_mode)
     }
 
     /// Validates the graph and returns an immutable [`Graph`].
@@ -313,6 +371,16 @@ impl GraphBuilder {
         ))
     }
 
+    fn push_slot_with_mailbox<M: Send + 'static>(
+        &mut self,
+        actor_id: &str,
+        mailbox_mode: MailboxMode<M>,
+    ) -> Option<(usize, ActorRef<M>)> {
+        let (index, actor_ref) = self.push_slot(actor_id)?;
+        self.slots[index].mailbox_mode = Some(Box::new(mailbox_mode));
+        Some((index, actor_ref))
+    }
+
     /// Creates a named slot and returns its index plus typed ref.
     fn push_slot<M: Send + 'static>(&mut self, actor_id: &str) -> Option<(usize, ActorRef<M>)> {
         self.push_slot_with_core(actor_id, BindingCore::<M>::new)
@@ -355,6 +423,7 @@ impl GraphBuilder {
             message_type: TypeId::of::<M>(),
             binding: core.clone(),
             binding_lifecycle: core,
+            mailbox_mode: None,
             runner: None,
         });
         Some((index, actor_ref))

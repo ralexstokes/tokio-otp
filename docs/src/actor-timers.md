@@ -47,7 +47,8 @@ Both return a cloneable `TimerRef`; calling `cancel` on any clone cancels the
 same timer. Dropping a timer ref does not cancel it.
 
 Timer messages use the normal bounded mailbox. When the mailbox is full,
-delivery waits for capacity just like `ActorRef::send`. Intervals do not build
+FIFO delivery waits for capacity just like `ActorRef::send`; conflating
+mailboxes replace stale unread state instead. Intervals do not build
 an unbounded backlog while waiting: missed ticks are skipped. A one-shot timer
 that has fired is complete, not cancelled, so its ref still reports
 `is_cancelled() == false`.

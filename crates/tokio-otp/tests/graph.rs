@@ -1180,6 +1180,7 @@ mod runnable_actor {
                 actor_id: "worker".to_owned(),
                 messages_received: 0,
                 messages_accepted: 2,
+                messages_conflated: 0,
                 message_bytes_accepted: None,
                 sends_rejected: 1,
                 mailbox_depth: 2,

@@ -12,7 +12,6 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    sync::mpsc,
     task::JoinHandle,
     time::{Instant as TokioInstant, sleep_until},
 };
@@ -20,7 +19,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::actor::{
-    binding::{ActorStats, BindingCore, BindingGuard, BindingLifecycle, MailboxRef, RebindPolicy},
+    binding::{
+        ActorStats, BindingCore, BindingGuard, BindingLifecycle, MailboxMode, MailboxRef,
+        RebindPolicy, mailbox,
+    },
     builder::{DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY, MessageSize},
     context::{ActorContext, ActorRef, ActorTimers},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
@@ -48,6 +50,7 @@ pub(crate) trait ErasedRunner: Send + Sync {
 pub(crate) struct TypedRunner<A: RawActor> {
     pub(crate) actor: A,
     pub(crate) binding: Arc<BindingCore<A::Msg>>,
+    pub(crate) mailbox_mode: MailboxMode<A::Msg>,
 }
 
 impl<A: RawActor> ErasedRunner for TypedRunner<A> {
@@ -55,7 +58,7 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
         let actor_shutdown = start.shutdown;
         let timers = ActorTimers::new(&actor_shutdown);
         let observability = start.observability;
-        let (sender, mailbox) = mpsc::channel(start.mailbox_capacity);
+        let (sender, mailbox) = mailbox(&self.mailbox_mode, start.mailbox_capacity);
         let actor_id = self.binding.actor_id().clone();
         let bound_mailbox = BindingGuard::bind(
             self.binding.clone(),
@@ -430,9 +433,20 @@ impl RunnableActorFactory {
         label: impl Into<String>,
         actor: A,
     ) -> (RunnableActor, ActorRef<A::Msg>) {
+        self.actor_with_mailbox(label, actor, MailboxMode::Queue)
+    }
+
+    /// Constructs a runnable actor with an explicit mailbox mode and its
+    /// stable typed ref.
+    pub fn actor_with_mailbox<A: RawActor>(
+        &self,
+        label: impl Into<String>,
+        actor: A,
+        mailbox_mode: MailboxMode<A::Msg>,
+    ) -> (RunnableActor, ActorRef<A::Msg>) {
         let actor_id: Arc<str> = label.into().into();
         let binding = Arc::new(BindingCore::<A::Msg>::new(actor_id.clone()));
-        self.actor_with_binding(actor_id, actor, binding)
+        self.actor_with_binding(actor_id, actor, binding, mailbox_mode)
     }
 
     /// Constructs a runnable actor with message-size observation enabled.
@@ -450,7 +464,7 @@ impl RunnableActorFactory {
             actor_id.clone(),
             MessageSize::size_hint,
         ));
-        self.actor_with_binding(actor_id, actor, binding)
+        self.actor_with_binding(actor_id, actor, binding, MailboxMode::Queue)
     }
 
     fn actor_with_binding<A: RawActor>(
@@ -458,12 +472,17 @@ impl RunnableActorFactory {
         actor_id: Arc<str>,
         actor: A,
         binding: Arc<BindingCore<A::Msg>>,
+        mailbox_mode: MailboxMode<A::Msg>,
     ) -> (RunnableActor, ActorRef<A::Msg>) {
         let actor_ref = ActorRef::from_core(&binding, None);
         let runnable = RunnableActor::new(RunnableActorParts {
             actor_id,
             binding_lifecycle: binding.clone(),
-            runner: Arc::new(TypedRunner { actor, binding }),
+            runner: Arc::new(TypedRunner {
+                actor,
+                binding,
+                mailbox_mode,
+            }),
             mailbox_capacity: self.mailbox_capacity,
             actor_shutdown_timeout: self.actor_shutdown_timeout,
             observability: self.observability.clone(),

@@ -175,6 +175,8 @@ need explicit observability names:
 - `builder.add(actor)` registers an actor under its unqualified type name,
   suffixing repeats as `Worker-2`, `Worker-3`, and so on
 - `builder.actor(id, actor)` registers an actor under an explicit id
+- `builder.actor_with_mailbox(id, actor, mode)` registers an actor with FIFO,
+  latest-wins, or keyed latest-wins delivery
 - `builder.slot::<M>(id)` plus `builder.define(slot, actor)` opens and fills a
   token-protected slot for hand-written cyclic wiring
 
@@ -189,14 +191,53 @@ that `send` to each other while both mailboxes are full deadlock permanently,
 and a `call` cycle deadlocks at depth one. Use `try_send` on feedback edges,
 and `call` only "downhill" along a DAG ordering of the graph.
 
+## Conflating Mailboxes
+
+FIFO mailboxes are right for commands: `send` waits for capacity and
+`try_send` reports `MailboxFull`. High-rate state snapshots often need the
+opposite policy—a slow consumer should skip stale updates instead of making
+the producer fall behind. Configure those actors explicitly:
+
+```rust,ignore
+use tokio_otp::MailboxMode;
+
+let latest = builder.actor_with_mailbox(
+    "latest-market",
+    market_actor,
+    MailboxMode::Conflate,
+);
+
+let per_symbol = builder.actor_with_mailbox(
+    "market-by-symbol",
+    keyed_market_actor,
+    MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol_id),
+);
+```
+
+`Conflate` stores at most one unread message. `ConflateByKey` stores one
+unread message per distinct key, preserving the first-arrival order of keys;
+its number of keys is bounded by `mailbox_capacity`, and a new key evicts the
+oldest unread key when full. Both `send` and `try_send` replace stale state
+without waiting for capacity. `ActorStats::messages_conflated` counts replaced
+or evicted unread messages.
+
+Keyed sends scan at most `mailbox_capacity` unread keys and may evaluate the
+extractor for every comparison. Keep the extractor cheap and prefer numeric
+or interned ids over allocating keys.
+
+Use these modes only for idempotent state snapshots. They are deliberately
+lossy and are unsuitable for commands. In particular, do not use `call`: if a
+newer message replaces a request before it is handled, the caller receives
+`CallError::ReplyDropped`.
+
 ## Runtime Handles
 
 `ActorRef<M>` is the external entry point. It supports:
 
 | Method | Behavior |
 |--------|----------|
-| `send` | Waits for a bound mailbox, waits for capacity, and retries across expected restart windows. |
-| `try_send` | Returns immediately if the actor is unbound, terminated, full, or closed. |
+| `send` | Waits for a bound mailbox and retries across expected restart windows; FIFO queues wait for capacity, while conflating mailboxes replace stale state. |
+| `try_send` | Returns immediately; FIFO queues report full capacity, while conflating mailboxes replace stale state. |
 | `call` | Sends a message carrying `Reply<T>` and awaits the reply. |
 
 Refs are bound to long-lived mailbox bindings, not one actor incarnation. A
