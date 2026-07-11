@@ -1,6 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    future::pending,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use tokio::{
@@ -8,11 +12,19 @@ use tokio::{
     time::timeout,
 };
 use tokio_supervisor::{
-    AutoShutdown, ChildSpec, ControlError, ExitStatusView, RestartPolicy, Strategy,
-    SupervisorBuilder, SupervisorEvent, SupervisorSpec,
+    AutoShutdown, ChildSpec, ControlError, ExitStatusView, RestartIntensity, RestartPolicy,
+    ShutdownPolicy, Strategy, SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorSpec,
 };
 
 mod common;
+
+struct NotifyOnDrop(Arc<Notify>);
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
 
 #[tokio::test]
 async fn any_significant_clean_exit_stops_siblings_and_supervisor() {
@@ -472,4 +484,100 @@ async fn group_cancellation_does_not_count_as_all_significant_completion() {
         .wait()
         .await
         .expect("the restarted significant child completed naturally");
+}
+
+#[tokio::test]
+async fn natural_always_completion_during_group_drain_spawns_once() {
+    let finish_always = Arc::new(Notify::new());
+    let (restarted_tx, mut restarted_rx) = mpsc::unbounded_channel();
+    let always = ChildSpec::new("always", {
+        let finish_always = finish_always.clone();
+        move |ctx| {
+            let finish_always = finish_always.clone();
+            let restarted_tx = restarted_tx.clone();
+            async move {
+                if ctx.generation() == 0 {
+                    finish_always.notified().await;
+                    return Ok(());
+                }
+                restarted_tx
+                    .send(ctx.generation())
+                    .expect("test receiver dropped");
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .restart(RestartPolicy::Always);
+    let failing = ChildSpec::new("failing", move |ctx| {
+        let finish_always = finish_always.clone();
+        async move {
+            if ctx.generation() == 0 {
+                finish_always.notify_one();
+                return Err(common::test_error("restart group"));
+            }
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }
+    });
+
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::OneForAll)
+        .child(always)
+        .child(failing)
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+
+    assert_eq!(common::recv_event(&mut restarted_rx).await, 1);
+    common::assert_no_event(&mut restarted_rx).await;
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("single restarted generation should shut down cleanly");
+}
+
+#[tokio::test]
+async fn fatal_restart_during_abort_removal_stops_supervisor() {
+    let fail = Arc::new(Notify::new());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let removable = ChildSpec::new("removable", {
+        let fail = fail.clone();
+        let started_tx = started_tx.clone();
+        move |_| {
+            let guard = NotifyOnDrop(fail.clone());
+            let started_tx = started_tx.clone();
+            async move {
+                let _guard = guard;
+                started_tx.send(()).expect("test receiver dropped");
+                pending::<()>().await;
+                Ok(())
+            }
+        }
+    })
+    .shutdown(ShutdownPolicy::abort());
+    let failing = ChildSpec::new("failing", move |_| {
+        let fail = fail.clone();
+        let started_tx = started_tx.clone();
+        async move {
+            started_tx.send(()).expect("test receiver dropped");
+            fail.notified().await;
+            Err(common::test_error("fatal restart"))
+        }
+    });
+
+    let handle = SupervisorBuilder::new()
+        .restart_intensity(RestartIntensity::new(0, Duration::from_secs(1)))
+        .child(removable)
+        .child(failing)
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+    common::recv_n(&mut started_rx, 2).await;
+
+    let _ = handle.remove_child("removable").await;
+    let result = timeout(common::EVENT_TIMEOUT, handle.wait())
+        .await
+        .expect("fatal restart observed during removal must stop supervisor");
+    assert_eq!(result, Err(SupervisorError::RestartIntensityExceeded));
 }

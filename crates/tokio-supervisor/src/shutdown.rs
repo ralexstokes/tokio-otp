@@ -17,8 +17,9 @@ pub enum AutoShutdown {
     /// Stop after every significant child has exited cleanly.
     ///
     /// A significant child using [`RestartPolicy::Never`](crate::RestartPolicy::Never)
-    /// that exits with a failure cannot later satisfy this condition. The
-    /// supervisor will continue running until explicitly stopped.
+    /// that exits with a failure, or is cancelled by a sibling's group
+    /// restart, cannot later satisfy this condition. The supervisor will
+    /// continue running until explicitly stopped.
     AllSignificant,
 }
 

@@ -149,7 +149,9 @@ child returns `Ok(())`; `AllSignificant` waits until every significant child
 has returned `Ok(())`. Failures still follow the normal restart policy and do
 not trigger automatic shutdown. Consequently, a significant `Never` child
 that fails cannot later satisfy `AllSignificant`; the supervisor continues
-until explicitly stopped.
+until explicitly stopped. The same applies when a significant `Never` child is
+cancelled as part of a sibling-driven `OneForAll` or `RestForOne` restart: it
+does not count as a natural clean completion and cannot run again.
 
 Significant children must use `OnFailure` or `Never`, and a supervisor with
 significant children must select a non-`Never` automatic shutdown mode. Nested

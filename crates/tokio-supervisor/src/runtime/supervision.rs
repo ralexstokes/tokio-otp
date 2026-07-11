@@ -624,9 +624,10 @@ impl SupervisorRuntime {
             ));
         };
 
-        self.handle_joined_child(joined)
-            .await
-            .map_err(map_supervisor_error_to_control)?;
+        if let Err(error) = self.handle_joined_child(joined).await {
+            self.pending_exit = Some(Err(error.clone()));
+            return Err(map_supervisor_error_to_control(error));
+        }
 
         if self.pending_exit.is_some() {
             return Err(ControlError::SupervisorStopping);
@@ -741,6 +742,21 @@ impl SupervisorRuntime {
         &mut self,
         classified: ClassifiedExit,
     ) -> Result<(), SupervisorError> {
+        self.apply_exit_policy_inner(classified, true).await
+    }
+
+    async fn apply_drained_completion_policy(
+        &mut self,
+        classified: ClassifiedExit,
+    ) -> Result<(), SupervisorError> {
+        self.apply_exit_policy_inner(classified, false).await
+    }
+
+    async fn apply_exit_policy_inner(
+        &mut self,
+        classified: ClassifiedExit,
+        allow_restart: bool,
+    ) -> Result<(), SupervisorError> {
         if self.state != SupervisorState::Running {
             return Ok(());
         }
@@ -762,7 +778,7 @@ impl SupervisorRuntime {
 
         let restart_policy = self.children[classified.key].runtime.definition.restart;
 
-        if restart_policy.should_restart(classified.status.is_failure()) {
+        if allow_restart && restart_policy.should_restart(classified.status.is_failure()) {
             match self.meta.strategy {
                 Strategy::OneForOne => {
                     self.handle_one_for_one_restart(classified.key, classified.generation)
@@ -926,7 +942,7 @@ impl SupervisorRuntime {
             ) {
                 continue;
             }
-            Box::pin(self.apply_exit_policy(classified)).await?;
+            Box::pin(self.apply_drained_completion_policy(classified)).await?;
         }
         if self.pending_exit.is_some() {
             return Ok(());
@@ -993,7 +1009,7 @@ impl SupervisorRuntime {
             ) {
                 continue;
             }
-            Box::pin(self.apply_exit_policy(classified)).await?;
+            Box::pin(self.apply_drained_completion_policy(classified)).await?;
         }
         if self.pending_exit.is_some() {
             return Ok(());
@@ -1194,7 +1210,12 @@ impl SupervisorRuntime {
     pub(crate) async fn drain_ready_joins(&mut self) -> Result<(), SupervisorError> {
         loop {
             match tokio::time::timeout(Duration::ZERO, self.join_set.join_next_with_id()).await {
-                Ok(Some(joined)) => self.handle_joined_child(joined).await?,
+                Ok(Some(joined)) => {
+                    if let Err(error) = self.handle_joined_child(joined).await {
+                        self.pending_exit = Some(Err(error.clone()));
+                        return Err(error);
+                    }
+                }
                 Ok(None) | Err(_) => return Ok(()),
             }
         }
