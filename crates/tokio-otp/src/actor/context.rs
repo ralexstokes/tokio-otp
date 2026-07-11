@@ -7,7 +7,10 @@ use tokio::sync::{
 use tokio_util::sync::CancellationToken;
 
 use crate::actor::{
-    binding::{ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxRef},
+    binding::{
+        ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxRef, MessageSizeObserver,
+    },
+    builder::MessageSize,
     error::{CallError, SendError},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
@@ -22,7 +25,7 @@ pub struct ActorRef<M> {
     actor_id: Arc<str>,
     binding: watch::Receiver<BindingState<M>>,
     stats: Arc<ActorStatsCounters>,
-    message_size: Option<fn(&M) -> usize>,
+    message_size: Option<Arc<MessageSizeObserver<M>>>,
     source_actor_id: Option<Arc<str>>,
 }
 
@@ -32,7 +35,7 @@ impl<M> Clone for ActorRef<M> {
             actor_id: Arc::clone(&self.actor_id),
             binding: self.binding.clone(),
             stats: Arc::clone(&self.stats),
-            message_size: self.message_size,
+            message_size: self.message_size.clone(),
             source_actor_id: self.source_actor_id.clone(),
         }
     }
@@ -61,7 +64,7 @@ impl<M> ActorRef<M> {
         actor_id: Arc<str>,
         binding: watch::Receiver<BindingState<M>>,
         stats: Arc<ActorStatsCounters>,
-        message_size: Option<fn(&M) -> usize>,
+        message_size: Option<Arc<MessageSizeObserver<M>>>,
         source_actor_id: Option<Arc<str>>,
     ) -> Self {
         Self {
@@ -75,6 +78,17 @@ impl<M> ActorRef<M> {
 
     pub(crate) fn detached(actor_id: Arc<str>) -> Self {
         let core = Arc::new(BindingCore::<M>::new(actor_id));
+        Self::from_core(&core, None)
+    }
+
+    pub(crate) fn detached_with_message_size(actor_id: Arc<str>) -> Self
+    where
+        M: MessageSize,
+    {
+        let core = Arc::new(BindingCore::<M>::with_message_size(
+            actor_id,
+            MessageSize::size_hint,
+        ));
         Self::from_core(&core, None)
     }
 
@@ -127,7 +141,10 @@ impl<M> ActorRef<M> {
     pub async fn send(&self, message: M) -> Result<(), SendError> {
         let mut binding = self.binding.clone();
         let mut message = message;
-        let message_size = self.message_size.map(|size_hint| size_hint(&message));
+        let message_size = self
+            .message_size
+            .as_ref()
+            .map(|observer| observer.size_hint(&message));
 
         loop {
             let mailbox = match self.wait_for_next_mailbox(&mut binding).await {
@@ -164,7 +181,10 @@ impl<M> ActorRef<M> {
 
     /// Attempts to send a message without waiting for mailbox capacity.
     pub fn try_send(&self, message: M) -> Result<(), SendError> {
-        let message_size = self.message_size.map(|size_hint| size_hint(&message));
+        let message_size = self
+            .message_size
+            .as_ref()
+            .map(|observer| observer.size_hint(&message));
         let result = match self.current_mailbox() {
             Ok(mailbox) => mailbox.try_send(message),
             Err(error) => Err(error),
@@ -258,7 +278,10 @@ impl<M> ActorRef<M> {
     fn record_message_size(&self, message_size: Option<usize>) {
         if let Some(message_size) = message_size {
             self.stats.record_message_size(message_size);
-            crate::actor::observability::record_message_size(&self.actor_id, message_size);
+            self.message_size
+                .as_ref()
+                .expect("message size was produced by an observer")
+                .record_metrics(message_size);
         }
     }
 

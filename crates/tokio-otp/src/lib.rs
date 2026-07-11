@@ -169,7 +169,8 @@
 //! Actors registered with [`GraphBuilder::actor_with_message_size`] or
 //! [`GraphBuilder::slot_with_message_size`] also expose application-defined
 //! accepted-byte totals through [`ActorStats`] and emit size metrics when the
-//! `metrics` feature is enabled.
+//! `metrics` feature is enabled. Runtime-added actors can opt in through
+//! [`RuntimeHandle::add_actor_with_message_size`].
 //! Install subscribers and samplers at the application boundary, not inside
 //! the library.
 //!

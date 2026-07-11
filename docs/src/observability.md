@@ -58,11 +58,18 @@ impl MessageSize for Upload {
 let uploads = graph.actor_with_message_size("uploads", UploadActor::new());
 ```
 
+For runtime-added actors, use
+`RuntimeHandle::add_actor_with_message_size`; lower-level dynamic factories
+provide the corresponding `RunnableActorFactory::actor_with_message_size`.
+
 `ActorStats::message_bytes_accepted` is then `Some(total)`; ordinary actors
 report `None` and do not sample message sizes. With the `metrics` feature,
 each accepted sized message also updates the `actor.message.size` histogram
-and `actor.message.bytes_accepted` counter. The feature continues to enable
-the supervisor lifecycle counters, gauges, and histograms as well.
+and `actor.message.bytes_accepted` counter. Metric handles and actor-id labels
+are registered lazily on the first accepted message and cached per actor; later
+accepted sends only sample `size_hint` and update those handles. The feature
+continues to enable the supervisor lifecycle counters, gauges, and histograms
+as well.
 
 ## Web Console
 

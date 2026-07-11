@@ -1082,6 +1082,20 @@ mod runnable_actor {
         }
     }
 
+    #[test]
+    fn failed_sized_registration_returns_a_sized_detached_ref() {
+        let mut builder = GraphBuilder::new();
+        builder.actor_with_message_size("worker", Drain::<SizedPayload>::new());
+        let detached = builder.actor_with_message_size("worker", Drain::<SizedPayload>::new());
+
+        assert_eq!(detached.stats().message_bytes_accepted, Some(0));
+
+        let mut slot_builder = GraphBuilder::new();
+        slot_builder.slot_with_message_size::<SizedPayload>("worker");
+        let (_slot, detached) = slot_builder.slot_with_message_size::<SizedPayload>("worker");
+        assert_eq!(detached.stats().message_bytes_accepted, Some(0));
+    }
+
     impl RawActor for GatedDrain {
         type Msg = u32;
 

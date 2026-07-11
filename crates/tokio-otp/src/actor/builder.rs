@@ -23,7 +23,9 @@ use crate::actor::{
 /// The value is an observability hint, normally the size of payload buffers
 /// owned by the message. It is sampled only when the target actor opts in via
 /// [`GraphBuilder::actor_with_message_size`] or
-/// [`GraphBuilder::slot_with_message_size`].
+/// [`GraphBuilder::slot_with_message_size`], or the corresponding dynamic
+/// actor methods on [`RunnableActorFactory`](crate::RunnableActorFactory) and
+/// [`RuntimeHandle`](crate::RuntimeHandle).
 pub trait MessageSize {
     /// Returns the message size to report, in bytes.
     fn size_hint(&self) -> usize;
@@ -169,7 +171,7 @@ impl GraphBuilder {
             Some((index, actor_ref)) => (ActorSlot::new(self.builder_id, Some(index)), actor_ref),
             None => (
                 ActorSlot::new(self.builder_id, None),
-                ActorRef::detached(actor_id.into()),
+                ActorRef::detached_with_message_size(actor_id.into()),
             ),
         }
     }
@@ -205,15 +207,8 @@ impl GraphBuilder {
 
     /// Registers an actor and returns its typed, restart-stable ref.
     pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
-        let Some((index, actor_ref)) = self.push_slot::<A::Msg>(actor_id) else {
-            return ActorRef::detached(actor_id.into());
-        };
-        let slot = &mut self.slots[index];
-        let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
-            unreachable!("message type id already verified")
-        };
-        slot.runner = Some(Arc::new(TypedRunner { actor, binding }));
-        actor_ref
+        let registration = self.push_slot::<A::Msg>(actor_id);
+        self.finish_actor_registration(registration, actor, || ActorRef::detached(actor_id.into()))
     }
 
     /// Registers an actor with message-size observation enabled.
@@ -226,8 +221,20 @@ impl GraphBuilder {
         A: RawActor,
         A::Msg: MessageSize,
     {
-        let Some((index, actor_ref)) = self.push_sized_slot::<A::Msg>(actor_id) else {
-            return ActorRef::detached(actor_id.into());
+        let registration = self.push_sized_slot::<A::Msg>(actor_id);
+        self.finish_actor_registration(registration, actor, || {
+            ActorRef::detached_with_message_size(actor_id.into())
+        })
+    }
+
+    fn finish_actor_registration<A: RawActor>(
+        &mut self,
+        registration: Option<(usize, ActorRef<A::Msg>)>,
+        actor: A,
+        detached: impl FnOnce() -> ActorRef<A::Msg>,
+    ) -> ActorRef<A::Msg> {
+        let Some((index, actor_ref)) = registration else {
+            return detached();
         };
         let slot = &mut self.slots[index];
         let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
@@ -316,7 +323,7 @@ impl GraphBuilder {
         actor_id: &str,
     ) -> Option<(usize, ActorRef<M>)> {
         self.push_slot_with_core(actor_id, |actor_id| {
-            BindingCore::<M>::with_message_size(actor_id, Some(MessageSize::size_hint))
+            BindingCore::<M>::with_message_size(actor_id, MessageSize::size_hint)
         })
     }
 

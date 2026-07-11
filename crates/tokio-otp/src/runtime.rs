@@ -6,7 +6,9 @@ use std::{
     },
 };
 
-use crate::{ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory};
+use crate::{
+    ActorRef, ActorStats, MessageSize, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
+};
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{
     ChildSpec, ControlError, RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy,
@@ -259,7 +261,36 @@ impl RuntimeHandle {
         actor: A,
         options: DynamicActorOptions,
     ) -> Result<ActorRef<A::Msg>, ControlError> {
-        let (actor, actor_ref) = self.actors.actor_factory.actor(label, actor);
+        let actor = self.actors.actor_factory.actor(label, actor);
+        self.add_constructed_actor(actor, options).await
+    }
+
+    /// Adds a supervised runtime actor with message-size observation enabled.
+    ///
+    /// This is the runtime-added equivalent of
+    /// [`GraphBuilder::actor_with_message_size`](crate::GraphBuilder::actor_with_message_size).
+    pub async fn add_actor_with_message_size<A>(
+        &self,
+        label: impl Into<String>,
+        actor: A,
+        options: DynamicActorOptions,
+    ) -> Result<ActorRef<A::Msg>, ControlError>
+    where
+        A: RawActor,
+        A::Msg: MessageSize,
+    {
+        let actor = self
+            .actors
+            .actor_factory
+            .actor_with_message_size(label, actor);
+        self.add_constructed_actor(actor, options).await
+    }
+
+    async fn add_constructed_actor<M>(
+        &self,
+        (actor, actor_ref): (RunnableActor, ActorRef<M>),
+        options: DynamicActorOptions,
+    ) -> Result<ActorRef<M>, ControlError> {
         let child = actor_child_spec(
             actor.clone(),
             options.restart,

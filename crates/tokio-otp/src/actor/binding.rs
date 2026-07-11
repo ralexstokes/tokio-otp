@@ -5,7 +5,10 @@ use std::sync::{
 
 use tokio::sync::{mpsc, watch};
 
-use crate::actor::{error::SendError, observability::GraphObservability};
+use crate::actor::{
+    error::SendError,
+    observability::{GraphObservability, MessageSizeMetrics},
+};
 
 /// A point-in-time snapshot of one actor's message and mailbox statistics.
 ///
@@ -185,24 +188,46 @@ pub(crate) struct BindingCore<M> {
     actor_id: Arc<str>,
     current: watch::Sender<BindingState<M>>,
     stats: Arc<ActorStatsCounters>,
-    message_size: Option<fn(&M) -> usize>,
+    message_size: Option<Arc<MessageSizeObserver<M>>>,
+}
+
+pub(crate) struct MessageSizeObserver<M> {
+    size_hint: fn(&M) -> usize,
+    metrics: MessageSizeMetrics,
+}
+
+impl<M> MessageSizeObserver<M> {
+    pub(crate) fn size_hint(&self, message: &M) -> usize {
+        (self.size_hint)(message)
+    }
+
+    pub(crate) fn record_metrics(&self, size: usize) {
+        self.metrics.record(size);
+    }
 }
 
 impl<M> BindingCore<M> {
     pub(crate) fn new(actor_id: Arc<str>) -> Self {
-        Self::with_message_size(actor_id, None)
-    }
-
-    pub(crate) fn with_message_size(
-        actor_id: Arc<str>,
-        message_size: Option<fn(&M) -> usize>,
-    ) -> Self {
         let (current, _receiver) = watch::channel(BindingState::Unbound);
         Self {
             actor_id,
             current,
-            stats: Arc::new(ActorStatsCounters::new(message_size.is_some())),
-            message_size,
+            stats: Arc::new(ActorStatsCounters::new(false)),
+            message_size: None,
+        }
+    }
+
+    pub(crate) fn with_message_size(actor_id: Arc<str>, size_hint: fn(&M) -> usize) -> Self {
+        let (current, _receiver) = watch::channel(BindingState::Unbound);
+        let message_size = MessageSizeObserver {
+            size_hint,
+            metrics: MessageSizeMetrics::new(&actor_id),
+        };
+        Self {
+            actor_id,
+            current,
+            stats: Arc::new(ActorStatsCounters::new(true)),
+            message_size: Some(Arc::new(message_size)),
         }
     }
 
@@ -218,8 +243,8 @@ impl<M> BindingCore<M> {
         Arc::clone(&self.stats)
     }
 
-    pub(crate) fn message_size(&self) -> Option<fn(&M) -> usize> {
-        self.message_size
+    pub(crate) fn message_size(&self) -> Option<Arc<MessageSizeObserver<M>>> {
+        self.message_size.clone()
     }
 
     pub(crate) fn stats(&self) -> ActorStats {

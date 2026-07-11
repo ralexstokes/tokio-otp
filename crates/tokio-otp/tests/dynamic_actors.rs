@@ -2,8 +2,8 @@ use std::{future::pending, marker::PhantomData, time::Duration};
 
 use tokio::{sync::mpsc, time::timeout};
 use tokio_otp::{
-    ActorContext, ActorRef, ActorResult, DynamicActorOptions, GraphBuilder, RawActor, Runtime,
-    SendError, SupervisedActors,
+    ActorContext, ActorRef, ActorResult, DynamicActorOptions, GraphBuilder, MessageSize, RawActor,
+    Runtime, SendError, SupervisedActors,
 };
 use tokio_supervisor::{ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder};
 
@@ -33,6 +33,14 @@ impl<M: Send + 'static> RawActor for Drain<M> {
     async fn run(&mut self, mut ctx: ActorContext<M>) -> ActorResult {
         while ctx.recv().await.is_some() {}
         Ok(())
+    }
+}
+
+struct SizedMessage(Vec<u8>);
+
+impl MessageSize for SizedMessage {
+    fn size_hint(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -124,6 +132,34 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
         .await
         .expect("replacement receives");
     assert_eq!(observed_rx.recv().await.as_deref(), Some("second"));
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn runtime_added_actor_can_observe_message_sizes() {
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+    let sink = handle
+        .add_actor_with_message_size(
+            "sink",
+            Drain::<SizedMessage>::new(),
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("sized actor added");
+
+    sink.send(SizedMessage(vec![0; 12]))
+        .await
+        .expect("message sent");
+    let stats = handle
+        .actor_stats()
+        .into_iter()
+        .find(|stats| stats.actor_id == "sink")
+        .expect("dynamic actor stats available");
+    assert_eq!(stats.message_bytes_accepted, Some(12));
 
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }
