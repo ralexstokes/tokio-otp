@@ -76,4 +76,13 @@ in
       cargoExtraArgs = "--locked --workspace --doc --all-features";
     }
   );
+
+  cargo-doc = craneLibStable.cargoDoc (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      cargoExtraArgs = "--locked --workspace --all-features";
+      RUSTDOCFLAGS = "-D warnings";
+    }
+  );
 }

@@ -39,11 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })
     .restart(RestartPolicy::OnFailure)
-    .restart_intensity(RestartIntensity {
-        max_restarts: 1,
-        within: Duration::from_secs(1),
-        backoff: BackoffPolicy::Fixed(Duration::from_millis(100)),
-    });
+    .restart_intensity(
+        RestartIntensity::new(1, Duration::from_secs(1))
+            .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(100))),
+    );
 
     let metrics = ChildSpec::new("metrics", |ctx| async move {
         println!("metrics started in generation {}", ctx.generation());
@@ -54,11 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Supervisor default: children do not get any restart budget unless they override it.
     let supervisor = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 0,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(0, Duration::from_secs(1)))
         .child(warm_cache)
         .child(metrics)
         .build()?;
@@ -75,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 id,
                 generation,
                 delay,
+                ..
             } if id == "warm-cache" => {
                 println!(
                     "warm-cache generation {} is allowed one delayed restart: {delay:?}",
@@ -85,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 id,
                 old_generation,
                 new_generation,
+                ..
             } if id == "warm-cache" => {
                 assert_eq!(old_generation, 0);
                 assert_eq!(new_generation, 1);

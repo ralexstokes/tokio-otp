@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! Structured task supervision for Tokio, inspired by Erlang/OTP.
 //!
 //! `tokio-supervisor` manages the lifecycle of a group of async tasks

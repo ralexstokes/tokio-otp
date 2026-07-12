@@ -10,6 +10,7 @@ use crate::{observability::SupervisorObservability, shutdown::AutoShutdown};
 /// value (if any) is converted to its `Display` string.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum ExitStatusView {
     /// The child returned `Ok(())`.
     Completed,
@@ -26,11 +27,22 @@ pub enum ExitStatusView {
 /// supervisor forwarded the event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct EventPathSegment {
     /// The child id of the nested supervisor that forwarded this event.
     pub id: String,
     /// The generation of that child at the time the event was forwarded.
     pub generation: u64,
+}
+
+impl EventPathSegment {
+    /// Creates a nested-event path segment.
+    pub fn new(id: impl Into<String>, generation: u64) -> Self {
+        Self {
+            id: id.into(),
+            generation,
+        }
+    }
 }
 
 /// Lifecycle event emitted by a supervisor.
@@ -45,6 +57,7 @@ pub struct EventPathSegment {
 /// already-consistent snapshot state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum SupervisorEvent {
     /// The supervisor has started and all initial children are being spawned.
     SupervisorStarted,
@@ -58,6 +71,7 @@ pub enum SupervisorEvent {
     /// An event forwarded from a nested (child) supervisor. Nested events form
     /// a recursive wrapper; use [`path`](SupervisorEvent::path) or
     /// [`leaf`](SupervisorEvent::leaf) to unwrap.
+    #[non_exhaustive]
     Nested {
         /// Child id of the nested supervisor.
         id: String,
@@ -67,6 +81,7 @@ pub enum SupervisorEvent {
         event: Box<SupervisorEvent>,
     },
     /// A child has been spawned and completed its readiness boundary.
+    #[non_exhaustive]
     ChildStarted {
         /// Child identifier.
         id: String,
@@ -74,11 +89,13 @@ pub enum SupervisorEvent {
         generation: u64,
     },
     /// The child has been fully removed from the supervisor.
+    #[non_exhaustive]
     ChildRemoved {
         /// Child identifier.
         id: String,
     },
     /// A child task exited (cleanly, with an error, by panic, or by abort).
+    #[non_exhaustive]
     ChildExited {
         /// Child identifier.
         id: String,
@@ -89,6 +106,7 @@ pub enum SupervisorEvent {
     },
     /// A significant child's clean exit satisfied the supervisor's automatic
     /// shutdown condition.
+    #[non_exhaustive]
     AutoShutdownTriggered {
         /// The significant child whose exit satisfied the condition.
         id: String,
@@ -96,6 +114,7 @@ pub enum SupervisorEvent {
         mode: AutoShutdown,
     },
     /// A restart for this child has been scheduled after a backoff delay.
+    #[non_exhaustive]
     ChildRestartScheduled {
         /// Child identifier.
         id: String,
@@ -105,6 +124,7 @@ pub enum SupervisorEvent {
         delay: Duration,
     },
     /// A child has been successfully restarted with a new generation.
+    #[non_exhaustive]
     ChildRestarted {
         /// Child identifier.
         id: String,
@@ -119,6 +139,71 @@ pub enum SupervisorEvent {
 }
 
 impl SupervisorEvent {
+    /// Creates an event forwarded from a nested supervisor child.
+    pub fn nested(id: impl Into<String>, generation: u64, event: Self) -> Self {
+        Self::Nested {
+            id: id.into(),
+            generation,
+            event: Box::new(event),
+        }
+    }
+
+    /// Creates an event for a child that completed startup readiness.
+    pub fn child_started(id: impl Into<String>, generation: u64) -> Self {
+        Self::ChildStarted {
+            id: id.into(),
+            generation,
+        }
+    }
+
+    /// Creates an event for a child that was fully removed.
+    pub fn child_removed(id: impl Into<String>) -> Self {
+        Self::ChildRemoved { id: id.into() }
+    }
+
+    /// Creates an event for a child task exit.
+    pub fn child_exited(id: impl Into<String>, generation: u64, status: ExitStatusView) -> Self {
+        Self::ChildExited {
+            id: id.into(),
+            generation,
+            status,
+        }
+    }
+
+    /// Creates an event for automatic shutdown triggered by a significant child.
+    pub fn auto_shutdown_triggered(id: impl Into<String>, mode: AutoShutdown) -> Self {
+        Self::AutoShutdownTriggered {
+            id: id.into(),
+            mode,
+        }
+    }
+
+    /// Creates an event for a delayed child restart.
+    pub fn child_restart_scheduled(
+        id: impl Into<String>,
+        generation: u64,
+        delay: Duration,
+    ) -> Self {
+        Self::ChildRestartScheduled {
+            id: id.into(),
+            generation,
+            delay,
+        }
+    }
+
+    /// Creates an event for a child that successfully restarted.
+    pub fn child_restarted(
+        id: impl Into<String>,
+        old_generation: u64,
+        new_generation: u64,
+    ) -> Self {
+        Self::ChildRestarted {
+            id: id.into(),
+            old_generation,
+            new_generation,
+        }
+    }
+
     /// Returns the nested-supervisor path leading to this event.
     ///
     /// For non-nested events the path is empty. For events wrapped in one or
@@ -146,10 +231,7 @@ impl SupervisorEvent {
             event,
         } = self
         {
-            path.push(EventPathSegment {
-                id: id.clone(),
-                generation: *generation,
-            });
+            path.push(EventPathSegment::new(id.clone(), *generation));
             event.collect_path(path);
         }
     }

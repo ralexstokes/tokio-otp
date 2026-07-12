@@ -59,11 +59,7 @@ fn duplicate_child_ids_are_rejected() {
 #[test]
 fn invalid_restart_intensity_is_rejected() {
     let err = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::ZERO,
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(1, Duration::ZERO))
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
         .build()
         .expect_err("zero-width restart windows should be rejected");
@@ -74,15 +70,15 @@ fn invalid_restart_intensity_is_rejected() {
 #[test]
 fn invalid_jittered_restart_intensity_is_rejected() {
     let err = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::JitteredExponential {
-                base: Duration::ZERO,
-                factor: 2,
-                max: Duration::from_millis(10),
-            },
-        })
+        .restart_intensity(
+            RestartIntensity::new(1, Duration::from_secs(1)).with_backoff(
+                BackoffPolicy::JitteredExponential {
+                    base: Duration::ZERO,
+                    factor: 2,
+                    max: Duration::from_millis(10),
+                },
+            ),
+        )
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
         .build()
         .expect_err("invalid jittered exponential backoff should be rejected");
@@ -93,11 +89,10 @@ fn invalid_jittered_restart_intensity_is_rejected() {
 #[test]
 fn invalid_fixed_backoff_delay_is_rejected() {
     let err = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Fixed(Duration::ZERO),
-        })
+        .restart_intensity(
+            RestartIntensity::new(1, Duration::from_secs(1))
+                .with_backoff(BackoffPolicy::Fixed(Duration::ZERO)),
+        )
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
         .build()
         .expect_err("zero fixed backoff delay should be rejected");
@@ -108,15 +103,15 @@ fn invalid_fixed_backoff_delay_is_rejected() {
 #[test]
 fn invalid_exponential_restart_factor_is_rejected() {
     let err = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Exponential {
-                base: Duration::from_millis(10),
-                factor: 0,
-                max: Duration::from_millis(20),
-            },
-        })
+        .restart_intensity(
+            RestartIntensity::new(1, Duration::from_secs(1)).with_backoff(
+                BackoffPolicy::Exponential {
+                    base: Duration::from_millis(10),
+                    factor: 0,
+                    max: Duration::from_millis(20),
+                },
+            ),
+        )
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
         .build()
         .expect_err("zero exponential factor should be rejected");
@@ -127,15 +122,15 @@ fn invalid_exponential_restart_factor_is_rejected() {
 #[test]
 fn invalid_exponential_restart_max_is_rejected() {
     let err = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Exponential {
-                base: Duration::from_millis(10),
-                factor: 2,
-                max: Duration::ZERO,
-            },
-        })
+        .restart_intensity(
+            RestartIntensity::new(1, Duration::from_secs(1)).with_backoff(
+                BackoffPolicy::Exponential {
+                    base: Duration::from_millis(10),
+                    factor: 2,
+                    max: Duration::ZERO,
+                },
+            ),
+        )
         .child(ChildSpec::new("worker", |_| async { Ok(()) }))
         .build()
         .expect_err("zero exponential max should be rejected");
@@ -147,11 +142,8 @@ fn invalid_exponential_restart_max_is_rejected() {
 fn invalid_child_restart_intensity_is_rejected() {
     let err = SupervisorBuilder::new()
         .child(
-            ChildSpec::new("worker", |_| async { Ok(()) }).restart_intensity(RestartIntensity {
-                max_restarts: 1,
-                within: Duration::ZERO,
-                backoff: BackoffPolicy::None,
-            }),
+            ChildSpec::new("worker", |_| async { Ok(()) })
+                .restart_intensity(RestartIntensity::new(1, Duration::ZERO)),
         )
         .build()
         .expect_err("zero-width child restart windows should be rejected");

@@ -19,6 +19,7 @@ use crate::{event::ExitStatusView, strategy::Strategy};
 /// snapshot from an event handler will see already-consistent state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct SupervisorSnapshot {
     /// Current lifecycle state of the supervisor.
     pub state: SupervisorStateView,
@@ -31,6 +32,7 @@ pub struct SupervisorSnapshot {
 /// Point-in-time snapshot of a single child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct ChildSnapshot {
     /// The child's unique identifier.
     pub id: String,
@@ -59,6 +61,22 @@ pub struct ChildSnapshot {
 }
 
 impl SupervisorSnapshot {
+    /// Creates a supervisor snapshot from its state, strategy, and children.
+    ///
+    /// This is primarily useful for adapters and tests that produce snapshot
+    /// streams without running a supervisor.
+    pub fn new(
+        state: SupervisorStateView,
+        strategy: Strategy,
+        children: Vec<ChildSnapshot>,
+    ) -> Self {
+        Self {
+            state,
+            strategy,
+            children,
+        }
+    }
+
     /// Looks up a direct child by id.
     pub fn child(&self, id: &str) -> Option<&ChildSnapshot> {
         self.children.iter().find(|child| child.id == id)
@@ -86,6 +104,74 @@ impl SupervisorSnapshot {
 }
 
 impl ChildSnapshot {
+    /// Creates a child snapshot with active membership and no prior exit.
+    ///
+    /// Readiness, exit, restart, membership, and nested-supervisor details can
+    /// be supplied with the builder-style setters.
+    pub fn new(id: impl Into<String>, generation: u64, state: ChildStateView) -> Self {
+        Self {
+            id: id.into(),
+            generation,
+            started: false,
+            startup_aborted: false,
+            state,
+            membership: ChildMembershipView::Active,
+            last_exit: None,
+            restart_count: 0,
+            next_restart_in: None,
+            supervisor: None,
+        }
+    }
+
+    /// Sets whether the child reported readiness in this generation.
+    #[must_use]
+    pub fn started(mut self, started: bool) -> Self {
+        self.started = started;
+        self
+    }
+
+    /// Sets whether this generation permanently exited before readiness.
+    #[must_use]
+    pub fn startup_aborted(mut self, startup_aborted: bool) -> Self {
+        self.startup_aborted = startup_aborted;
+        self
+    }
+
+    /// Sets whether the child is active or being removed.
+    #[must_use]
+    pub fn membership(mut self, membership: ChildMembershipView) -> Self {
+        self.membership = membership;
+        self
+    }
+
+    /// Sets the child's most recent exit status.
+    #[must_use]
+    pub fn last_exit(mut self, last_exit: Option<ExitStatusView>) -> Self {
+        self.last_exit = last_exit;
+        self
+    }
+
+    /// Sets the number of completed restarts.
+    #[must_use]
+    pub fn restart_count(mut self, restart_count: u64) -> Self {
+        self.restart_count = restart_count;
+        self
+    }
+
+    /// Sets the delay remaining before the next scheduled restart.
+    #[must_use]
+    pub fn next_restart_in(mut self, next_restart_in: Option<Duration>) -> Self {
+        self.next_restart_in = next_restart_in;
+        self
+    }
+
+    /// Sets the recursive snapshot for a nested supervisor child.
+    #[must_use]
+    pub fn supervisor(mut self, supervisor: Option<SupervisorSnapshot>) -> Self {
+        self.supervisor = supervisor.map(Box::new);
+        self
+    }
+
     /// Looks up a grandchild by id within this child's nested supervisor
     /// snapshot. Returns `None` if this child is not a nested supervisor or
     /// has no child with the given id.
@@ -107,6 +193,7 @@ impl ChildSnapshot {
 /// Lifecycle state of a supervisor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum SupervisorStateView {
     /// The supervisor is running and accepting commands.
     Running,
@@ -119,6 +206,7 @@ pub enum SupervisorStateView {
 /// Lifecycle state of a child task.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum ChildStateView {
     /// The child has been created but its task has not yet started running.
     Starting,
@@ -134,6 +222,7 @@ pub enum ChildStateView {
 /// Whether a child is a permanent member of the supervisor or is being removed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum ChildMembershipView {
     /// The child is an active member of the supervisor.
     Active,

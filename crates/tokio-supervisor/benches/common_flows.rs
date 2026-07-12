@@ -287,7 +287,7 @@ async fn wait_for_named_child_removed(
 ) {
     loop {
         match events.recv().await.expect("event stream") {
-            SupervisorEvent::ChildRemoved { id: removed_id } if removed_id == id => return,
+            SupervisorEvent::ChildRemoved { id: removed_id, .. } if removed_id == id => return,
             _ => {}
         }
     }

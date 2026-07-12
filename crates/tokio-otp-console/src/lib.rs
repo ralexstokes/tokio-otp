@@ -13,11 +13,11 @@
 //! #
 //! # #[tokio::main]
 //! # async fn main() {
-//! # let snapshot = SupervisorSnapshot {
-//! #     state: SupervisorStateView::Running,
-//! #     strategy: Strategy::OneForOne,
-//! #     children: vec![],
-//! # };
+//! # let snapshot = SupervisorSnapshot::new(
+//! #     SupervisorStateView::Running,
+//! #     Strategy::OneForOne,
+//! #     vec![],
+//! # );
 //! # let (_snap_tx, snap_rx) = watch::channel(snapshot);
 //! # let (evt_tx, _) = broadcast::channel(64);
 //! let handle = Console::builder()

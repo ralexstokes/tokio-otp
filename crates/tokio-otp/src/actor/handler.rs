@@ -12,7 +12,7 @@ use crate::actor::{
 ///
 /// Actors initialize concurrently by default. With
 /// [`StartMode::Sequential`](tokio_supervisor::StartMode::Sequential), each
-/// actor's [`on_start`](Self::on_start) must finish before the next actor is
+/// actor's [`on_start`](Actor::on_start) must finish before the next actor is
 /// spawned. At shutdown, every sibling is cancelled at the same time under
 /// one shared grace deadline. A draining actor can therefore
 /// observe a [`SendError`](crate::SendError) from a sibling that has already

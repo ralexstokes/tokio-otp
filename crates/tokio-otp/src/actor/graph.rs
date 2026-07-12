@@ -106,14 +106,22 @@ impl<A: RawActor> ErasedRunner for TypedRunner<A> {
 
 /// Errors returned from [`RunnableActor::run_until`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ActorRunError {
     /// Another instance of the same runnable actor is already active.
     #[error("actor `{actor_id}` is already running")]
-    AlreadyRunning { actor_id: String },
+    #[non_exhaustive]
+    AlreadyRunning {
+        /// Stable id of the actor whose existing run is still active.
+        actor_id: String,
+    },
     /// The actor returned an error.
     #[error("actor `{actor_id}` returned an error")]
+    #[non_exhaustive]
     Failed {
+        /// Stable id of the actor that failed.
         actor_id: String,
+        /// Error returned by the actor.
         #[source]
         source: BoxError,
     },

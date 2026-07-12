@@ -115,42 +115,30 @@ fn derived_topology_describes_nodes_and_edges() {
 
     assert_eq!(
         metadata,
-        TopologyMetadata {
-            nodes: vec![
-                TopologyNode {
-                    name: "frontend".to_owned(),
-                    actor_type: std::any::type_name::<Frontend>().to_owned(),
-                    message_type: std::any::type_name::<FrontendMsg>().to_owned(),
-                },
-                TopologyNode {
-                    name: "parser".to_owned(),
-                    actor_type: std::any::type_name::<Parser>().to_owned(),
-                    message_type: std::any::type_name::<ParserMsg>().to_owned(),
-                },
-                TopologyNode {
-                    name: "sink".to_owned(),
-                    actor_type: std::any::type_name::<Sink>().to_owned(),
-                    message_type: std::any::type_name::<SinkMsg>().to_owned(),
-                },
+        TopologyMetadata::new(
+            vec![
+                TopologyNode::new(
+                    "frontend",
+                    std::any::type_name::<Frontend>(),
+                    std::any::type_name::<FrontendMsg>(),
+                ),
+                TopologyNode::new(
+                    "parser",
+                    std::any::type_name::<Parser>(),
+                    std::any::type_name::<ParserMsg>(),
+                ),
+                TopologyNode::new(
+                    "sink",
+                    std::any::type_name::<Sink>(),
+                    std::any::type_name::<SinkMsg>(),
+                ),
             ],
-            edges: vec![
-                TopologyEdge {
-                    source: "frontend".to_owned(),
-                    target: "parser".to_owned(),
-                    message_type: std::any::type_name::<ParserMsg>().to_owned(),
-                },
-                TopologyEdge {
-                    source: "parser".to_owned(),
-                    target: "frontend".to_owned(),
-                    message_type: std::any::type_name::<FrontendMsg>().to_owned(),
-                },
-                TopologyEdge {
-                    source: "parser".to_owned(),
-                    target: "sink".to_owned(),
-                    message_type: std::any::type_name::<SinkMsg>().to_owned(),
-                },
+            vec![
+                TopologyEdge::new("frontend", "parser", std::any::type_name::<ParserMsg>(),),
+                TopologyEdge::new("parser", "frontend", std::any::type_name::<FrontendMsg>(),),
+                TopologyEdge::new("parser", "sink", std::any::type_name::<SinkMsg>()),
             ],
-        }
+        )
     );
 }
 
@@ -226,7 +214,7 @@ fn unfilled_slot_is_a_build_error() {
     builder.add(Sink { out: out_tx });
 
     match builder.build() {
-        Err(GraphBuildError::MissingActor { actor_id }) => assert_eq!(actor_id, "sink"),
+        Err(GraphBuildError::MissingActor { actor_id, .. }) => assert_eq!(actor_id, "sink"),
         Ok(_) => panic!("expected MissingActor, got valid graph"),
         Err(error) => panic!("expected MissingActor, got {error:?}"),
     }
@@ -239,7 +227,7 @@ fn duplicate_slot_name_is_a_build_error() {
     let (_b, _) = builder.slot::<SinkMsg>("sink");
 
     match builder.build() {
-        Err(GraphBuildError::DuplicateActorId { actor_id }) => assert_eq!(actor_id, "sink"),
+        Err(GraphBuildError::DuplicateActorId { actor_id, .. }) => assert_eq!(actor_id, "sink"),
         Ok(_) => panic!("expected DuplicateActorId, got valid graph"),
         Err(error) => panic!("expected DuplicateActorId, got {error:?}"),
     }
@@ -388,7 +376,7 @@ async fn graph_with_applies_builder_config() {
     park.send(()).await.expect("first message fits");
     assert!(matches!(
         park.try_send(()),
-        Err(SendError::MailboxFull { actor_id }) if actor_id == "park"
+        Err(SendError::MailboxFull { actor_id , .. }) if actor_id == "park"
     ));
 
     stop_graph(stop, tasks).await;
@@ -400,7 +388,7 @@ fn graph_with_reports_field_name_collision_with_pre_registered_actor() {
     builder.actor("park", Park);
 
     match ParkGraph::graph_with(builder, |_| ParkGraph { park: Park }) {
-        Err(GraphBuildError::DuplicateActorId { actor_id }) => assert_eq!(actor_id, "park"),
+        Err(GraphBuildError::DuplicateActorId { actor_id, .. }) => assert_eq!(actor_id, "park"),
         Ok(_) => panic!("expected DuplicateActorId, got valid graph"),
         Err(error) => panic!("expected DuplicateActorId, got {error:?}"),
     }
@@ -432,7 +420,7 @@ fn define_on_duplicate_detached_token_does_not_corrupt_first_slot() {
     builder.define(dup_slot, Park);
 
     match builder.build() {
-        Err(GraphBuildError::DuplicateActorId { actor_id }) => assert_eq!(actor_id, "park"),
+        Err(GraphBuildError::DuplicateActorId { actor_id, .. }) => assert_eq!(actor_id, "park"),
         other => panic!("expected DuplicateActorId, got {other:?}"),
     }
 }

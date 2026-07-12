@@ -51,20 +51,22 @@ fn print_event(event: &SupervisorEvent, depth: usize) {
             id,
             generation,
             event,
+            ..
         } => {
             println!("{indent}nested supervisor child: {id} generation={generation}");
             print_event(event, depth + 1);
         }
-        SupervisorEvent::ChildStarted { id, generation } => {
+        SupervisorEvent::ChildStarted { id, generation, .. } => {
             println!("{indent}child started: {id} generation={generation}");
         }
-        SupervisorEvent::ChildRemoved { id } => {
+        SupervisorEvent::ChildRemoved { id, .. } => {
             println!("{indent}child removed: {id}");
         }
         SupervisorEvent::ChildExited {
             id,
             generation,
             status,
+            ..
         } => match status {
             ExitStatusView::Completed => {
                 println!("{indent}child exited cleanly: {id} generation={generation}");
@@ -78,14 +80,16 @@ fn print_event(event: &SupervisorEvent, depth: usize) {
             ExitStatusView::Aborted => {
                 println!("{indent}child aborted: {id} generation={generation}");
             }
+            _ => println!("{indent}child exited: {id} generation={generation}"),
         },
-        SupervisorEvent::AutoShutdownTriggered { id, mode } => {
+        SupervisorEvent::AutoShutdownTriggered { id, mode, .. } => {
             println!("{indent}automatic shutdown triggered by {id}: {mode:?}");
         }
         SupervisorEvent::ChildRestartScheduled {
             id,
             generation,
             delay,
+            ..
         } => {
             println!(
                 "{indent}child restart scheduled: {id} generation={generation} delay={delay:?}"
@@ -95,11 +99,13 @@ fn print_event(event: &SupervisorEvent, depth: usize) {
             id,
             old_generation,
             new_generation,
+            ..
         } => {
             println!("{indent}child restarted: {id} {old_generation}->{new_generation}");
         }
         SupervisorEvent::RestartIntensityExceeded => {
             println!("{indent}restart intensity exceeded");
         }
+        _ => println!("{indent}unknown supervisor event"),
     }
 }

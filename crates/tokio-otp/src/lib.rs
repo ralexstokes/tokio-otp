@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! The front door to OTP-style fault tolerance on `tokio`: supervised typed
 //! actor graphs with one integrated [`Runtime`].
 //!
@@ -67,7 +69,7 @@
 //!   Use [`build_runtime`](SupervisedActors::build_runtime) for the integrated
 //!   [`Runtime`] or [`build`](SupervisedActors::build) for raw child specs.
 //!
-//! Fate-sharing is selected with [`Strategy::OneForAll`](tokio_supervisor::Strategy::OneForAll)
+//! Fate-sharing is selected with [`Strategy::OneForAll`]
 //! or supervision-tree shape; graphs themselves are not execution units.
 //!
 //! # Delivery contract: at-most-once
@@ -226,32 +228,23 @@ mod topology;
 
 /// Common imports for `tokio-otp` consumers.
 ///
-/// Re-exports this crate's actor and runtime surface plus the documented
-/// `tokio-supervisor` prelude, except the conflicts documented below.
+/// This prelude is intentionally limited to the traits, builders, policies,
+/// and observation types used by the primary [`Runtime::builder`] composition
+/// path. Common send/call errors are included; other error types and advanced
+/// composition surfaces remain available at the crate root without being
+/// injected by a glob import.
 pub mod prelude {
-    // Exclusions: tokio_supervisor::BoxError is the same type as the alias
-    // exported here, so omitting the duplicate is permanent and harmless;
-    // console types are feature-gated and experimental, so they remain
-    // available only at the crate root.
     #[cfg(feature = "derive")]
     pub use crate::Topology;
-    #[cfg(feature = "serde")]
-    pub use crate::codec;
     pub use crate::{
-        Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot,
-        ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, DynamicActorOptions, Graph,
-        GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorRef, RawActor,
-        RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime, RuntimeBuilder,
-        RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt, TimerRef, TopologyEdge,
-        TopologyMetadata, TopologyNode, TryRecvError,
+        Actor, ActorContext, ActorOptions, ActorRef, ActorResult, BoxError, CallError, Down,
+        DownReason, DrainPolicy, Graph, GraphBuilder, MailboxMode, MessageSize, MonitorRef,
+        RawActor, Reply, Runtime, RuntimeBuilder, RuntimeHandle, SendError, TimerRef,
     };
     pub use tokio_supervisor::{
-        AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
-        ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView,
-        RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode,
-        ShutdownPolicy, StartMode, Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder,
-        SupervisorError, SupervisorEvent, SupervisorHandle, SupervisorSnapshot, SupervisorSpec,
-        SupervisorStateView, SupervisorToken,
+        AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
+        ExitStatusView, RestartIntensity, RestartPolicy, ShutdownMode, ShutdownPolicy, StartMode,
+        Strategy, SupervisorEvent, SupervisorSnapshot, SupervisorStateView,
         prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
     };
 }
@@ -271,4 +264,13 @@ pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
 pub use supervised_actors::SupervisedActors;
 pub use tokio::sync::mpsc::error::TryRecvError;
+pub use tokio_supervisor::{
+    AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
+    ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, RestartIntensity,
+    RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode, ShutdownPolicy, StartMode,
+    Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
+    SupervisorEvent, SupervisorHandle, SupervisorSnapshot, SupervisorSpec, SupervisorStateView,
+    SupervisorToken,
+    prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
+};
 pub use topology::{TopologyEdge, TopologyMetadata, TopologyNode};

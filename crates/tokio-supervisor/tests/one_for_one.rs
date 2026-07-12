@@ -170,11 +170,7 @@ async fn temporary_child_does_not_restart() {
 
 #[tokio::test]
 async fn child_restart_intensity_is_isolated_per_child() {
-    let child_restart_intensity = RestartIntensity {
-        max_restarts: 1,
-        within: Duration::from_secs(1),
-        backoff: BackoffPolicy::None,
-    };
+    let child_restart_intensity = RestartIntensity::new(1, Duration::from_secs(1));
 
     let (child_a_tx, mut child_a_rx) = mpsc::unbounded_channel();
     let (child_b_tx, mut child_b_rx) = mpsc::unbounded_channel();
@@ -219,11 +215,7 @@ async fn child_restart_intensity_is_isolated_per_child() {
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForOne)
-        .restart_intensity(RestartIntensity {
-            max_restarts: 0,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(0, Duration::from_secs(1)))
         .child(child_a)
         .child(child_b)
         .build()
@@ -243,11 +235,10 @@ async fn restart_events_follow_exit_schedule_start_restart_order() {
     let attempts = Arc::new(AtomicUsize::new(0));
 
     let handle = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 2,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Fixed(Duration::from_millis(40)),
-        })
+        .restart_intensity(
+            RestartIntensity::new(2, Duration::from_secs(1))
+                .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(40))),
+        )
         .child(
             ChildSpec::new("flaky", move |ctx| {
                 let attempts = attempts.clone();
@@ -281,11 +272,12 @@ async fn restart_events_follow_exit_schedule_start_restart_order() {
                 id,
                 generation,
                 delay,
+                ..
             } if id == "flaky" && generation == 0 => {
                 assert_eq!(delay, Duration::from_millis(40));
                 sequence.push("scheduled");
             }
-            SupervisorEvent::ChildStarted { id, generation }
+            SupervisorEvent::ChildStarted { id, generation, .. }
                 if id == "flaky" && generation == 1 =>
             {
                 sequence.push("started");
@@ -294,6 +286,7 @@ async fn restart_events_follow_exit_schedule_start_restart_order() {
                 id,
                 old_generation,
                 new_generation,
+                ..
             } if id == "flaky" && old_generation == 0 && new_generation == 1 => {
                 saw_restart = true;
                 sequence.push("restarted");
