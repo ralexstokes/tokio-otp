@@ -113,8 +113,9 @@
 //! with their own supervision story) run actors.
 //!
 //! ```
-//! use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, RebindPolicy, Reply};
-//! use tokio_util::sync::CancellationToken;
+//! use tokio_otp::{
+//!     Actor, ActorContext, ActorResult, CancellationToken, GraphBuilder, RebindPolicy, Reply,
+//! };
 //!
 //! enum CounterMsg {
 //!     Add(u64),
@@ -181,6 +182,19 @@
 //! Install subscribers and samplers at the application boundary, not inside
 //! the library.
 //!
+//! # Deliberate dependency coupling
+//!
+//! Public mailbox errors are crate-owned, so changing the underlying channel
+//! implementation does not change the actor API. Cancellation is deliberately
+//! different: [`CancellationToken`] is the shared shutdown vocabulary at the
+//! Tokio ecosystem boundary. [`ActorContext::shutdown_token`],
+//! [`ActorContext::run_blocking`], and the shutdown futures passed to
+//! [`RunnableActor::run_until`] compose directly with that exact
+//! `tokio_util::sync::CancellationToken` type. Applications can therefore
+//! connect actor shutdown to existing cancellation trees without adapters. The
+//! token is re-exported here (and in [`prelude`]) so common local
+//! examples and small applications do not need an additional import path.
+//!
 //! # Examples
 //!
 //! - `examples/supervised_actors.rs` — per-actor supervision with default
@@ -239,11 +253,11 @@ pub mod prelude {
     pub use crate::codec;
     pub use crate::{
         Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot,
-        ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, DynamicActorOptions, Graph,
-        GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorRef, RawActor,
-        RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime, RuntimeBuilder,
-        RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt, TimerRef, TopologyEdge,
-        TopologyMetadata, TopologyNode, TryRecvError,
+        ActorStats, BoxError, CallError, CancellationToken, Down, DownReason, DrainPolicy,
+        DynamicActorOptions, Graph, GraphBuildError, GraphBuilder, MailboxMode, MessageSize,
+        MonitorRef, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory, Runtime,
+        RuntimeBuilder, RuntimeHandle, SendError, SupervisedActors, SupervisorHandleExt, TimerRef,
+        TopologyEdge, TopologyMetadata, TopologyNode, TryRecvError,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
@@ -265,10 +279,10 @@ pub use actor::{
     Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
     BoxError, CallError, Down, DownReason, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
     MailboxMode, MessageSize, MonitorRef, RawActor, RebindPolicy, Reply, RunnableActor,
-    RunnableActorFactory, SendError, TimerRef,
+    RunnableActorFactory, SendError, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
 pub use supervised_actors::SupervisedActors;
-pub use tokio::sync::mpsc::error::TryRecvError;
+pub use tokio_util::sync::CancellationToken;
 pub use topology::{TopologyEdge, TopologyMetadata, TopologyNode};

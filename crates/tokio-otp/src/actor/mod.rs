@@ -19,7 +19,7 @@ mod raw;
 pub use binding::{ActorStats, MailboxMode, RebindPolicy};
 pub use builder::{ActorOptions, ActorSlot, GraphBuilder, MessageSize};
 pub use context::{ActorContext, ActorRef, Reply, TimerRef};
-pub use error::{CallError, GraphBuildError, SendError};
+pub use error::{CallError, GraphBuildError, SendError, TryRecvError};
 pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};
 pub use handler::{Actor, DrainPolicy};
 pub use monitor::{Down, DownReason, MonitorRef};

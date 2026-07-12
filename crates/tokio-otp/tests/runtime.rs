@@ -9,14 +9,17 @@ use std::{
     time::Duration,
 };
 
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::{Notify, mpsc},
+    time::timeout,
+};
 use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, DynamicActorOptions, GraphBuilder,
     RawActor, Reply, Runtime, SendError, SupervisedActors, SupervisorHandleExt,
 };
 use tokio_supervisor::{
-    ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, Strategy, SupervisorBuilder,
-    SupervisorStateView,
+    ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, ShutdownPolicy, Strategy,
+    SupervisorBuilder, SupervisorError, SupervisorStateView,
 };
 
 struct Drain<M>(PhantomData<fn(M)>);
@@ -661,6 +664,74 @@ async fn runtime_into_supervisor_round_trips_supervisor() {
         .await
         .expect("shutdown completed")
         .expect("supervisor shut down cleanly");
+}
+
+#[derive(Clone)]
+struct PendingActor {
+    started: Arc<Notify>,
+}
+
+impl RawActor for PendingActor {
+    type Msg = ();
+
+    async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn actor_deadline_can_complete_before_strict_supervisor_deadline() {
+    let started = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    builder.actor_shutdown_timeout(Duration::from_millis(20));
+    builder.actor(
+        "worker",
+        PendingActor {
+            started: started.clone(),
+        },
+    );
+    let runtime = SupervisedActors::new(builder.build().expect("valid graph"))
+        .shutdown(ShutdownPolicy::cooperative_strict(Duration::from_secs(1)))
+        .build_runtime(SupervisorBuilder::new())
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+
+    timeout(Duration::from_secs(1), started.notified())
+        .await
+        .expect("actor started");
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("inner actor timeout completed the outer child cleanly");
+}
+
+#[tokio::test]
+async fn strict_supervisor_deadline_can_abort_before_actor_deadline() {
+    let started = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    builder.actor_shutdown_timeout(Duration::from_secs(1));
+    builder.actor(
+        "worker",
+        PendingActor {
+            started: started.clone(),
+        },
+    );
+    let runtime = SupervisedActors::new(builder.build().expect("valid graph"))
+        .shutdown(ShutdownPolicy::cooperative_strict(Duration::from_millis(
+            20,
+        )))
+        .build_runtime(SupervisorBuilder::new())
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+
+    timeout(Duration::from_secs(1), started.notified())
+        .await
+        .expect("actor started");
+    assert!(matches!(
+        handle.shutdown_and_wait().await,
+        Err(SupervisorError::ShutdownTimedOut(actor_id)) if actor_id == "worker"
+    ));
 }
 
 #[tokio::test]

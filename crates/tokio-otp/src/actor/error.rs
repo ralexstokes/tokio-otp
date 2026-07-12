@@ -1,5 +1,20 @@
 use thiserror::Error;
 
+/// Errors returned by [`ActorContext::try_recv`](crate::ActorContext::try_recv).
+///
+/// This crate-owned type keeps the actor mailbox API independent of Tokio's
+/// channel error types. It describes the actor-level states that callers can
+/// act on regardless of the mailbox implementation selected for an actor.
+#[derive(Debug, Error, Clone, Copy, Eq, PartialEq)]
+pub enum TryRecvError {
+    /// No message is immediately available, but the mailbox may receive more.
+    #[error("actor mailbox is empty")]
+    Empty,
+    /// The mailbox is closed and cannot receive more messages.
+    #[error("actor mailbox is disconnected")]
+    Disconnected,
+}
+
 /// Errors returned while validating a graph during build.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum GraphBuildError {
