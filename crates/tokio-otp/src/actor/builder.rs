@@ -211,10 +211,18 @@ impl GraphBuilder {
     ///
     /// This applies to each
     /// [`RunnableActor::run_until`](crate::RunnableActor::run_until). The
-    /// default timeout is 5 seconds. Any actor task still
-    /// running after the timeout is aborted; when this happens during a
-    /// requested shutdown it is reported as a clean shutdown with a
-    /// `Cancelled` actor exit.
+    /// default timeout is 5 seconds. Any actor task still running after the
+    /// timeout is aborted; when this happens during a requested shutdown it is
+    /// reported as a clean shutdown with a `Cancelled` actor exit.
+    ///
+    /// Under [`Runtime`](crate::Runtime) or [`SupervisedActors`](crate::SupervisedActors),
+    /// the actor is itself hosted by a supervisor child with an independent
+    /// [`ShutdownPolicy`](crate::ShutdownPolicy) deadline. This timeout aborts
+    /// the inner actor task; the supervisor policy can abort the outer child
+    /// task. Set this timeout no longer than the supervisor grace period when
+    /// the supervisor must wait for the actor layer's clean completion path.
+    /// See the [shutdown policy guide](https://stokes.io/tokio-otp/supervision.html#actor-and-supervisor-deadlines)
+    /// for the completion guarantees of each ordering.
     pub fn actor_shutdown_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.actor_shutdown_timeout = timeout;
         self

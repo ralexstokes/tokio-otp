@@ -6,7 +6,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{mpsc::error::TryRecvError, oneshot, watch},
+    sync::{oneshot, watch},
     time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,7 @@ use crate::actor::{
         ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxReceiver, MailboxRef,
         MessageSizeObserver, SendOutcome,
     },
-    error::{CallError, SendError},
+    error::{CallError, SendError, TryRecvError},
     monitor::{ActorMonitors, Down, MonitorHub, MonitorRef},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
@@ -658,7 +658,10 @@ impl<M: Send + 'static> ActorContext<M> {
     /// [`DrainPolicy::Drain`](crate::DrainPolicy) so the framework owns the
     /// drain loop.
     pub fn try_recv(&mut self) -> Result<M, TryRecvError> {
-        let message = self.mailbox.try_recv();
+        let message = self.mailbox.try_recv().map_err(|error| match error {
+            tokio::sync::mpsc::error::TryRecvError::Empty => TryRecvError::Empty,
+            tokio::sync::mpsc::error::TryRecvError::Disconnected => TryRecvError::Disconnected,
+        });
         if message.is_ok() {
             self.myself.record_received();
             self.observability.emit_message_received(&self.id);

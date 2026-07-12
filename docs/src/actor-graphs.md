@@ -283,6 +283,13 @@ still available as the escape hatch for custom loop control; after
 `ctx.recv().await` returns `None` because shutdown was requested, such actors
 can use `ctx.try_recv()` to drain immediately queued messages.
 
+`ctx.try_recv()` returns the crate-owned `tokio_otp::TryRecvError`. Earlier
+versions exposed Tokio's channel error at the same path; matching `Empty` and
+`Disconnected` remains source-compatible, but code that passed the error to an
+API expecting `tokio::sync::mpsc::error::TryRecvError` must now map those two
+variants explicitly. This boundary keeps actor code independent of the mailbox
+channel implementation.
+
 Restarts have the same loss boundary. Each actor run binds a fresh mailbox, so
 messages queued behind the message that makes an actor crash are lost with the
 old mailbox. `send` retries while an actor is between bindings, but

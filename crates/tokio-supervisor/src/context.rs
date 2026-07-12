@@ -78,7 +78,9 @@ impl ChildContext {
 
     /// Returns the cancellation token for this specific child instance.
     ///
-    /// The supervisor cancels it when the child should stop.
+    /// The supervisor cancels it when the child should stop. The returned type
+    /// is deliberately Tokio Util's [`CancellationToken`], allowing child code
+    /// to compose it directly with existing cancellation trees.
     pub fn shutdown_token(&self) -> &CancellationToken {
         &self.token
     }

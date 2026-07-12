@@ -8,9 +8,9 @@ mod coverage_probe {
     mod actor {
         use tokio_otp::prelude::{
             Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
-            BoxError, CallError, DrainPolicy, Graph, GraphBuildError, GraphBuilder, RawActor,
-            RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, Topology,
-            TryRecvError,
+            BoxError, CallError, CancellationToken, DrainPolicy, Graph, GraphBuildError,
+            GraphBuilder, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory,
+            SendError, Topology, TryRecvError,
         };
     }
 
