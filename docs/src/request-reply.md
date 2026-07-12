@@ -2,7 +2,7 @@
 
 `ActorRef::call` builds request/reply on the ordinary actor mailbox: it creates
 a one-shot `Reply<T>`, puts that reply handle in your message, sends the
-message, and waits for the actor to answer. Deadlines remain caller-owned, so
+message, and waits for the actor to answer. Deadlines are caller-owned, so
 bound the whole operation with `tokio::time::timeout`:
 
 ```rust,no_run
@@ -61,7 +61,8 @@ The composed timeout deliberately includes mailbox backpressure and restart
 backoff. Choose a deadline that covers the queueing delay your service is
 willing to tolerate:
 
-- Use `try_send` when fail-fast delivery is more useful than a reply.
+- Use `try_send` for fire-and-forget messages when failing fast on a full
+  mailbox beats waiting. There is no fail-fast variant of `call`.
 - Use `timeout(..., actor.call(...))` when the caller can wait for capacity or
   a short restart window, but needs a firm end-to-end deadline.
 - Do not use `call` with a conflating mailbox. A newer value can replace the

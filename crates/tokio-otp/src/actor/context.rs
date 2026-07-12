@@ -253,7 +253,6 @@ impl<M> ActorRef<M> {
     /// the request before it is handled, in which case this returns
     /// [`CallError::ReplyDropped`]. Conflating mailboxes are for state
     /// snapshots rather than request/response commands.
-    ///
     pub async fn call<T>(&self, message: impl FnOnce(Reply<T>) -> M) -> Result<T, CallError> {
         let (sender, receiver) = oneshot::channel();
         self.send(message(Reply { sender })).await?;

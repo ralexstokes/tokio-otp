@@ -11,7 +11,8 @@ use tokio::{
     time::timeout,
 };
 use tokio_otp::{
-    ActorContext, ActorResult, Graph, GraphBuilder, RawActor, RebindPolicy, Reply, RunnableActor,
+    ActorContext, ActorResult, CallError, Graph, GraphBuilder, RawActor, RebindPolicy, Reply,
+    RunnableActor,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -66,7 +67,7 @@ impl RawActor for ReplyImmediately {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn timeout_before_mailbox_binding_drops_the_request() {
     let mut builder = GraphBuilder::new();
     let rpc = builder.actor("rpc", ReplyImmediately);
@@ -120,7 +121,7 @@ impl RawActor for GatedMailbox {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn timeout_under_fifo_backpressure_drops_the_unaccepted_request() {
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
@@ -187,7 +188,7 @@ impl RawActor for DelayedReply {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn timeout_after_acceptance_does_not_cancel_actor_work_or_late_reply() {
     let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
     let (replied_tx, mut replied_rx) = mpsc::unbounded_channel();
@@ -224,4 +225,55 @@ async fn timeout_after_acceptance_does_not_cancel_actor_work_or_late_reply() {
         .expect("reply attempt observed");
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     stop(stop_token, task).await;
+}
+
+#[derive(Clone)]
+struct ExitWithoutReceiving {
+    started: mpsc::UnboundedSender<()>,
+    exit: Arc<Notify>,
+}
+
+impl RawActor for ExitWithoutReceiving {
+    type Msg = Request;
+
+    async fn run(&mut self, _ctx: ActorContext<Request>) -> ActorResult {
+        self.started.send(()).expect("test receiver alive");
+        self.exit.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn accepted_unread_request_lost_with_incarnation_reports_reply_dropped() {
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let exit = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    let rpc = builder.actor(
+        "rpc",
+        ExitWithoutReceiving {
+            started: started_tx,
+            exit: Arc::clone(&exit),
+        },
+    );
+    let graph = builder.build().expect("valid graph");
+    let (_stop_token, task) = start(actor(&graph, "rpc"));
+    started_rx.recv().await.expect("actor started");
+
+    let call = tokio::spawn({
+        let rpc = rpc.clone();
+        async move { rpc.call(Request::Get).await }
+    });
+    while rpc.stats().messages_accepted == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    exit.notify_one();
+    timeout(Duration::from_secs(1), task)
+        .await
+        .expect("incarnation exits in time")
+        .expect("actor task joins");
+    assert!(matches!(
+        call.await.expect("call task joins"),
+        Err(CallError::ReplyDropped { actor_id }) if actor_id == "rpc"
+    ));
 }
