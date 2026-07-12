@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::sync::{Mutex, Notify};
-use tokio_otp::prelude::*;
+use tokio_otp::{SupervisorError, prelude::*};
 
 #[derive(Clone)]
 struct Probe {

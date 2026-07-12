@@ -7,28 +7,30 @@ use tokio_otp::prelude::*;
 mod coverage_probe {
     mod actor {
         use tokio_otp::prelude::{
-            Actor, ActorContext, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
-            BoxError, CallError, CancellationToken, DrainPolicy, Graph, GraphBuildError,
-            GraphBuilder, RawActor, RebindPolicy, Reply, RunnableActor, RunnableActorFactory,
-            SendError, Topology, TryRecvError,
+            Actor, ActorContext, ActorOptions, ActorRef, ActorResult, BoxError, CallError,
+            CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder, MailboxMode,
+            MessageSize, MonitorRef, RawActor, Reply, SendError, TimerRef, Topology,
         };
     }
 
     mod supervisor {
         use tokio_otp::prelude::{
-            AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult,
-            ChildSnapshot, ChildSpec, ChildStateView, ControlError, EventPathSegment,
-            ExitStatusView, RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy,
-            ShutdownMode, ShutdownPolicy, Strategy, Supervisor, SupervisorBuildError,
-            SupervisorBuilder, SupervisorError, SupervisorEvent, SupervisorEventReceiverExt as _,
-            SupervisorHandle, SupervisorSnapshot, SupervisorSnapshotReceiverExt as _,
-            SupervisorSpec, SupervisorStateView, SupervisorToken,
+            AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
+            ExitStatusView, RestartIntensity, RestartPolicy, ShutdownMode, ShutdownPolicy,
+            StartMode, Strategy, SupervisorEvent, SupervisorEventReceiverExt as _,
+            SupervisorSnapshot, SupervisorSnapshotReceiverExt as _, SupervisorStateView,
         };
     }
 
     mod otp {
-        use tokio_otp::prelude::{
-            DynamicActorOptions, Runtime, RuntimeBuilder, RuntimeHandle, SupervisedActors,
+        use tokio_otp::prelude::{Runtime, RuntimeBuilder, RuntimeHandle};
+    }
+
+    mod advanced_root {
+        use tokio_otp::{
+            ChildContext, ChildResult, ChildSpec, ControlError, EventPathSegment, RestartMonitor,
+            RestartMonitorError, Supervisor, SupervisorBuildError, SupervisorBuilder,
+            SupervisorError, SupervisorHandle, SupervisorSpec, SupervisorToken,
         };
     }
 }
@@ -87,7 +89,7 @@ async fn umbrella_prelude_supports_blocking_and_supervisor_helpers() {
         events.wait_for_event(|event| {
             matches!(
                 event,
-                SupervisorEvent::ChildStarted { id, generation: 0 } if id == "worker"
+                SupervisorEvent::ChildStarted { id, generation: 0 , .. } if id == "worker"
             )
         }),
     )
@@ -98,7 +100,8 @@ async fn umbrella_prelude_supports_blocking_and_supervisor_helpers() {
         started,
         SupervisorEvent::ChildStarted {
             ref id,
-            generation: 0
+            generation: 0,
+            ..
         } if id == "worker"
     ));
 

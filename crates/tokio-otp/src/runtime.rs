@@ -55,6 +55,7 @@ impl ActorRuntimeState {
 
 /// Options applied when adding a runtime actor to a supervised runtime.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct DynamicActorOptions {
     /// Restart policy for the supervised actor child.
     pub restart: RestartPolicy,
@@ -71,6 +72,34 @@ impl Default for DynamicActorOptions {
             shutdown: ShutdownPolicy::default(),
             restart_intensity: None,
         }
+    }
+}
+
+impl DynamicActorOptions {
+    /// Creates options with restart-on-failure and the default shutdown policy.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the actor's restart policy.
+    #[must_use]
+    pub fn restart(mut self, restart: RestartPolicy) -> Self {
+        self.restart = restart;
+        self
+    }
+
+    /// Sets the actor's shutdown policy.
+    #[must_use]
+    pub fn shutdown(mut self, shutdown: ShutdownPolicy) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+
+    /// Overrides the supervisor's restart intensity for this actor.
+    #[must_use]
+    pub fn restart_intensity(mut self, restart_intensity: RestartIntensity) -> Self {
+        self.restart_intensity = Some(restart_intensity);
+        self
     }
 }
 
@@ -433,5 +462,13 @@ fn rebind_policy_for_restart(restart: RestartPolicy) -> RebindPolicy {
         RestartPolicy::Always => RebindPolicy::Always,
         RestartPolicy::OnFailure => RebindPolicy::OnFailure,
         RestartPolicy::Never => RebindPolicy::Never,
+        // `RestartPolicy` is intentionally extensible. A future policy must
+        // opt in to a more precise binding policy when this crate adopts it.
+        _ => {
+            tracing::warn!(
+                "unknown restart policy; defaulting actor rebind behavior to on-failure"
+            );
+            RebindPolicy::OnFailure
+        }
     }
 }

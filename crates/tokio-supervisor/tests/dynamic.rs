@@ -302,7 +302,7 @@ async fn remove_child_stops_it_without_restarting() {
     let mut saw_removed = false;
     while !saw_removed {
         match common::recv_supervisor_event(&mut events).await {
-            SupervisorEvent::ChildRemoved { id } if id == "removable" => {
+            SupervisorEvent::ChildRemoved { id, .. } if id == "removable" => {
                 saw_removed = true;
             }
             _ => {}
@@ -431,10 +431,8 @@ async fn concurrent_removal_requests_are_serialized() {
 async fn removal_returns_supervisor_stopping_when_shutdown_intervenes() {
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let (cancelled_tx, mut cancelled_rx) = mpsc::unbounded_channel();
-    let fast_shutdown = ShutdownPolicy {
-        grace: common::SHORT_GRACE,
-        mode: ShutdownMode::CooperativeThenAbort,
-    };
+    let fast_shutdown =
+        ShutdownPolicy::new(common::SHORT_GRACE, ShutdownMode::CooperativeThenAbort);
 
     let supervisor = SupervisorBuilder::new()
         .child(
@@ -513,11 +511,12 @@ async fn remove_child_completes_promptly_during_restart_backoff() {
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
 
     let handle = SupervisorBuilder::new()
-        .restart_intensity(tokio_supervisor::RestartIntensity {
-            max_restarts: 4,
-            within: std::time::Duration::from_secs(1),
-            backoff: tokio_supervisor::BackoffPolicy::Fixed(std::time::Duration::from_secs(1)),
-        })
+        .restart_intensity(
+            tokio_supervisor::RestartIntensity::new(4, std::time::Duration::from_secs(1))
+                .with_backoff(tokio_supervisor::BackoffPolicy::Fixed(
+                    std::time::Duration::from_secs(1),
+                )),
+        )
         .child(
             ChildSpec::new("removable", move |ctx| {
                 let starts_tx = starts_tx.clone();
@@ -562,10 +561,10 @@ async fn remove_child_completes_promptly_during_restart_backoff() {
     let mut saw_removed = false;
     while !saw_removed {
         match common::recv_supervisor_event(&mut events).await {
-            SupervisorEvent::ChildRemoved { id } if id == "removable" => {
+            SupervisorEvent::ChildRemoved { id, .. } if id == "removable" => {
                 saw_removed = true;
             }
-            SupervisorEvent::ChildStarted { id, generation }
+            SupervisorEvent::ChildStarted { id, generation, .. }
                 if id == "removable" && generation > 0 =>
             {
                 panic!("removed child restarted while removal was pending");
@@ -587,11 +586,10 @@ async fn removed_child_does_not_restart_recycled_slot_after_backoff() {
     let backoff = std::time::Duration::from_millis(80);
 
     let handle = SupervisorBuilder::new()
-        .restart_intensity(tokio_supervisor::RestartIntensity {
-            max_restarts: 4,
-            within: std::time::Duration::from_secs(1),
-            backoff: tokio_supervisor::BackoffPolicy::Fixed(backoff),
-        })
+        .restart_intensity(
+            tokio_supervisor::RestartIntensity::new(4, std::time::Duration::from_secs(1))
+                .with_backoff(tokio_supervisor::BackoffPolicy::Fixed(backoff)),
+        )
         .child(
             ChildSpec::new("removable", move |ctx| {
                 let removable_tx = removable_tx.clone();

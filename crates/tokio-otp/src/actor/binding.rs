@@ -21,6 +21,7 @@ use crate::actor::{
 /// therefore survive restarts. Mailbox fields describe the currently bound
 /// incarnation and are zero while no mailbox is bound.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct ActorStats {
     /// Actor id used to correlate these stats with supervisor snapshots.
     pub actor_id: String,
@@ -132,6 +133,7 @@ pub enum MailboxMode<M> {
     /// When the capacity is already occupied by distinct keys, a message for
     /// a new key evicts the oldest unread key. Construct this variant with
     /// [`conflate_by_key`](Self::conflate_by_key).
+    #[non_exhaustive]
     ConflateByKey {
         #[doc(hidden)]
         key_matches: MailboxKeyMatcher<M>,
@@ -528,6 +530,7 @@ impl<M> Clone for BindingState<M> {
 /// Controls whether a binding should wait for another mailbox after a run
 /// exits.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RebindPolicy {
     /// A rebind is always expected unless shutdown was requested.
     Always,

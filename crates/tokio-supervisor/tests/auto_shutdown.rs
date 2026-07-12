@@ -54,7 +54,7 @@ async fn any_significant_clean_exit_stops_siblings_and_supervisor() {
             SupervisorEvent::ChildExited { id, .. } if id == "trigger" => {
                 sequence.push("exited");
             }
-            SupervisorEvent::AutoShutdownTriggered { id, mode }
+            SupervisorEvent::AutoShutdownTriggered { id, mode, .. }
                 if id == "trigger" && mode == AutoShutdown::AnySignificant =>
             {
                 sequence.push("auto_shutdown");

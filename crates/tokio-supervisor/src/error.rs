@@ -3,6 +3,7 @@ use thiserror::Error;
 /// Errors returned when building a [`Supervisor`](crate::Supervisor) from a
 /// [`SupervisorBuilder`](crate::SupervisorBuilder).
 #[derive(Debug, Error, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SupervisorBuildError {
     /// Two or more children share the same id string.
     #[error("duplicate child id: {0}")]
@@ -15,6 +16,7 @@ pub enum SupervisorBuildError {
 
 /// Fatal errors that cause a running supervisor to exit.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SupervisorError {
     /// The supervisor stopped or a child exited before reporting startup
     /// readiness.
@@ -38,6 +40,7 @@ pub enum SupervisorError {
 /// [`SupervisorHandle`](crate::SupervisorHandle) (e.g. adding or removing
 /// children at runtime).
 #[derive(Debug, Error, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ControlError {
     /// A child with this id already exists in the supervisor.
     #[error("duplicate child id: {0}")]
@@ -71,6 +74,7 @@ pub enum ControlError {
 /// Errors from [`SupervisorHandle::monitor_restart`](crate::SupervisorHandle::monitor_restart)
 /// and the [`RestartMonitor`](crate::RestartMonitor) future.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RestartMonitorError {
     /// No child with this id is known to the supervisor.
     #[error("unknown child id: {0}")]

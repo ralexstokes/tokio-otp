@@ -91,6 +91,7 @@ fn child_state(state: ChildStateView) -> &'static str {
         ChildStateView::Running => "running",
         ChildStateView::Stopping => "stopping",
         ChildStateView::Stopped => "stopped",
+        _ => "unknown",
     }
 }
 
@@ -98,5 +99,6 @@ fn child_membership(membership: ChildMembershipView) -> &'static str {
     match membership {
         ChildMembershipView::Active => "active",
         ChildMembershipView::Removing => "removing",
+        _ => "unknown",
     }
 }

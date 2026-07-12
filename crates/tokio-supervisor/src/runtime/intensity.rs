@@ -169,11 +169,7 @@ mod tests {
 
     fn tracker(policy: BackoffPolicy) -> RestartTracker {
         RestartTracker {
-            intensity: RestartIntensity {
-                max_restarts: 10,
-                within: Duration::from_secs(10),
-                backoff: policy,
-            },
+            intensity: RestartIntensity::new(10, Duration::from_secs(10)).with_backoff(policy),
             times: VecDeque::new(),
             rng: JitterRng {
                 state: 0x1234_5678_9abc_def0,

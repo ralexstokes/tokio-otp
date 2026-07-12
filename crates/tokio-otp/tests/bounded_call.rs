@@ -274,6 +274,6 @@ async fn accepted_unread_request_lost_with_incarnation_reports_reply_dropped() {
         .expect("actor task joins");
     assert!(matches!(
         call.await.expect("call task joins"),
-        Err(CallError::ReplyDropped { actor_id }) if actor_id == "rpc"
+        Err(CallError::ReplyDropped { actor_id, .. }) if actor_id == "rpc"
     ));
 }

@@ -5,10 +5,10 @@ use tokio::{
     time::timeout,
 };
 use tokio_otp::{
-    ActorContext, ActorOptions, ActorRef, ActorResult, DynamicActorOptions, GraphBuilder,
-    MailboxMode, MessageSize, RawActor, Runtime, SendError, SupervisedActors,
+    ActorContext, ActorOptions, ActorRef, ActorResult, ChildSpec, ControlError,
+    DynamicActorOptions, GraphBuilder, MailboxMode, MessageSize, RawActor, Runtime, SendError,
+    ShutdownPolicy, Strategy, SupervisedActors, SupervisorBuilder,
 };
-use tokio_supervisor::{ChildSpec, ControlError, ShutdownPolicy, Strategy, SupervisorBuilder};
 
 fn build_runtime(graph: tokio_otp::Graph) -> Runtime {
     SupervisedActors::new(graph)
@@ -117,7 +117,7 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
     handle.remove_child("sink").await.expect("sink removed");
     assert!(matches!(
         sink.send("after-remove".to_owned()).await,
-        Err(SendError::ActorTerminated { actor_id }) if actor_id == "sink"
+        Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "sink"
     ));
 
     let replacement = handle
@@ -308,10 +308,9 @@ async fn timed_out_removal_terminates_the_typed_ref() {
         .add_actor(
             "dynamic",
             PendingActor,
-            DynamicActorOptions {
-                shutdown: ShutdownPolicy::cooperative_strict(Duration::from_millis(20)),
-                ..DynamicActorOptions::default()
-            },
+            DynamicActorOptions::new().shutdown(ShutdownPolicy::cooperative_strict(
+                Duration::from_millis(20),
+            )),
         )
         .await
         .expect("actor added");
@@ -322,7 +321,7 @@ async fn timed_out_removal_terminates_the_typed_ref() {
     ));
     assert!(matches!(
         actor_ref.send(()).await,
-        Err(SendError::ActorTerminated { actor_id }) if actor_id == "dynamic"
+        Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "dynamic"
     ));
 
     handle

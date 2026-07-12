@@ -292,10 +292,10 @@ async fn one_for_all_restarts_after_aborting_stubborn_cooperative_then_abort_pee
         }
     })
     .restart(RestartPolicy::OnFailure)
-    .shutdown(ShutdownPolicy {
-        grace: common::SHORT_GRACE,
-        mode: ShutdownMode::CooperativeThenAbort,
-    });
+    .shutdown(ShutdownPolicy::new(
+        common::SHORT_GRACE,
+        ShutdownMode::CooperativeThenAbort,
+    ));
 
     let peer_live_flag_for_child = peer_live_flag.clone();
     let peer = ChildSpec::new("stubborn-peer", move |ctx| {
@@ -311,10 +311,10 @@ async fn one_for_all_restarts_after_aborting_stubborn_cooperative_then_abort_pee
         }
     })
     .restart(RestartPolicy::Always)
-    .shutdown(ShutdownPolicy {
-        grace: common::SHORT_GRACE,
-        mode: ShutdownMode::CooperativeThenAbort,
-    });
+    .shutdown(ShutdownPolicy::new(
+        common::SHORT_GRACE,
+        ShutdownMode::CooperativeThenAbort,
+    ));
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
@@ -455,11 +455,7 @@ async fn group_restart_uses_the_failing_child_restart_intensity() {
         }
     })
     .restart(RestartPolicy::OnFailure)
-    .restart_intensity(RestartIntensity {
-        max_restarts: 1,
-        within: Duration::from_secs(1),
-        backoff: BackoffPolicy::None,
-    });
+    .restart_intensity(RestartIntensity::new(1, Duration::from_secs(1)));
 
     let peer = ChildSpec::new("peer", move |ctx| {
         let peer_tx = peer_tx.clone();
@@ -472,19 +468,11 @@ async fn group_restart_uses_the_failing_child_restart_intensity() {
         }
     })
     .restart(RestartPolicy::Always)
-    .restart_intensity(RestartIntensity {
-        max_restarts: 0,
-        within: Duration::from_secs(1),
-        backoff: BackoffPolicy::None,
-    });
+    .restart_intensity(RestartIntensity::new(0, Duration::from_secs(1)));
 
     let supervisor = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
-        .restart_intensity(RestartIntensity {
-            max_restarts: 0,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(0, Duration::from_secs(1)))
         .child(trigger)
         .child(peer)
         .build()
@@ -524,11 +512,10 @@ async fn triggering_child_restart_scheduled_precedes_child_restart_events() {
 
     let handle = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
-        .restart_intensity(RestartIntensity {
-            max_restarts: 2,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Fixed(Duration::from_millis(40)),
-        })
+        .restart_intensity(
+            RestartIntensity::new(2, Duration::from_secs(1))
+                .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(40))),
+        )
         .child(trigger)
         .child(peer)
         .build()
@@ -551,11 +538,12 @@ async fn triggering_child_restart_scheduled_precedes_child_restart_events() {
                 id,
                 generation,
                 delay,
+                ..
             } if id == "trigger" && generation == 0 => {
                 assert_eq!(delay, Duration::from_millis(40));
                 sequence.push("trigger_restart_scheduled");
             }
-            SupervisorEvent::ChildStarted { id, generation }
+            SupervisorEvent::ChildStarted { id, generation, .. }
                 if id == "trigger" && generation == 1 =>
             {
                 sequence.push("trigger_started");
@@ -564,17 +552,21 @@ async fn triggering_child_restart_scheduled_precedes_child_restart_events() {
                 id,
                 old_generation,
                 new_generation,
+                ..
             } if id == "trigger" && old_generation == 0 && new_generation == 1 => {
                 saw_trigger_restart = true;
                 sequence.push("trigger_restarted");
             }
-            SupervisorEvent::ChildStarted { id, generation } if id == "peer" && generation == 1 => {
+            SupervisorEvent::ChildStarted { id, generation, .. }
+                if id == "peer" && generation == 1 =>
+            {
                 sequence.push("peer_started");
             }
             SupervisorEvent::ChildRestarted {
                 id,
                 old_generation,
                 new_generation,
+                ..
             } if id == "peer" && old_generation == 0 && new_generation == 1 => {
                 saw_peer_restart = true;
                 sequence.push("peer_restarted");
@@ -647,11 +639,10 @@ async fn removing_failed_child_abandons_pending_group_restart() {
 
     let handle = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
-        .restart_intensity(RestartIntensity {
-            max_restarts: 2,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Fixed(backoff),
-        })
+        .restart_intensity(
+            RestartIntensity::new(2, Duration::from_secs(1))
+                .with_backoff(BackoffPolicy::Fixed(backoff)),
+        )
         .child(trigger)
         .child(peer)
         .build()
@@ -734,11 +725,10 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
 
     let handle = SupervisorBuilder::new()
         .strategy(Strategy::OneForAll)
-        .restart_intensity(RestartIntensity {
-            max_restarts: 2,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Fixed(Duration::from_millis(40)),
-        })
+        .restart_intensity(
+            RestartIntensity::new(2, Duration::from_secs(1))
+                .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(40))),
+        )
         .child(trigger)
         .child(peer)
         .build()
@@ -761,6 +751,7 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
                 id,
                 old_generation,
                 new_generation,
+                ..
             } if id == "trigger" && old_generation == 0 && new_generation == 1 => {
                 saw_trigger_restart = true;
             }
@@ -768,6 +759,7 @@ async fn rapid_failures_during_group_restart_do_not_schedule_a_second_group_rest
                 id,
                 old_generation,
                 new_generation,
+                ..
             } if id == "peer" && old_generation == 0 && new_generation == 1 => {
                 saw_peer_restart = true;
             }

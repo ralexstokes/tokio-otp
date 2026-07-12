@@ -16,6 +16,7 @@ use crate::{ActorRef, SendError};
 
 /// An error while translating or delivering a message at a byte boundary.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CodecError {
     /// The bytes were not valid JSON for the requested message type.
     #[error("JSON codec error: {0}")]

@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ref id,
                 old_generation: 0,
                 new_generation: 1,
-            } if id == "nested-worker"
+            .. } if id == "nested-worker"
         ) {
             break;
         }

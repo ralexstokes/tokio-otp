@@ -201,6 +201,7 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
                 && matches!(*event, SupervisorEvent::SupervisorStarted) =>
@@ -211,13 +212,14 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
-                && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 } if id == "leaf") =>
+                && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 , .. } if id == "leaf") =>
             {
                 saw_nested_leaf_started = true;
             }
-            SupervisorEvent::ChildRemoved { id } if id == "nested" => {
+            SupervisorEvent::ChildRemoved { id, .. } if id == "nested" => {
                 saw_removed = true;
             }
             _ => {}
@@ -271,6 +273,7 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
                 && matches!(*event, SupervisorEvent::SupervisorStarted) =>
@@ -317,9 +320,10 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
-                && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 } if id == "dynamic") =>
+                && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 , .. } if id == "dynamic") =>
             {
                 saw_nested_dynamic_started = true;
             }
@@ -327,9 +331,10 @@ async fn root_handle_can_add_and_remove_children_inside_nested_supervisor() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
-                && matches!(*event, SupervisorEvent::ChildRemoved { ref id } if id == "dynamic") =>
+                && matches!(*event, SupervisorEvent::ChildRemoved { ref id , .. } if id == "dynamic") =>
             {
                 saw_nested_removed = true;
             }
@@ -372,6 +377,7 @@ async fn parent_event_stream_includes_forwarded_nested_events() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
                 && matches!(*event, SupervisorEvent::SupervisorStarted) =>
@@ -382,9 +388,10 @@ async fn parent_event_stream_includes_forwarded_nested_events() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
-                && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 } if id == "leaf") =>
+                && matches!(*event, SupervisorEvent::ChildStarted { ref id, generation: 0 , .. } if id == "leaf") =>
             {
                 saw_nested_leaf_started = true;
             }
@@ -392,9 +399,10 @@ async fn parent_event_stream_includes_forwarded_nested_events() {
                 id,
                 generation,
                 event,
+                ..
             } if id == "nested"
                 && generation == 0
-                && matches!(*event, SupervisorEvent::ChildExited { ref id, generation: 0, status: ExitStatusView::Completed } if id == "leaf") =>
+                && matches!(*event, SupervisorEvent::ChildExited { ref id, generation: 0, status: ExitStatusView::Completed , .. } if id == "leaf") =>
             {
                 saw_nested_leaf_exit = true;
             }
@@ -442,19 +450,13 @@ async fn nested_events_preserve_the_full_tree_path() {
     loop {
         let event = common::recv_supervisor_event(&mut events).await;
         if let SupervisorEvent::Nested { .. } = &event
-            && matches!(event.leaf(), SupervisorEvent::ChildStarted { id, generation: 0 } if id == "leaf")
+            && matches!(event.leaf(), SupervisorEvent::ChildStarted { id, generation: 0 , .. } if id == "leaf")
         {
             assert_eq!(
                 event.path(),
                 vec![
-                    EventPathSegment {
-                        id: "outer".to_owned(),
-                        generation: 0,
-                    },
-                    EventPathSegment {
-                        id: "middle".to_owned(),
-                        generation: 0,
-                    },
+                    EventPathSegment::new("outer", 0),
+                    EventPathSegment::new("middle", 0),
                 ]
             );
             break;

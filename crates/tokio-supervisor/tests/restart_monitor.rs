@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_supervisor::{
-    BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, RestartIntensity,
+    ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, RestartIntensity,
     RestartMonitorError, RestartPolicy, ShutdownMode, ShutdownPolicy, SupervisorBuilder,
     SupervisorError, SupervisorSnapshot,
 };
@@ -106,11 +106,7 @@ async fn monitor_restart_allows_coalesced_generations() {
         }
     })
     .restart(RestartPolicy::OnFailure)
-    .restart_intensity(RestartIntensity {
-        max_restarts: 5,
-        within: Duration::from_secs(1),
-        backoff: BackoffPolicy::None,
-    });
+    .restart_intensity(RestartIntensity::new(5, Duration::from_secs(1)));
 
     let handle = SupervisorBuilder::new()
         .child(child)
