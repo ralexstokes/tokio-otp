@@ -219,7 +219,7 @@
 //! - `examples/actor_tracing.rs`, `examples/supervisor_snapshot_trace.rs` —
 //!   tracing and snapshot observability.
 //! - `examples/json_edge.rs` — decoding byte-oriented JSON frames into typed
-//!   actor messages (requires `serde`).
+//!   actor messages with `serde_json` at the application boundary.
 //!
 //! # Cargo features
 //!
@@ -227,12 +227,10 @@
 //! |---------|---------|-------------|
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Supervisor lifecycle metrics plus opt-in actor message-size metrics. |
-//! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries; serialization for topology metadata. |
+//! | `serde` | no | Serialization for topology metadata. |
 
 mod actor;
 mod builder;
-#[cfg(feature = "serde")]
-pub mod codec;
 mod runtime;
 mod supervised_actors;
 mod topology;

@@ -3,7 +3,7 @@
 use std::io::{BufRead, Cursor};
 
 use serde::Deserialize;
-use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, Runtime, codec};
+use tokio_otp::{Actor, ActorContext, ActorResult, DrainPolicy, GraphBuilder, Runtime};
 
 #[derive(Deserialize)]
 struct Order {
@@ -21,6 +21,11 @@ impl Actor for Printer {
         println!("{} x {}", order.quantity, order.item);
         Ok(())
     }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        // Print every accepted order before the runtime shuts down.
+        DrainPolicy::Drain
+    }
 }
 
 #[tokio::main]
@@ -34,7 +39,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for frame in Cursor::new(input).split(b'\n') {
         let frame = frame?;
         if !frame.is_empty() {
-            codec::decode_and_send(&printer, frame).await?;
+            let order = serde_json::from_slice(&frame)?;
+            printer.send(order).await?;
         }
     }
 
