@@ -14,12 +14,12 @@ axum = { workspace = true, features = ["ws"] }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["net", "signal"] }
+tokio = { workspace = true, features = ["net"] }
 tokio-otp = { path = "../tokio-otp", default-features = false }
 tokio-supervisor = { workspace = true, features = ["serde"] }
 tracing.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "signal"] }
 tokio-tungstenite.workspace = true

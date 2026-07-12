@@ -12,7 +12,7 @@ use tokio::{
     sync::{broadcast, watch},
     time::{sleep, timeout},
 };
-use tokio_otp::Runtime;
+use tokio_otp::{Actor, ActorContext, ActorResult, DynamicActorOptions, Runtime};
 use tokio_otp_console::{ActorStatsView, Console, ConsoleHandle};
 use tokio_supervisor::{
     ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, Strategy, SupervisorEvent,
@@ -28,6 +28,17 @@ use tokio_tungstenite::{
 };
 
 type TestWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[derive(Clone)]
+struct IdleActor;
+
+impl Actor for IdleActor {
+    type Msg = ();
+
+    async fn handle(&mut self, _message: (), _ctx: &ActorContext<()>) -> ActorResult {
+        Ok(())
+    }
+}
 
 fn snapshot(child_state: ChildStateView) -> SupervisorSnapshot {
     SupervisorSnapshot {
@@ -450,13 +461,28 @@ async fn runtime_convenience_wires_public_observability() {
         .await
         .expect("failed to add runtime child");
 
-    let event = loop {
+    runtime
+        .add_actor("tracked", IdleActor, DynamicActorOptions::default())
+        .await
+        .expect("failed to add runtime actor");
+
+    let mut saw_event = false;
+    let mut saw_actor_stats = false;
+    while !saw_event || !saw_actor_stats {
         let frame = read_json(&mut socket).await;
-        if frame["type"] == "event" {
-            break frame;
+        match frame["type"].as_str() {
+            Some("event") => saw_event = true,
+            Some("actor_stats")
+                if frame["data"]
+                    .as_array()
+                    .is_some_and(|stats| !stats.is_empty()) =>
+            {
+                assert_eq!(frame["data"][0]["actor_id"], "tracked");
+                saw_actor_stats = true;
+            }
+            _ => {}
         }
-    };
-    assert_eq!(event["type"], "event");
+    }
 
     console.shutdown();
     runtime
