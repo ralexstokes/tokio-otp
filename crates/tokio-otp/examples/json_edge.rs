@@ -23,6 +23,7 @@ impl Actor for Printer {
     }
 
     fn drain_policy(&self) -> DrainPolicy {
+        // Print every accepted order before the runtime shuts down.
         DrainPolicy::Drain
     }
 }
