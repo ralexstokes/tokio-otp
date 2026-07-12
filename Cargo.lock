@@ -1314,6 +1314,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "tokio",

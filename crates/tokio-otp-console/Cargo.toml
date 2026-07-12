@@ -10,6 +10,7 @@ categories = ["asynchronous", "visualization"]
 
 [dependencies]
 axum = { workspace = true, features = ["ws"] }
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["net"] }

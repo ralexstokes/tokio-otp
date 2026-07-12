@@ -17,7 +17,14 @@ use tokio_supervisor::{
     ChildMembershipView, ChildSnapshot, ChildStateView, Strategy, SupervisorEvent,
     SupervisorSnapshot, SupervisorStateView,
 };
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{
+        Error as WebSocketError, Message,
+        client::IntoClientRequest,
+        http::{HeaderValue, StatusCode, header},
+    },
+};
 
 type TestWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -90,6 +97,25 @@ async fn connect(addr: SocketAddr) -> TestWebSocket {
         .0
 }
 
+async fn http_get(addr: SocketAddr, host: &str, path: &str, extra_headers: &str) -> String {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("failed to connect to console");
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}Connection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("failed to send HTTP request");
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("failed to read HTTP response");
+    String::from_utf8(response).expect("HTTP response was not UTF-8")
+}
+
 async fn read_json(socket: &mut TestWebSocket) -> Value {
     let message = timeout(Duration::from_secs(5), socket.next())
         .await
@@ -122,26 +148,180 @@ async fn read_handshake(socket: &mut TestWebSocket) {
 #[tokio::test]
 async fn index_serves_dashboard() {
     let (handle, _snapshot_tx, _event_tx) = spawn_console().await;
-    let mut stream = TcpStream::connect(handle.local_addr())
-        .await
-        .expect("failed to connect to console");
-    stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .await
-        .expect("failed to send HTTP request");
-
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .expect("failed to read HTTP response");
-    let response = String::from_utf8(response).expect("HTTP response was not UTF-8");
+    let response = http_get(
+        handle.local_addr(),
+        &format!("localhost:{}", handle.local_addr().port()),
+        "/",
+        "",
+    )
+    .await;
     assert!(response.starts_with("HTTP/1.1 200"));
     let (headers, body) = response
         .split_once("\r\n\r\n")
         .expect("HTTP response did not contain a header/body separator");
     assert!(headers.to_ascii_lowercase().contains("text/html"));
     assert!(body.contains("tokio-otp console"));
+}
+
+#[tokio::test]
+async fn rejects_unrecognized_host() {
+    let (handle, _snapshot_tx, _event_tx) = spawn_console().await;
+    let response = http_get(handle.local_addr(), "attacker.example", "/", "").await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+}
+
+#[tokio::test]
+async fn rejects_cross_origin_websocket() {
+    let (handle, _snapshot_tx, _event_tx) = spawn_console().await;
+    let mut request = format!("ws://{}/ws", handle.local_addr())
+        .into_client_request()
+        .expect("failed to build websocket request");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://attacker.example"),
+    );
+
+    let error = connect_async(request)
+        .await
+        .expect_err("cross-origin websocket unexpectedly connected");
+    let WebSocketError::Http(response) = error else {
+        panic!("expected HTTP rejection, got {error}");
+    };
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn accepts_matching_browser_websocket_origin() {
+    let (handle, _snapshot_tx, _event_tx) = spawn_console().await;
+    let mut request = format!("ws://{}/ws", handle.local_addr())
+        .into_client_request()
+        .expect("failed to build websocket request");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_str(&format!("http://{}", handle.local_addr()))
+            .expect("local address produced invalid Origin"),
+    );
+
+    let (mut socket, _) = connect_async(request)
+        .await
+        .expect("matching-origin websocket was rejected");
+    read_handshake(&mut socket).await;
+}
+
+#[tokio::test]
+async fn token_bootstrap_sets_cookie_and_authorization_is_accepted() {
+    let (snapshot_tx, snapshot_rx) = watch::channel(snapshot(ChildStateView::Running));
+    let (event_tx, _) = broadcast::channel(16);
+    let handle = Console::builder()
+        .snapshots(snapshot_rx)
+        .events(event_tx)
+        .access_token("test-token")
+        .bind(([127, 0, 0, 1], 0))
+        .build()
+        .spawn()
+        .await
+        .expect("failed to spawn token-protected console");
+    drop(snapshot_tx);
+    let host = handle.local_addr().to_string();
+
+    let unauthorized = http_get(handle.local_addr(), &host, "/", "").await;
+    assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
+    assert!(
+        unauthorized
+            .to_ascii_lowercase()
+            .contains("www-authenticate: bearer")
+    );
+
+    let wrong_token = http_get(handle.local_addr(), &host, "/?token=wrong", "").await;
+    assert!(wrong_token.starts_with("HTTP/1.1 401"), "{wrong_token}");
+    assert!(!wrong_token.to_ascii_lowercase().contains("set-cookie:"));
+
+    let bootstrap = http_get(handle.local_addr(), &host, "/?token=test-token", "").await;
+    assert!(bootstrap.starts_with("HTTP/1.1 303"), "{bootstrap}");
+    let cookie = bootstrap
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .and_then(|value| value.split_once(';').map(|(cookie, _)| cookie))
+        .expect("bootstrap response did not set a session cookie");
+    assert!(cookie.starts_with("tokio_otp_console_session_"));
+    assert!(!cookie.ends_with("=test-token"));
+    assert!(bootstrap.to_ascii_lowercase().contains("samesite=lax"));
+    assert!(bootstrap.to_ascii_lowercase().contains("location: /"));
+
+    let cookie_authorized = http_get(
+        handle.local_addr(),
+        &host,
+        "/",
+        &format!("Cookie: {cookie}\r\n"),
+    )
+    .await;
+    assert!(
+        cookie_authorized.starts_with("HTTP/1.1 200"),
+        "{cookie_authorized}"
+    );
+
+    let authorized = http_get(
+        handle.local_addr(),
+        &host,
+        "/",
+        "Authorization: bearer test-token\r\n",
+    )
+    .await;
+    assert!(authorized.starts_with("HTTP/1.1 200"), "{authorized}");
+
+    let ws_query_request = format!("ws://{}/ws?token=test-token", handle.local_addr())
+        .into_client_request()
+        .expect("failed to build websocket request");
+    let error = connect_async(ws_query_request)
+        .await
+        .expect_err("websocket query token unexpectedly authenticated");
+    let WebSocketError::Http(response) = error else {
+        panic!("expected HTTP rejection, got {error}");
+    };
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut ws_cookie_request = format!("ws://{}/ws", handle.local_addr())
+        .into_client_request()
+        .expect("failed to build websocket request");
+    ws_cookie_request.headers_mut().insert(
+        header::COOKIE,
+        HeaderValue::from_str(cookie).expect("session cookie was not a valid header value"),
+    );
+    let (mut socket, _) = connect_async(ws_cookie_request)
+        .await
+        .expect("session-authenticated websocket was rejected");
+    read_handshake(&mut socket).await;
+}
+
+#[tokio::test]
+async fn explicit_host_allowlist_accepts_external_and_default_port_forms() {
+    let (snapshot_tx, snapshot_rx) = watch::channel(snapshot(ChildStateView::Running));
+    let (event_tx, _) = broadcast::channel(16);
+    let handle = Console::builder()
+        .snapshots(snapshot_rx)
+        .events(event_tx)
+        .allowed_host("console.example:80")
+        .bind(([127, 0, 0, 1], 0))
+        .build()
+        .spawn()
+        .await
+        .expect("failed to spawn allowlisted console");
+    drop(snapshot_tx);
+
+    let response = http_get(handle.local_addr(), "console.example", "/", "").await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
+
+#[test]
+#[should_panic(expected = "access_token required for non-loopback binds")]
+fn non_loopback_bind_requires_token() {
+    let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot(ChildStateView::Running));
+    let (event_tx, _) = broadcast::channel(16);
+    let _console = Console::builder()
+        .snapshots(snapshot_rx)
+        .events(event_tx)
+        .bind(([0, 0, 0, 0], 9100))
+        .build();
 }
 
 #[tokio::test]
