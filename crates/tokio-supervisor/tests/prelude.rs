@@ -34,7 +34,7 @@ async fn prelude_supports_handle_event_and_snapshot_helpers() {
         events.wait_for_event(|event| {
             matches!(
                 event,
-                SupervisorEvent::ChildStarted { id, generation: 0 } if id == "worker"
+                SupervisorEvent::ChildStarted { id, generation: 0 , .. } if id == "worker"
             )
         }),
     )
@@ -45,7 +45,8 @@ async fn prelude_supports_handle_event_and_snapshot_helpers() {
         started,
         SupervisorEvent::ChildStarted {
             ref id,
-            generation: 0
+            generation: 0,
+            ..
         } if id == "worker"
     ));
 
@@ -133,19 +134,12 @@ fn prelude_policy_builders_cover_common_configuration() {
 
     assert_eq!(
         RestartIntensity::new(3, Duration::from_secs(10)),
-        RestartIntensity {
-            max_restarts: 3,
-            within: Duration::from_secs(10),
-            backoff: BackoffPolicy::None,
-        }
+        RestartIntensity::new(3, Duration::from_secs(10))
     );
     assert_eq!(
         RestartIntensity::new(2, Duration::from_secs(5))
             .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(50))),
-        RestartIntensity {
-            max_restarts: 2,
-            within: Duration::from_secs(5),
-            backoff: BackoffPolicy::Fixed(Duration::from_millis(50)),
-        }
+        RestartIntensity::new(2, Duration::from_secs(5))
+            .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(50)))
     );
 }

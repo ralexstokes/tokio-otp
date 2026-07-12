@@ -119,7 +119,7 @@ async fn wait_for_child_removed(
     let event = timeout(
         Duration::from_secs(2),
         events.wait_for_event(
-            |event| matches!(event, SupervisorEvent::ChildRemoved { id } if id == child_id),
+            |event| matches!(event, SupervisorEvent::ChildRemoved { id , .. } if id == child_id),
         ),
     )
     .await??;
@@ -140,7 +140,7 @@ async fn wait_for_nested_supervisor_started(
                     id,
                     generation: 0,
                     event,
-                } if id == nested_id && matches!(**event, SupervisorEvent::SupervisorStarted)
+                .. } if id == nested_id && matches!(**event, SupervisorEvent::SupervisorStarted)
             )
         }),
     )
@@ -163,13 +163,13 @@ async fn wait_for_nested_child_started(
                     id,
                     generation: 0,
                     event,
-                } if id == nested_id
+                .. } if id == nested_id
                     && matches!(
                         **event,
                         SupervisorEvent::ChildStarted {
                             ref id,
                             generation: 0,
-                        } if id == child_id
+                        .. } if id == child_id
                     )
             )
         }),
@@ -193,8 +193,8 @@ async fn wait_for_nested_child_removed(
                     id,
                     generation: 0,
                     event,
-                } if id == nested_id
-                    && matches!(**event, SupervisorEvent::ChildRemoved { ref id } if id == child_id)
+                .. } if id == nested_id
+                    && matches!(**event, SupervisorEvent::ChildRemoved { ref id , .. } if id == child_id)
             )
         }),
     )

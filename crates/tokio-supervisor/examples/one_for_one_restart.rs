@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             id,
             old_generation,
             new_generation,
+            ..
         } = event
         {
             println!("child {} restarted", id);

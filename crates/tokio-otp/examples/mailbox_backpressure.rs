@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // the binding exists would fail with `ActorNotRunning`.
     worker.send("first").await?;
     match worker.try_send("second") {
-        Err(SendError::MailboxFull { actor_id }) => {
+        Err(SendError::MailboxFull { actor_id, .. }) => {
             println!("`{actor_id}` mailbox is full");
         }
         Ok(()) => panic!("second send unexpectedly succeeded"),

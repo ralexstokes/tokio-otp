@@ -20,11 +20,14 @@ test:
     cargo test --workspace --all-targets --all-features
     cargo test --workspace --doc --all-features
 
+doc-check:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+
 nixfmt-check:
     nixfmt --check flake.nix nix/crane-checks.nix
 
 # Fast local CI mirror — reuses the local cargo cache and incremental builds.
-ci: fmt lint build test nixfmt-check build-book
+ci: fmt lint build test doc-check nixfmt-check build-book
 
 # Exactly what GitHub Actions runs; use before pushing or when touching nix files.
 ci-nix:

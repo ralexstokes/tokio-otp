@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Notification that an actor incarnation has exited.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Down {
     /// Stable id of the actor that was monitored.
     pub actor_id: String,

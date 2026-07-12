@@ -84,11 +84,10 @@ async fn snapshot_shows_restart_state_and_last_exit() {
         }
     })
     .restart(RestartPolicy::OnFailure)
-    .restart_intensity(RestartIntensity {
-        max_restarts: 5,
-        within: Duration::from_secs(1),
-        backoff: BackoffPolicy::Fixed(Duration::from_millis(200)),
-    });
+    .restart_intensity(
+        RestartIntensity::new(5, Duration::from_secs(1))
+            .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(200))),
+    );
 
     let supervisor = SupervisorBuilder::new()
         .child(flaky_child)
@@ -345,7 +344,7 @@ async fn events_observe_already_published_snapshot_state() {
             .expect("timed out waiting for supervisor event")
             .expect("supervisor event stream should remain open")
         {
-            SupervisorEvent::ChildStarted { id, generation }
+            SupervisorEvent::ChildStarted { id, generation, .. }
                 if id == "worker" && generation == 0 =>
             {
                 let snapshot = handle.snapshot();

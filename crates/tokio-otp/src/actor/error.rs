@@ -19,18 +19,21 @@ pub enum TryRecvError {
 
 /// Errors returned while validating a graph during build.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum GraphBuildError {
     /// The graph was built without any actors.
     #[error("graph must contain at least one actor")]
     EmptyGraph,
     /// Two actor implementations shared the same id.
     #[error("duplicate actor id `{actor_id}`")]
+    #[non_exhaustive]
     DuplicateActorId {
         /// Actor id registered twice.
         actor_id: String,
     },
     /// An actor slot was opened but no implementation was registered.
     #[error("actor `{actor_id}` slot was opened but never filled")]
+    #[non_exhaustive]
     MissingActor {
         /// Actor id without an implementation.
         actor_id: String,
@@ -42,29 +45,48 @@ pub enum GraphBuildError {
 
 /// Errors returned when sending to an actor mailbox.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SendError {
     /// The target actor is currently unbound because it is not running.
     #[error("actor `{actor_id}` is not currently running")]
-    ActorNotRunning { actor_id: String },
+    #[non_exhaustive]
+    ActorNotRunning {
+        /// Stable id of the target actor.
+        actor_id: String,
+    },
     /// The target actor has terminated and no restart is scheduled.
     #[error("actor `{actor_id}` has terminated")]
-    ActorTerminated { actor_id: String },
+    #[non_exhaustive]
+    ActorTerminated {
+        /// Stable id of the target actor.
+        actor_id: String,
+    },
     /// The target actor's mailbox is full.
     #[error("mailbox for actor `{actor_id}` is full")]
-    MailboxFull { actor_id: String },
+    #[non_exhaustive]
+    MailboxFull {
+        /// Stable id of the target actor.
+        actor_id: String,
+    },
     /// The target actor's mailbox is closed.
     #[error("mailbox for actor `{actor_id}` is closed")]
-    MailboxClosed { actor_id: String },
+    #[non_exhaustive]
+    MailboxClosed {
+        /// Stable id of the target actor.
+        actor_id: String,
+    },
 }
 
 /// Errors returned by [`ActorRef::call`](crate::ActorRef::call).
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum CallError {
     /// The request message could not be delivered.
     #[error(transparent)]
     Send(#[from] SendError),
     /// The actor dropped the [`Reply`](crate::Reply) without answering.
     #[error("actor `{actor_id}` dropped the reply")]
+    #[non_exhaustive]
     ReplyDropped {
         /// Target actor id.
         actor_id: String,

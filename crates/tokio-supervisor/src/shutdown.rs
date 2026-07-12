@@ -8,6 +8,7 @@ use std::time::Duration;
 /// [`SupervisorSpec::significant`](crate::SupervisorSpec::significant).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum AutoShutdown {
     /// Significant child exits do not stop the supervisor.
     #[default]
@@ -25,6 +26,7 @@ pub enum AutoShutdown {
 
 /// How the supervisor stops a child task during shutdown or removal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ShutdownMode {
     /// Like [`CooperativeThenAbort`](ShutdownMode::CooperativeThenAbort), but
     /// failing to exit within the grace period is reported as a timeout error
@@ -53,6 +55,7 @@ pub enum ShutdownMode {
 /// The default is [`CooperativeThenAbort`](ShutdownMode::CooperativeThenAbort)
 /// with a 5-second grace period.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct ShutdownPolicy {
     /// How long to wait for the child to exit after its cancellation token is
     /// triggered.

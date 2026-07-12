@@ -41,22 +41,15 @@ impl Actor for IdleActor {
 }
 
 fn snapshot(child_state: ChildStateView) -> SupervisorSnapshot {
-    SupervisorSnapshot {
-        state: SupervisorStateView::Running,
-        strategy: Strategy::OneForOne,
-        children: vec![ChildSnapshot {
-            id: "worker".into(),
-            generation: 0,
-            started: child_state == ChildStateView::Running,
-            startup_aborted: false,
-            state: child_state,
-            membership: ChildMembershipView::Active,
-            last_exit: None,
-            restart_count: 0,
-            next_restart_in: None,
-            supervisor: None,
-        }],
-    }
+    SupervisorSnapshot::new(
+        SupervisorStateView::Running,
+        Strategy::OneForOne,
+        vec![
+            ChildSnapshot::new("worker", 0, child_state)
+                .started(child_state == ChildStateView::Running)
+                .membership(ChildMembershipView::Active),
+        ],
+    )
 }
 
 fn actor_stats() -> Vec<ActorStatsView> {
@@ -415,10 +408,7 @@ async fn ws_streams_events() {
     read_handshake(&mut socket).await;
 
     event_tx
-        .send(SupervisorEvent::ChildStarted {
-            id: "worker".into(),
-            generation: 1,
-        })
+        .send(SupervisorEvent::child_started("worker", 1))
         .expect("failed to broadcast supervisor event");
 
     let frame = read_non_stats_json(&mut socket).await;

@@ -20,11 +20,7 @@ mod common;
 #[tokio::test]
 async fn repeated_failures_can_exceed_restart_intensity() {
     let supervisor = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(1, Duration::from_secs(1)))
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
                 .restart(RestartPolicy::OnFailure),
@@ -44,11 +40,10 @@ async fn repeated_failures_can_exceed_restart_intensity() {
 #[tokio::test]
 async fn configured_backoff_delays_restart_attempts() {
     let supervisor = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Fixed(Duration::from_millis(75)),
-        })
+        .restart_intensity(
+            RestartIntensity::new(1, Duration::from_secs(1))
+                .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(75))),
+        )
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
                 .restart(RestartPolicy::OnFailure),
@@ -73,15 +68,15 @@ async fn configured_backoff_delays_restart_attempts() {
 #[tokio::test]
 async fn jittered_exponential_backoff_delays_restart_attempts() {
     let supervisor = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::JitteredExponential {
-                base: Duration::from_millis(80),
-                factor: 2,
-                max: Duration::from_millis(500),
-            },
-        })
+        .restart_intensity(
+            RestartIntensity::new(1, Duration::from_secs(1)).with_backoff(
+                BackoffPolicy::JitteredExponential {
+                    base: Duration::from_millis(80),
+                    factor: 2,
+                    max: Duration::from_millis(500),
+                },
+            ),
+        )
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
                 .restart(RestartPolicy::OnFailure),
@@ -108,15 +103,15 @@ async fn exponential_backoff_delays_restart_attempts_by_expected_steps() {
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
 
     let handle = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 3,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Exponential {
-                base: Duration::from_millis(40),
-                factor: 2,
-                max: Duration::from_millis(200),
-            },
-        })
+        .restart_intensity(
+            RestartIntensity::new(3, Duration::from_secs(1)).with_backoff(
+                BackoffPolicy::Exponential {
+                    base: Duration::from_millis(40),
+                    factor: 2,
+                    max: Duration::from_millis(200),
+                },
+            ),
+        )
         .child(
             ChildSpec::new("flaky", move |ctx| {
                 let starts_tx = starts_tx.clone();
@@ -161,15 +156,15 @@ async fn backoff_attempts_survive_window_eviction_and_reset_after_a_long_run() {
     let release_for_child = release.clone();
 
     let handle = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 5,
-            within: Duration::from_millis(200),
-            backoff: BackoffPolicy::Exponential {
-                base: Duration::from_millis(50),
-                factor: 4,
-                max: Duration::from_secs(2),
-            },
-        })
+        .restart_intensity(
+            RestartIntensity::new(5, Duration::from_millis(200)).with_backoff(
+                BackoffPolicy::Exponential {
+                    base: Duration::from_millis(50),
+                    factor: 4,
+                    max: Duration::from_secs(2),
+                },
+            ),
+        )
         .child(
             ChildSpec::new("flaky", move |ctx| {
                 let release = release_for_child.clone();
@@ -233,19 +228,14 @@ async fn backoff_attempts_survive_window_eviction_and_reset_after_a_long_run() {
 #[tokio::test]
 async fn child_restart_intensity_override_controls_backoff() {
     let supervisor = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 0,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(0, Duration::from_secs(1)))
         .child(
             ChildSpec::new("flaky", |_| async { Err(common::test_error("boom")) })
                 .restart(RestartPolicy::OnFailure)
-                .restart_intensity(RestartIntensity {
-                    max_restarts: 1,
-                    within: Duration::from_secs(1),
-                    backoff: BackoffPolicy::Fixed(Duration::from_millis(75)),
-                }),
+                .restart_intensity(
+                    RestartIntensity::new(1, Duration::from_secs(1))
+                        .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(75))),
+                ),
         )
         .build()
         .expect("valid supervisor");
@@ -306,11 +296,7 @@ async fn restart_intensity_is_tracked_per_child_for_one_for_one() {
     .restart(RestartPolicy::OnFailure);
 
     let handle = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(1, Duration::from_secs(1)))
         .child(alpha)
         .child(beta)
         .build()
@@ -329,11 +315,7 @@ async fn child_restart_intensity_override_is_enforced() {
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
 
     let handle = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 10,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(10, Duration::from_secs(1)))
         .child(
             ChildSpec::new("flaky", move |ctx| {
                 let starts_tx = starts_tx.clone();
@@ -345,11 +327,7 @@ async fn child_restart_intensity_override_is_enforced() {
                 }
             })
             .restart(RestartPolicy::OnFailure)
-            .restart_intensity(RestartIntensity {
-                max_restarts: 1,
-                within: Duration::from_secs(1),
-                backoff: BackoffPolicy::None,
-            }),
+            .restart_intensity(RestartIntensity::new(1, Duration::from_secs(1))),
         )
         .build()
         .expect("valid supervisor")
@@ -373,11 +351,7 @@ async fn restart_budget_recovers_after_failures_age_out_of_window() {
 
     let release_second_failure_for_child = release_second_failure.clone();
     let handle = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_millis(100),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(1, Duration::from_millis(100)))
         .child(
             ChildSpec::new("flaky", move |ctx| {
                 let release_second_failure = release_second_failure_for_child.clone();
@@ -465,11 +439,7 @@ async fn restart_intensity_is_tracked_per_failing_child_for_one_for_all() {
 
     let handle = SupervisorBuilder::new()
         .strategy(tokio_supervisor::Strategy::OneForAll)
-        .restart_intensity(RestartIntensity {
-            max_restarts: 1,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(1, Duration::from_secs(1)))
         .child(alpha)
         .child(beta)
         .build()

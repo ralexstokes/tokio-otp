@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! Derive macros for `tokio-otp`.
 //!
 //! Do not depend on this crate directly: `tokio-otp` re-exports
@@ -287,13 +289,11 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             .zip(&field_names)
             .map(|(ty, name)| {
                 quote_spanned! {ty.span()=>
-                    ::tokio_otp::TopologyNode {
-                        name: ::std::string::String::from(#name),
-                        actor_type: ::std::string::String::from(::std::any::type_name::<#ty>()),
-                        message_type: ::std::string::String::from(
-                            ::std::any::type_name::<<#ty as ::tokio_otp::RawActor>::Msg>(),
-                        ),
-                    }
+                    ::tokio_otp::TopologyNode::new(
+                        #name,
+                        ::std::any::type_name::<#ty>(),
+                        ::std::any::type_name::<<#ty as ::tokio_otp::RawActor>::Msg>(),
+                    )
                 }
             })
             .collect::<Vec<_>>();
@@ -302,23 +302,21 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             let target = &edge.target_name;
             let target_ty = field_types[edge.target_index];
             quote_spanned! {edge.target.span()=>
-                ::tokio_otp::TopologyEdge {
-                    source: ::std::string::String::from(#source),
-                    target: ::std::string::String::from(#target),
-                    message_type: ::std::string::String::from(
-                        ::std::any::type_name::<<#target_ty as ::tokio_otp::RawActor>::Msg>(),
-                    ),
-                }
+                ::tokio_otp::TopologyEdge::new(
+                    #source,
+                    #target,
+                    ::std::any::type_name::<<#target_ty as ::tokio_otp::RawActor>::Msg>(),
+                )
             }
         });
 
         quote! {
             /// Returns the actor nodes and declared message-flow edges for this topology.
             #vis fn topology_metadata() -> ::tokio_otp::TopologyMetadata {
-                ::tokio_otp::TopologyMetadata {
-                    nodes: ::std::vec::Vec::from([#(#nodes),*]),
-                    edges: ::std::vec::Vec::from([#(#edge_values),*]),
-                }
+                ::tokio_otp::TopologyMetadata::new(
+                    ::std::vec::Vec::from([#(#nodes),*]),
+                    ::std::vec::Vec::from([#(#edge_values),*]),
+                )
             }
         }
     });

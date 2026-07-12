@@ -215,7 +215,7 @@ async fn try_send_reports_unbound_and_terminated_states() {
 
     assert!(matches!(
         worker.try_send(()),
-        Err(SendError::ActorNotRunning { actor_id }) if actor_id == "worker"
+        Err(SendError::ActorNotRunning { actor_id , .. }) if actor_id == "worker"
     ));
 
     let (stop, task) = start_graph(&graph);
@@ -223,7 +223,7 @@ async fn try_send_reports_unbound_and_terminated_states() {
 
     assert!(matches!(
         worker.try_send(()),
-        Err(SendError::ActorTerminated { actor_id }) if actor_id == "worker"
+        Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "worker"
     ));
 }
 
@@ -563,7 +563,7 @@ async fn handler_discard_drops_queued_messages_and_call_reply() {
 
     assert!(matches!(
         call_task.await.expect("call task joined"),
-        Err(CallError::ReplyDropped { actor_id }) if actor_id == "worker"
+        Err(CallError::ReplyDropped { actor_id , .. }) if actor_id == "worker"
     ));
     assert_eq!(
         recv(&mut events_rx, "handler stopped").await,
@@ -815,7 +815,7 @@ fn build_rejects_invalid_graph_definitions() {
     let (_slot, _ghost) = missing.slot::<u32>("ghost");
     assert!(matches!(
         missing.build(),
-        Err(GraphBuildError::MissingActor { actor_id }) if actor_id == "ghost"
+        Err(GraphBuildError::MissingActor { actor_id , .. }) if actor_id == "ghost"
     ));
 
     let mut duplicate = GraphBuilder::new();
@@ -823,7 +823,7 @@ fn build_rejects_invalid_graph_definitions() {
     duplicate.actor("worker", Drain::<u32>::new());
     assert!(matches!(
         duplicate.build(),
-        Err(GraphBuildError::DuplicateActorId { actor_id }) if actor_id == "worker"
+        Err(GraphBuildError::DuplicateActorId { actor_id , .. }) if actor_id == "worker"
     ));
 
     let empty = GraphBuilder::new();
@@ -972,7 +972,7 @@ async fn send_to_dropped_never_started_graph_returns_actor_terminated() {
     drop(graph);
     assert!(matches!(
         echo.send(1).await,
-        Err(SendError::ActorTerminated { actor_id }) if actor_id == "echo"
+        Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "echo"
     ));
 }
 
@@ -1184,19 +1184,15 @@ mod runnable_actor {
             Err(SendError::MailboxFull { .. })
         ));
 
-        assert_eq!(
-            worker_ref.stats(),
-            tokio_otp::ActorStats {
-                actor_id: "worker".to_owned(),
-                messages_received: 0,
-                messages_accepted: 2,
-                messages_conflated: 0,
-                message_bytes_accepted: None,
-                sends_rejected: 1,
-                mailbox_depth: 2,
-                mailbox_capacity: 2,
-            }
-        );
+        let stats = worker_ref.stats();
+        assert_eq!(stats.actor_id, "worker");
+        assert_eq!(stats.messages_received, 0);
+        assert_eq!(stats.messages_accepted, 2);
+        assert_eq!(stats.messages_conflated, 0);
+        assert_eq!(stats.message_bytes_accepted, None);
+        assert_eq!(stats.sends_rejected, 1);
+        assert_eq!(stats.mailbox_depth, 2);
+        assert_eq!(stats.mailbox_capacity, 2);
         assert_eq!(graph.stats(), vec![worker_ref.stats()]);
 
         release.notify_one();
@@ -1307,6 +1303,7 @@ mod runnable_actor {
                     Ok(()) | Err(SendError::MailboxFull { .. }) => {
                         sleep(Duration::from_millis(1)).await;
                     }
+                    Err(_) => panic!("unexpected send error while observing stale mailbox"),
                 }
             }
         })
@@ -1421,7 +1418,7 @@ mod runnable_actor {
             worker
                 .run_until(pending::<()>(), RebindPolicy::Never)
                 .await,
-            Err(ActorRunError::AlreadyRunning { actor_id }) if actor_id == "worker"
+            Err(ActorRunError::AlreadyRunning { actor_id , .. }) if actor_id == "worker"
         ));
 
         stop_actor(stop, task)
@@ -1459,7 +1456,7 @@ mod runnable_actor {
         assert!(matches!(result, Err(ActorRunError::Failed { .. })));
         assert!(matches!(
             worker_ref.try_send(()),
-            Err(SendError::ActorNotRunning { actor_id }) if actor_id == "worker"
+            Err(SendError::ActorNotRunning { actor_id , .. }) if actor_id == "worker"
         ));
 
         // A second run of the same actor declares Never: the same failed exit
@@ -1477,7 +1474,7 @@ mod runnable_actor {
         assert!(matches!(result, Err(ActorRunError::Failed { .. })));
         assert!(matches!(
             worker_ref.try_send(()),
-            Err(SendError::ActorTerminated { actor_id }) if actor_id == "worker"
+            Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "worker"
         ));
     }
 
@@ -1618,7 +1615,7 @@ mod runnable_actor {
         // terminated.
         assert!(matches!(
             worker_ref.try_send("early".to_owned()),
-            Err(SendError::ActorNotRunning { actor_id }) if actor_id == "worker"
+            Err(SendError::ActorNotRunning { actor_id , .. }) if actor_id == "worker"
         ));
 
         // Each run ends by clean early exit (not requested shutdown), so the
@@ -1657,7 +1654,7 @@ mod runnable_actor {
         worker.terminate_binding();
         assert!(matches!(
             worker_ref.try_send("late".to_owned()),
-            Err(SendError::ActorTerminated { actor_id }) if actor_id == "worker"
+            Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "worker"
         ));
     }
 
@@ -1840,7 +1837,7 @@ mod runnable_actor {
                 .try_recv()
                 .unwrap_or_else(|_| panic!("drained message {expected} produced an outcome"));
             assert!(
-                matches!(outcome, Err(SendError::ActorTerminated { ref actor_id }) if actor_id == "sink"),
+                matches!(outcome, Err(SendError::ActorTerminated { ref actor_id , .. }) if actor_id == "sink"),
                 "drained send observed the stopped sibling: {outcome:?}"
             );
         }

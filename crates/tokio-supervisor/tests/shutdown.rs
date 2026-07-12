@@ -169,10 +169,10 @@ async fn stubborn_child_is_aborted_in_cooperative_then_abort_mode() {
                     }
                 }
             })
-            .shutdown(ShutdownPolicy {
-                grace: common::SHORT_GRACE,
-                mode: ShutdownMode::CooperativeThenAbort,
-            }),
+            .shutdown(ShutdownPolicy::new(
+                common::SHORT_GRACE,
+                ShutdownMode::CooperativeThenAbort,
+            )),
         )
         .build()
         .expect("valid supervisor");
@@ -204,10 +204,10 @@ async fn cooperative_shutdown_times_out_with_stuck_child_name() {
                     }
                 }
             })
-            .shutdown(ShutdownPolicy {
-                grace: common::SHORT_GRACE,
-                mode: ShutdownMode::CooperativeStrict,
-            }),
+            .shutdown(ShutdownPolicy::new(
+                common::SHORT_GRACE,
+                ShutdownMode::CooperativeStrict,
+            )),
         )
         .build()
         .expect("valid supervisor");
@@ -252,10 +252,10 @@ async fn mixed_shutdown_only_reports_pure_cooperative_children() {
                     }
                 }
             })
-            .shutdown(ShutdownPolicy {
-                grace: common::SHORT_GRACE,
-                mode: ShutdownMode::CooperativeThenAbort,
-            }),
+            .shutdown(ShutdownPolicy::new(
+                common::SHORT_GRACE,
+                ShutdownMode::CooperativeThenAbort,
+            )),
         )
         .child(
             ChildSpec::new("cooperative", move |_ctx| {
@@ -269,10 +269,10 @@ async fn mixed_shutdown_only_reports_pure_cooperative_children() {
                     }
                 }
             })
-            .shutdown(ShutdownPolicy {
-                grace: common::SHORT_GRACE,
-                mode: ShutdownMode::CooperativeStrict,
-            }),
+            .shutdown(ShutdownPolicy::new(
+                common::SHORT_GRACE,
+                ShutdownMode::CooperativeStrict,
+            )),
         )
         .build()
         .expect("valid supervisor");
@@ -319,10 +319,10 @@ async fn cooperative_remove_child_times_out_with_stuck_child_name() {
                     }
                 }
             })
-            .shutdown(ShutdownPolicy {
-                grace: common::SHORT_GRACE,
-                mode: ShutdownMode::CooperativeStrict,
-            }),
+            .shutdown(ShutdownPolicy::new(
+                common::SHORT_GRACE,
+                ShutdownMode::CooperativeStrict,
+            )),
         )
         .child(ChildSpec::new("keeper", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
@@ -367,10 +367,10 @@ async fn wait_only_resolves_after_child_lifetimes_end() {
                     }
                 }
             })
-            .shutdown(ShutdownPolicy {
-                grace: common::SHORT_GRACE,
-                mode: ShutdownMode::Abort,
-            }),
+            .shutdown(ShutdownPolicy::new(
+                common::SHORT_GRACE,
+                ShutdownMode::Abort,
+            )),
         )
         .build()
         .expect("valid supervisor");
@@ -390,11 +390,7 @@ async fn wait_only_resolves_after_child_lifetimes_end() {
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_preempts_zero_delay_restart() {
     let supervisor = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 8,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::None,
-        })
+        .restart_intensity(RestartIntensity::new(8, Duration::from_secs(1)))
         .child(
             ChildSpec::new("flaky", |_ctx| async move {
                 Err(common::test_error("restart immediately"))
@@ -443,11 +439,10 @@ async fn shutdown_preempts_delayed_restart_in_cooperative_mode() {
 
     let saw_cancel_for_keeper = saw_cancel.clone();
     let supervisor = SupervisorBuilder::new()
-        .restart_intensity(RestartIntensity {
-            max_restarts: 8,
-            within: Duration::from_secs(1),
-            backoff: BackoffPolicy::Fixed(Duration::from_millis(200)),
-        })
+        .restart_intensity(
+            RestartIntensity::new(8, Duration::from_secs(1))
+                .with_backoff(BackoffPolicy::Fixed(Duration::from_millis(200))),
+        )
         .child(
             ChildSpec::new("flaky", |_ctx| async move {
                 Err(common::test_error("restart later"))
@@ -463,10 +458,10 @@ async fn shutdown_preempts_delayed_restart_in_cooperative_mode() {
                     Ok(())
                 }
             })
-            .shutdown(ShutdownPolicy {
-                grace: common::SHORT_GRACE,
-                mode: ShutdownMode::CooperativeStrict,
-            }),
+            .shutdown(ShutdownPolicy::new(
+                common::SHORT_GRACE,
+                ShutdownMode::CooperativeStrict,
+            )),
         )
         .build()
         .expect("valid supervisor");
