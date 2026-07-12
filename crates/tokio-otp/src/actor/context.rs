@@ -218,18 +218,42 @@ impl<M> ActorRef<M> {
     /// Sends a request and waits for the actor to answer through the
     /// [`Reply`] carried inside the message.
     ///
-    /// This waits for the same actor binding conditions as [`send`](Self::send).
-    /// Cancelling this future while it is waiting drops the request message.
+    /// Callers own their deadline. Compose `call` with
+    /// [`tokio::time::timeout`] for a bounded wait:
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use tokio::time::timeout;
+    /// use tokio_otp::{ActorRef, Reply};
+    ///
+    /// enum Msg {
+    ///     Get(Reply<u64>),
+    /// }
+    ///
+    /// # async fn get(actor: &ActorRef<Msg>) -> Result<u64, Box<dyn std::error::Error>> {
+    /// let value = timeout(Duration::from_millis(250), actor.call(Msg::Get)).await??;
+    /// # Ok(value)
+    /// # }
+    /// ```
+    ///
+    /// This waits for the same actor binding conditions as [`send`](Self::send),
+    /// including FIFO mailbox capacity and expected restart windows. If the
+    /// timeout cancels `call` before the request is accepted, the request is
+    /// dropped. Once the mailbox accepts it, cancelling the caller's wait
+    /// cannot retract it: the actor may still process the request and a late
+    /// reply is discarded.
+    ///
+    /// Consequently, a timeout after acceptance has an **unknown outcome**.
+    /// In-memory queries are usually harmless, but requests with external
+    /// side effects need protocol-level idempotency keys and/or reconciliation
+    /// so the caller can safely retry or discover what happened. A timeout is
+    /// not an actor-work cancellation signal.
     ///
     /// Do not use `call` with a conflating mailbox: a newer message may replace
     /// the request before it is handled, in which case this returns
     /// [`CallError::ReplyDropped`]. Conflating mailboxes are for state
     /// snapshots rather than request/response commands.
     ///
-    /// ```ignore
-    /// enum Msg { Get(Reply<u64>) }
-    /// let value = actor_ref.call(Msg::Get).await?;
-    /// ```
     pub async fn call<T>(&self, message: impl FnOnce(Reply<T>) -> M) -> Result<T, CallError> {
         let (sender, receiver) = oneshot::channel();
         self.send(message(Reply { sender })).await?;
