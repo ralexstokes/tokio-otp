@@ -7,28 +7,21 @@
 //! # Usage
 //!
 //! ```no_run
+//! use tokio_otp::{Runtime, prelude::*};
 //! use tokio_otp_console::Console;
-//! # use tokio::sync::{broadcast, watch};
-//! # use tokio_supervisor::{SupervisorSnapshot, SupervisorEvent, SupervisorStateView, Strategy};
-//! #
+//!
 //! # #[tokio::main]
-//! # async fn main() {
-//! # let snapshot = SupervisorSnapshot::new(
-//! #     SupervisorStateView::Running,
-//! #     Strategy::OneForOne,
-//! #     vec![],
-//! # );
-//! # let (_snap_tx, snap_rx) = watch::channel(snapshot);
-//! # let (evt_tx, _) = broadcast::channel(64);
-//! let handle = Console::builder()
-//!     .snapshots(snap_rx)
-//!     .events(evt_tx)
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let handle = Runtime::builder().build()?.spawn();
+//! let console = Console::for_runtime(&handle)
 //!     .build()
 //!     .spawn()
 //!     .await
 //!     .expect("failed to start console");
 //!
-//! println!("Console at http://{}", handle.local_addr());
+//! println!("Console at http://{}", console.local_addr());
+//! # handle.shutdown_and_wait().await?;
+//! # Ok(())
 //! # }
 //! ```
 //!
@@ -46,6 +39,7 @@ mod ws;
 use std::{net::SocketAddr, sync::Arc};
 
 use tokio::sync::{broadcast, watch};
+use tokio_otp::{ActorStats, RuntimeHandle};
 use tokio_supervisor::{SupervisorEvent, SupervisorSnapshot};
 
 /// Display-oriented snapshot of one actor's message and mailbox statistics.
@@ -62,12 +56,28 @@ pub struct ActorStatsView {
     pub mailbox_capacity: usize,
 }
 
+impl From<ActorStats> for ActorStatsView {
+    fn from(stats: ActorStats) -> Self {
+        Self {
+            actor_id: stats.actor_id,
+            messages_received: stats.messages_received,
+            messages_accepted: stats.messages_accepted,
+            messages_conflated: stats.messages_conflated,
+            message_bytes_accepted: stats.message_bytes_accepted,
+            sends_rejected: stats.sends_rejected,
+            mailbox_depth: stats.mailbox_depth,
+            mailbox_capacity: stats.mailbox_capacity,
+        }
+    }
+}
+
 type StatsSource = Arc<dyn Fn() -> Vec<ActorStatsView> + Send + Sync>;
+type EventSource = Arc<dyn Fn() -> broadcast::Receiver<SupervisorEvent> + Send + Sync>;
 
 /// Builder for configuring a [`Console`] server.
 pub struct ConsoleBuilder {
     snapshots: Option<watch::Receiver<SupervisorSnapshot>>,
-    events: Option<broadcast::Sender<SupervisorEvent>>,
+    events: Option<EventSource>,
     stats: StatsSource,
     bind: SocketAddr,
     access_token: Option<String>,
@@ -95,7 +105,15 @@ impl ConsoleBuilder {
     /// Sets the event broadcast sender. Each WebSocket connection will call
     /// `subscribe()` to get its own receiver.
     pub fn events(mut self, tx: broadcast::Sender<SupervisorEvent>) -> Self {
-        self.events = Some(tx);
+        self.events = Some(Arc::new(move || tx.subscribe()));
+        self
+    }
+
+    fn event_source(
+        mut self,
+        source: impl Fn() -> broadcast::Receiver<SupervisorEvent> + Send + Sync + 'static,
+    ) -> Self {
+        self.events = Some(Arc::new(source));
         self
     }
 
@@ -172,7 +190,7 @@ impl ConsoleBuilder {
 /// A configured console server ready to start.
 pub struct Console {
     snapshots: watch::Receiver<SupervisorSnapshot>,
-    events: broadcast::Sender<SupervisorEvent>,
+    events: EventSource,
     stats: StatsSource,
     bind: SocketAddr,
     access_token: Option<String>,
@@ -183,6 +201,21 @@ impl Console {
     /// Returns a new [`ConsoleBuilder`].
     pub fn builder() -> ConsoleBuilder {
         ConsoleBuilder::new()
+    }
+
+    /// Returns a builder pre-wired to a runtime's public observability
+    /// surfaces.
+    ///
+    /// The console remains an application-side observer: it subscribes to
+    /// snapshots and events and samples actor stats without adding a console
+    /// dependency or feature to `tokio-otp`.
+    pub fn for_runtime(handle: &RuntimeHandle) -> ConsoleBuilder {
+        let events = handle.clone();
+        let stats = handle.clone();
+        Console::builder()
+            .snapshots(handle.subscribe_snapshots())
+            .event_source(move || events.subscribe())
+            .actor_stats(move || stats.actor_stats().into_iter().map(Into::into).collect())
     }
 
     /// Binds the listener and spawns the server in the background.

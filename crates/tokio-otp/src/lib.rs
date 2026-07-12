@@ -115,8 +115,9 @@
 //! with their own supervision story) run actors.
 //!
 //! ```
-//! use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, RebindPolicy, Reply};
-//! use tokio_util::sync::CancellationToken;
+//! use tokio_otp::{
+//!     Actor, ActorContext, ActorResult, CancellationToken, GraphBuilder, RebindPolicy, Reply,
+//! };
 //!
 //! enum CounterMsg {
 //!     Add(u64),
@@ -183,6 +184,19 @@
 //! Install subscribers and samplers at the application boundary, not inside
 //! the library.
 //!
+//! # Deliberate dependency coupling
+//!
+//! Public mailbox errors are crate-owned, so changing the underlying channel
+//! implementation does not change the actor API. Cancellation is deliberately
+//! different: [`CancellationToken`] is the shared shutdown vocabulary at the
+//! Tokio ecosystem boundary. [`ActorContext::shutdown_token`],
+//! [`ActorContext::run_blocking`], and the shutdown futures passed to
+//! [`RunnableActor::run_until`] compose directly with that exact
+//! `tokio_util::sync::CancellationToken` type. Applications can therefore
+//! connect actor shutdown to existing cancellation trees without adapters. The
+//! token is re-exported here (and in [`prelude`]) so common local
+//! examples and small applications do not need an additional import path.
+//!
 //! # Examples
 //!
 //! - `examples/supervised_actors.rs` — per-actor supervision with default
@@ -206,8 +220,6 @@
 //!   tracing and snapshot observability.
 //! - `examples/json_edge.rs` — decoding byte-oriented JSON frames into typed
 //!   actor messages (requires `serde`).
-//! - `examples/console.rs` — serving the web console for a supervised
-//!   runtime.
 //!
 //! # Cargo features
 //!
@@ -215,7 +227,6 @@
 //! |---------|---------|-------------|
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Supervisor lifecycle metrics plus opt-in actor message-size metrics. |
-//! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
 //! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries; serialization for topology metadata. |
 
 mod actor;
@@ -237,9 +248,10 @@ pub mod prelude {
     #[cfg(feature = "derive")]
     pub use crate::Topology;
     pub use crate::{
-        Actor, ActorContext, ActorOptions, ActorRef, ActorResult, BoxError, CallError, Down,
-        DownReason, DrainPolicy, Graph, GraphBuilder, MailboxMode, MessageSize, MonitorRef,
-        RawActor, Reply, Runtime, RuntimeBuilder, RuntimeHandle, SendError, TimerRef,
+        Actor, ActorContext, ActorOptions, ActorRef, ActorResult, BoxError, CallError,
+        CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder, MailboxMode,
+        MessageSize, MonitorRef, RawActor, Reply, Runtime, RuntimeBuilder, RuntimeHandle,
+        SendError, TimerRef,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
@@ -249,8 +261,6 @@ pub mod prelude {
     };
 }
 
-#[cfg(feature = "console")]
-pub use tokio_otp_console::{ActorStatsView, Console, ConsoleBuilder, ConsoleHandle};
 #[cfg(feature = "derive")]
 pub use tokio_otp_derive::Topology;
 
@@ -258,12 +268,11 @@ pub use actor::{
     Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
     BoxError, CallError, Down, DownReason, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
     MailboxMode, MessageSize, MonitorRef, RawActor, RebindPolicy, Reply, RunnableActor,
-    RunnableActorFactory, SendError, TimerRef,
+    RunnableActorFactory, SendError, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
 pub use supervised_actors::SupervisedActors;
-pub use tokio::sync::mpsc::error::TryRecvError;
 pub use tokio_supervisor::{
     AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
     ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, RestartIntensity,
@@ -273,4 +282,5 @@ pub use tokio_supervisor::{
     SupervisorToken,
     prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},
 };
+pub use tokio_util::sync::CancellationToken;
 pub use topology::{TopologyEdge, TopologyMetadata, TopologyNode};

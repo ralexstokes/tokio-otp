@@ -12,9 +12,10 @@ use tokio::{
     sync::{broadcast, watch},
     time::{sleep, timeout},
 };
+use tokio_otp::{Actor, ActorContext, ActorResult, DynamicActorOptions, Runtime};
 use tokio_otp_console::{ActorStatsView, Console, ConsoleHandle};
 use tokio_supervisor::{
-    ChildMembershipView, ChildSnapshot, ChildStateView, Strategy, SupervisorEvent,
+    ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, Strategy, SupervisorEvent,
     SupervisorSnapshot, SupervisorStateView,
 };
 use tokio_tungstenite::{
@@ -27,6 +28,17 @@ use tokio_tungstenite::{
 };
 
 type TestWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[derive(Clone)]
+struct IdleActor;
+
+impl Actor for IdleActor {
+    type Msg = ();
+
+    async fn handle(&mut self, _message: (), _ctx: &ActorContext<()>) -> ActorResult {
+        Ok(())
+    }
+}
 
 fn snapshot(child_state: ChildStateView) -> SupervisorSnapshot {
     SupervisorSnapshot::new(
@@ -410,6 +422,63 @@ async fn ws_streams_events() {
             }
         })
     );
+}
+
+#[tokio::test]
+async fn runtime_convenience_wires_public_observability() {
+    let runtime = Runtime::builder()
+        .build()
+        .expect("failed to build empty runtime");
+    let runtime = runtime.spawn();
+    let console = Console::for_runtime(&runtime)
+        .bind(([127, 0, 0, 1], 0))
+        .build()
+        .spawn()
+        .await
+        .expect("failed to spawn console");
+    let mut socket = connect(console.local_addr()).await;
+
+    let snapshot = read_json(&mut socket).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    let stats = read_json(&mut socket).await;
+    assert_eq!(stats, json!({ "type": "actor_stats", "data": [] }));
+
+    runtime
+        .add_child(ChildSpec::new("worker", |ctx| async move {
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }))
+        .await
+        .expect("failed to add runtime child");
+
+    runtime
+        .add_actor("tracked", IdleActor, DynamicActorOptions::default())
+        .await
+        .expect("failed to add runtime actor");
+
+    let mut saw_event = false;
+    let mut saw_actor_stats = false;
+    while !saw_event || !saw_actor_stats {
+        let frame = read_json(&mut socket).await;
+        match frame["type"].as_str() {
+            Some("event") => saw_event = true,
+            Some("actor_stats")
+                if frame["data"]
+                    .as_array()
+                    .is_some_and(|stats| !stats.is_empty()) =>
+            {
+                assert_eq!(frame["data"][0]["actor_id"], "tracked");
+                saw_actor_stats = true;
+            }
+            _ => {}
+        }
+    }
+
+    console.shutdown();
+    runtime
+        .shutdown_and_wait()
+        .await
+        .expect("failed to stop runtime");
 }
 
 #[tokio::test]

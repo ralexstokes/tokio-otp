@@ -25,6 +25,6 @@ Erlang/OTP-like functionality for the `tokio` ecosystem, organized as a Cargo wo
 
 * Formatting and linting use the nightly toolchain: `cargo +nightly fmt` and `cargo +nightly clippy`. Clippy runs with `-D warnings` — new code must be warning-free.
 
-* Builds and tests run with `--workspace --all-targets --all-features`; keep feature-gated code (`metrics`, `serde`, `console`) compiling under those flags.
+* Builds and tests run with `--workspace --all-targets --all-features`; keep feature-gated code (`metrics`, `serde`) compiling under those flags.
 
 * Nix files are formatted with `nixfmt` (checked by `just nixfmt-check`).

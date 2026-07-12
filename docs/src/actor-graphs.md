@@ -262,13 +262,17 @@ newer message replaces a request before it is handled, the caller receives
 |--------|----------|
 | `send` | Waits for a bound mailbox and retries across expected restart windows; FIFO queues wait for capacity, while conflating mailboxes replace stale state. |
 | `try_send` | Returns immediately; FIFO queues report full capacity, while conflating mailboxes replace stale state. |
-| `call` | Sends a message carrying `Reply<T>` and awaits the reply. |
+| `call` | Sends a message carrying `Reply<T>` and awaits the reply; compose it with `tokio::time::timeout` for a caller-owned deadline. |
 
 Refs are bound to long-lived mailbox bindings, not one actor incarnation. A
 ref minted at wiring time keeps working across per-actor supervised
 restarts. Delivery is at-most-once: `Ok` from `send` means the message was
 accepted by the current incarnation's mailbox, not that it will be
 processed.
+
+See [Bounded request/reply](request-reply.md) for cancellation before and
+after mailbox acceptance, FIFO backpressure, restart windows, and the
+unknown-outcome rule for external side effects.
 
 ## Message Loss at Shutdown and Restart
 
@@ -282,6 +286,13 @@ If an actor must finish messages already accepted by its mailbox, return
 still available as the escape hatch for custom loop control; after
 `ctx.recv().await` returns `None` because shutdown was requested, such actors
 can use `ctx.try_recv()` to drain immediately queued messages.
+
+`ctx.try_recv()` returns the crate-owned `tokio_otp::TryRecvError`. Earlier
+versions exposed Tokio's channel error at the same path; matching `Empty` and
+`Disconnected` remains source-compatible, but code that passed the error to an
+API expecting `tokio::sync::mpsc::error::TryRecvError` must now map those two
+variants explicitly. This boundary keeps actor code independent of the mailbox
+channel implementation.
 
 Restarts have the same loss boundary. Each actor run binds a fresh mailbox, so
 messages queued behind the message that makes an actor crash are lost with the

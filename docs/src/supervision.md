@@ -163,6 +163,35 @@ A child stuck in a non-yielding loop cannot be preempted — isolate truly
 blocking work behind a blocking pool (as the actor layer's `run_blocking`
 does, see the next chapter) or an external process.
 
+### Actor and supervisor deadlines
+
+A supervised actor has two nested shutdown deadlines:
+
+1. `GraphBuilder::actor_shutdown_timeout` belongs to the actor layer. Once the
+   supervisor cancels the child token, `RunnableActor` passes cancellation to
+   the inner actor task, waits for this timeout, and then aborts that inner task.
+   An actor-layer timeout during requested shutdown completes the child cleanly
+   with a `Cancelled` actor exit.
+2. The child's `ShutdownPolicy` belongs to the supervisor layer. It waits for
+   the entire child future. During removal this uses that child's grace period;
+   during a supervisor shutdown or group restart, every affected child is
+   drained against the longest configured grace period in that drain group. If
+   the supervisor deadline expires first, it aborts the outer future; dropping
+   that future also cancels and aborts the inner actor task.
+
+These deadlines run concurrently rather than one after the other. To preserve
+the actor layer's clean completion path, ensure the applicable supervisor drain
+grace is at least `actor_shutdown_timeout`. If the supervisor deadline wins,
+`cooperative_then_abort` still lets supervisor shutdown complete successfully,
+while `cooperative_strict` reports a timeout. In either case the supervised
+Tokio task has been issued an abort and actor bindings are terminated, but—as
+with every Tokio abort—code that never reaches a poll boundary, and blocking
+work already running on the blocking pool, can continue outside that task.
+
+Both defaults are five seconds, so local programs can use `Runtime::builder()`
+without extra shutdown configuration. Customize the pair only when an actor's
+cleanup budget or the host's shutdown deadline requires it.
+
 ## Automatic shutdown for finite work
 
 Pipeline and batch subtrees often have a natural completion point. Mark those

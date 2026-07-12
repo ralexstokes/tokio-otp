@@ -125,9 +125,10 @@ pub trait SupervisorHandleExt: sealed::Sealed {
     /// can no longer restart the child or the child is removed.
     ///
     /// Actors added through this extension are not tracked by
-    /// [`RuntimeHandle::actor_stats`] or the console, even when this is the
-    /// root handle returned by [`RuntimeHandle::supervisor_handle`]. Use
-    /// [`RuntimeHandle::add_actor`] when runtime stats visibility matters.
+    /// [`RuntimeHandle::actor_stats`] or external observers built on it, even
+    /// when this is the root handle returned by
+    /// [`RuntimeHandle::supervisor_handle`]. Use [`RuntimeHandle::add_actor`]
+    /// when runtime stats visibility matters.
     ///
     /// If adding fails, the actor's binding is left intact so the call can be
     /// retried with the same actor; senders on its ref keep waiting until an
@@ -375,34 +376,6 @@ impl RuntimeHandle {
     /// Returns a watch receiver that updates when the snapshot changes.
     pub fn subscribe_snapshots(&self) -> watch::Receiver<SupervisorSnapshot> {
         self.supervisor.subscribe_snapshots()
-    }
-}
-
-#[cfg(feature = "console")]
-impl RuntimeHandle {
-    /// Returns a [`ConsoleBuilder`](tokio_otp_console::ConsoleBuilder) pre-wired
-    /// with this runtime's snapshot and event channels.
-    pub fn console(&self) -> tokio_otp_console::ConsoleBuilder {
-        let actors = self.actors.clone();
-        tokio_otp_console::Console::builder()
-            .snapshots(self.supervisor.subscribe_snapshots())
-            .events(self.supervisor.event_sender())
-            .actor_stats(move || {
-                actors
-                    .actor_stats()
-                    .into_iter()
-                    .map(|stats| tokio_otp_console::ActorStatsView {
-                        actor_id: stats.actor_id,
-                        messages_received: stats.messages_received,
-                        messages_accepted: stats.messages_accepted,
-                        messages_conflated: stats.messages_conflated,
-                        message_bytes_accepted: stats.message_bytes_accepted,
-                        sends_rejected: stats.sends_rejected,
-                        mailbox_depth: stats.mailbox_depth,
-                        mailbox_capacity: stats.mailbox_capacity,
-                    })
-                    .collect()
-            })
     }
 }
 

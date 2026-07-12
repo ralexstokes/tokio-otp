@@ -83,13 +83,12 @@ as well.
 
 ## Web Console
 
-With the `console` feature, a runtime handle can launch a web console backed
-by the same snapshots, events, and actor stats:
+The separate `tokio-otp-console` workspace crate can launch a web console
+backed by the runtime's public snapshots, events, and actor stats:
 
 ```rust,ignore
 let handle = runtime.spawn();
-let console = handle
-    .console()
+let console = tokio_otp_console::Console::for_runtime(&handle)
     .bind(([127, 0, 0, 1], 8080))
     .build()
     .spawn()
@@ -98,7 +97,9 @@ let console = handle
 println!("console at http://{}", console.local_addr());
 ```
 
-Run `cargo run -p tokio-otp --example console --features console` to try it.
+Run `cargo run -p tokio-otp-console --example console` to try it from the
+workspace checkout. The console is experimental, git-only tooling and is not
+a `tokio-otp` feature or dependency.
 The default loopback bind remains token-free for convenient local development,
 but every request is restricted to the listener address (or `localhost`) and
 WebSocket browser origins must match the request host.
@@ -107,8 +108,7 @@ Non-loopback binds require an access token. Add the externally visible host
 when it differs from the listener address:
 
 ```rust,ignore
-let console = handle
-    .console()
+let console = tokio_otp_console::Console::for_runtime(&handle)
     .bind(([0, 0, 0, 0], 8080))
     .access_token("replace-with-a-random-url-safe-token")
     .allowed_host("console.internal:8080")
