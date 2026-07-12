@@ -221,7 +221,7 @@ impl GraphBuilder {
     /// the inner actor task; the supervisor policy can abort the outer child
     /// task. Set this timeout no longer than the supervisor grace period when
     /// the supervisor must wait for the actor layer's clean completion path.
-    /// See the [shutdown policy guide](https://stokes.io/tokio-otp/supervision.html#shutdown-policies)
+    /// See the [shutdown policy guide](https://stokes.io/tokio-otp/supervision.html#actor-and-supervisor-deadlines)
     /// for the completion guarantees of each ordering.
     pub fn actor_shutdown_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.actor_shutdown_timeout = timeout;

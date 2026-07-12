@@ -735,6 +735,34 @@ async fn strict_supervisor_deadline_can_abort_before_actor_deadline() {
 }
 
 #[tokio::test]
+async fn aborting_supervisor_deadline_can_complete_before_actor_deadline() {
+    let started = Arc::new(Notify::new());
+    let mut builder = GraphBuilder::new();
+    builder.actor_shutdown_timeout(Duration::from_secs(1));
+    builder.actor(
+        "worker",
+        PendingActor {
+            started: started.clone(),
+        },
+    );
+    let runtime = SupervisedActors::new(builder.build().expect("valid graph"))
+        .shutdown(ShutdownPolicy::cooperative_then_abort(
+            Duration::from_millis(20),
+        ))
+        .build_runtime(SupervisorBuilder::new())
+        .expect("runtime builds");
+    let handle = runtime.spawn();
+
+    timeout(Duration::from_secs(1), started.notified())
+        .await
+        .expect("actor started");
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("outer abort is a successful supervisor shutdown");
+}
+
+#[tokio::test]
 async fn handle_actor_stats_track_graph_and_runtime_added_actors() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (runtime, worker_ref) = build_runtime(Observe {

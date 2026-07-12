@@ -4,7 +4,9 @@ use thiserror::Error;
 ///
 /// This crate-owned type keeps the actor mailbox API independent of Tokio's
 /// channel error types. It describes the actor-level states that callers can
-/// act on regardless of the mailbox implementation selected for an actor.
+/// act on regardless of the mailbox implementation selected for an actor. The
+/// enum is intentionally exhaustive: future mailbox implementations must map
+/// their no-message and terminal states into this stable actor-level contract.
 #[derive(Debug, Error, Clone, Copy, Eq, PartialEq)]
 pub enum TryRecvError {
     /// No message is immediately available, but the mailbox may receive more.

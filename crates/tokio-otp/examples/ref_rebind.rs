@@ -1,8 +1,7 @@
 use std::{error::Error, future::pending, marker::PhantomData};
 
 use tokio::sync::mpsc;
-use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, RebindPolicy};
-use tokio_util::sync::CancellationToken;
+use tokio_otp::{Actor, ActorContext, ActorResult, CancellationToken, GraphBuilder, RebindPolicy};
 
 enum Command<M> {
     Observe(M),
