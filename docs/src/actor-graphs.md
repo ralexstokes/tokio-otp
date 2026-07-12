@@ -262,13 +262,17 @@ newer message replaces a request before it is handled, the caller receives
 |--------|----------|
 | `send` | Waits for a bound mailbox and retries across expected restart windows; FIFO queues wait for capacity, while conflating mailboxes replace stale state. |
 | `try_send` | Returns immediately; FIFO queues report full capacity, while conflating mailboxes replace stale state. |
-| `call` | Sends a message carrying `Reply<T>` and awaits the reply. |
+| `call` | Sends a message carrying `Reply<T>` and awaits the reply; compose it with `tokio::time::timeout` for a caller-owned deadline. |
 
 Refs are bound to long-lived mailbox bindings, not one actor incarnation. A
 ref minted at wiring time keeps working across per-actor supervised
 restarts. Delivery is at-most-once: `Ok` from `send` means the message was
 accepted by the current incarnation's mailbox, not that it will be
 processed.
+
+See [Bounded request/reply](request-reply.md) for cancellation before and
+after mailbox acceptance, FIFO backpressure, restart windows, and the
+unknown-outcome rule for external side effects.
 
 ## Message Loss at Shutdown and Restart
 

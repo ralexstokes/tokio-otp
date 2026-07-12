@@ -360,7 +360,7 @@ async fn call_succeeds_across_restart_window() {
 
     let call_task = tokio::spawn({
         let rpc_ref = rpc_ref.clone();
-        async move { rpc_ref.call(RpcMsg::Get).await }
+        async move { timeout(Duration::from_secs(1), rpc_ref.call(RpcMsg::Get)).await }
     });
     sleep(Duration::from_millis(25)).await;
     assert!(
@@ -372,6 +372,7 @@ async fn call_succeeds_across_restart_window() {
         call_task
             .await
             .expect("call task joined")
+            .expect("caller deadline spans the short restart window")
             .expect("call completed after restart"),
         "ok"
     );
