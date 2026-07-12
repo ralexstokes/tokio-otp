@@ -218,8 +218,6 @@
 //!   tracing and snapshot observability.
 //! - `examples/json_edge.rs` — decoding byte-oriented JSON frames into typed
 //!   actor messages (requires `serde`).
-//! - `examples/console.rs` — serving the web console for a supervised
-//!   runtime.
 //!
 //! # Cargo features
 //!
@@ -227,7 +225,6 @@
 //! |---------|---------|-------------|
 //! | `derive` | yes | Re-exports `#[derive(Topology)]`. |
 //! | `metrics` | no | Supervisor lifecycle metrics plus opt-in actor message-size metrics. |
-//! | `console` | no | Re-exports the web console and [`RuntimeHandle::console`]. |
 //! | `serde` | no | [`codec`] JSON helpers for typed messages at byte boundaries; serialization for topology metadata. |
 
 mod actor;
@@ -244,9 +241,7 @@ mod topology;
 /// `tokio-supervisor` prelude, except the conflicts documented below.
 pub mod prelude {
     // Exclusions: tokio_supervisor::BoxError is the same type as the alias
-    // exported here, so omitting the duplicate is permanent and harmless;
-    // console types are feature-gated and experimental, so they remain
-    // available only at the crate root.
+    // exported here, so omitting the duplicate is permanent and harmless.
     #[cfg(feature = "derive")]
     pub use crate::Topology;
     #[cfg(feature = "serde")]
@@ -270,8 +265,6 @@ pub mod prelude {
     };
 }
 
-#[cfg(feature = "console")]
-pub use tokio_otp_console::{ActorStatsView, Console, ConsoleBuilder, ConsoleHandle};
 #[cfg(feature = "derive")]
 pub use tokio_otp_derive::Topology;
 

@@ -18,7 +18,7 @@ built on one deliberately independent crate:
 |-------|------|
 | [`tokio-otp`](https://stokes.io/tokio-otp/api/tokio_otp/index.html) | Static graphs of communicating actors — typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, cooperative blocking work — with each actor running as its own supervised child under one integrated `Runtime`. |
 | [`tokio-supervisor`](https://stokes.io/tokio-otp/api/tokio_supervisor/index.html) | Structured supervision of async tasks: restart policies, restart intensity limits, graceful shutdown, and supervision trees. |
-| [`tokio-otp-console`](https://stokes.io/tokio-otp/api/tokio_otp_console/index.html) | A live web console for watching a running supervision tree. |
+| [`tokio-otp-console`](https://stokes.io/tokio-otp/api/tokio_otp_console/index.html) | An experimental, git-only web console for watching a running supervision tree. It is separate from the published product crate. |
 
 `tokio-supervisor` knows nothing about actors — it supervises any async task,
 and is useful on its own if that is all you need. `tokio-otp` builds on it:
