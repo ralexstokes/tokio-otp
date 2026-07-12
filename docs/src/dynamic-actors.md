@@ -112,7 +112,8 @@ The actor's label (`"btc-usd"` above) is its child id within the nested
 supervisor, so remove it through the same handle with
 `venue.remove_child("btc-usd")`. Actors added this way are supervised and
 restart normally, but they do not appear in `RuntimeHandle::actor_stats()` or
-the console; use `RuntimeHandle::add_actor` when that visibility matters.
+external observers such as `tokio-otp-console`; use `RuntimeHandle::add_actor`
+when that visibility matters.
 
 ## Name-based discovery, when you want it
 

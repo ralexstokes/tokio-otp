@@ -18,7 +18,7 @@
 //!         └── stdout-exporter  runs until shutdown
 //! ```
 //!
-//! Run with `cargo run -p tokio-otp --example console --features console`,
+//! Run with `cargo run -p tokio-otp-console --example console`,
 //! open the printed URL, and stop with Ctrl-C.
 
 use std::{error::Error, io, time::Duration};
@@ -28,6 +28,7 @@ use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, DynamicActorOptions, GraphBuilder,
     SupervisedActors,
 };
+use tokio_otp_console::Console;
 use tokio_supervisor::{
     BackoffPolicy, ChildSpec, RestartIntensity, RestartPolicy, Strategy, Supervisor,
     SupervisorBuilder,
@@ -174,8 +175,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build_runtime(root)?;
     let handle = runtime.spawn();
 
-    let console = match handle
-        .console()
+    let console = match Console::for_runtime(&handle)
         .bind(([127, 0, 0, 1], 0))
         .build()
         .spawn()

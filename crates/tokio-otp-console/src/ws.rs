@@ -103,7 +103,7 @@ async fn send_stats(
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut snapshots = state.snapshots.clone();
-    let mut events = state.events.subscribe();
+    let mut events = (state.events)();
 
     // Send current snapshot immediately on connect.
     if !send_snapshot(&mut socket, &mut snapshots).await {

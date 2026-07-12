@@ -42,6 +42,12 @@ impl SupervisedActors {
     }
 
     /// Sets the default shutdown policy applied to every actor child.
+    ///
+    /// This policy governs the outer supervised child task. Each graph actor
+    /// also has the independent inner deadline configured by
+    /// [`GraphBuilder::actor_shutdown_timeout`](crate::GraphBuilder::actor_shutdown_timeout).
+    /// Prefer an outer grace period at least as long as the actor timeout when
+    /// shutdown must pass through the actor layer's clean completion path.
     #[must_use]
     pub fn shutdown(mut self, shutdown: ShutdownPolicy) -> Self {
         self.default_shutdown = shutdown;
@@ -72,7 +78,12 @@ impl SupervisedActors {
         self
     }
 
-    /// Overrides shutdown policy for the actor identified by this typed ref.
+    /// Overrides the outer supervisor shutdown policy for the actor identified
+    /// by this typed ref.
+    ///
+    /// The graph's
+    /// [`actor_shutdown_timeout`](crate::GraphBuilder::actor_shutdown_timeout)
+    /// still governs the inner actor task.
     #[must_use]
     pub fn actor_shutdown<M>(mut self, actor: &ActorRef<M>, shutdown: ShutdownPolicy) -> Self {
         self.overrides

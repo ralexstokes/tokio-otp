@@ -77,7 +77,7 @@ supervising plain async tasks.
 | [`tokio-otp`](crates/tokio-otp) | The front door: static graphs of communicating actors — typed mailboxes, restart-stable `ActorRef<M>` handles, request/reply, cooperative blocking work — with each actor running as its own supervised child under one integrated `Runtime` supporting dynamic actors and observability. |
 | [`tokio-supervisor`](crates/tokio-supervisor) | Structured supervision of async tasks: restart policies (`permanent`/`transient`/`temporary`), restart intensity limits, `one_for_one`/`one_for_all` strategies, graceful shutdown, and nested supervision trees. |
 | [`tokio-otp-derive`](crates/tokio-otp-derive) | `#[derive(Topology)]` for wiring cyclic actor graphs; re-exported by `tokio-otp` under the default `derive` feature. |
-| [`tokio-otp-console`](crates/tokio-otp-console) | *(experimental)* A live web dashboard for watching a running supervision tree. |
+| [`tokio-otp-console`](crates/tokio-otp-console) | *(experimental, git-only)* A live web dashboard for watching a running supervision tree. It is kept outside the published `tokio-otp` feature and dependency surface. |
 
 ## Getting started
 
@@ -87,7 +87,8 @@ supervising plain async tasks.
   `just serve-book` for a local copy.
 - **API docs** — `just doc` builds and opens the rustdoc for the workspace.
 - **Examples** — each crate ships runnable examples under its `examples/`
-  directory, e.g. `cargo run -p tokio-otp --example supervised_actors`.
+  directory, e.g. `cargo run -p tokio-otp --example supervised_actors`. Try
+  the console locally with `cargo run -p tokio-otp-console --example console`.
 
 ## Status
 

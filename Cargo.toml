@@ -33,7 +33,6 @@ thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-otp = { path = "crates/tokio-otp" }
 tokio-otp-derive = { path = "crates/tokio-otp-derive" }
-tokio-otp-console = { path = "crates/tokio-otp-console" }
 tokio-supervisor = { path = "crates/tokio-supervisor" }
 tokio-tungstenite = "0.29"
 tokio-util = { version = "0.7.18", features = ["rt"] }

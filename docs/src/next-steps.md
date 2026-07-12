@@ -53,7 +53,7 @@ cargo run -p <crate> --example <name>
 | `actor_tracing` | Structured actor and message tracing. |
 | `supervisor_snapshot_trace` | Observing runtime state in detail. |
 | `actor_metrics` | Pull-based actor stats and user-owned export sampling. |
-| `console` | The live web console (needs `--features console`). |
+| `console` | The experimental live web console (`cargo run -p tokio-otp-console --example console`). |
 
 ## Design notes
 

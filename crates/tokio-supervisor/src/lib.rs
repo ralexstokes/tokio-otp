@@ -130,6 +130,15 @@
 //! and increments the `supervisor.events.dropped` counter (when the `metrics`
 //! feature is enabled).
 //!
+//! # Deliberate dependency coupling
+//!
+//! [`ChildContext::shutdown_token`] returns the exact
+//! [`tokio_util::sync::CancellationToken`] used internally. This is a
+//! deliberate public boundary: child futures can join the supervisor's token
+//! into application cancellation trees and pass it to Tokio ecosystem APIs
+//! without a crate-specific wrapper or adapter. Other implementation details,
+//! including supervisor control channels and their errors, remain crate-owned.
+//!
 //! # Quick start
 //!
 //! ```no_run
