@@ -12,9 +12,10 @@ use tokio::{
     sync::{broadcast, watch},
     time::{sleep, timeout},
 };
+use tokio_otp::Runtime;
 use tokio_otp_console::{ActorStatsView, Console, ConsoleHandle};
 use tokio_supervisor::{
-    ChildMembershipView, ChildSnapshot, ChildStateView, Strategy, SupervisorEvent,
+    ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, Strategy, SupervisorEvent,
     SupervisorSnapshot, SupervisorStateView,
 };
 use tokio_tungstenite::{
@@ -420,6 +421,48 @@ async fn ws_streams_events() {
             }
         })
     );
+}
+
+#[tokio::test]
+async fn runtime_convenience_wires_public_observability() {
+    let runtime = Runtime::builder()
+        .build()
+        .expect("failed to build empty runtime");
+    let runtime = runtime.spawn();
+    let console = Console::for_runtime(&runtime)
+        .bind(([127, 0, 0, 1], 0))
+        .build()
+        .spawn()
+        .await
+        .expect("failed to spawn console");
+    let mut socket = connect(console.local_addr()).await;
+
+    let snapshot = read_json(&mut socket).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    let stats = read_json(&mut socket).await;
+    assert_eq!(stats, json!({ "type": "actor_stats", "data": [] }));
+
+    runtime
+        .add_child(ChildSpec::new("worker", |ctx| async move {
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }))
+        .await
+        .expect("failed to add runtime child");
+
+    let event = loop {
+        let frame = read_json(&mut socket).await;
+        if frame["type"] == "event" {
+            break frame;
+        }
+    };
+    assert_eq!(event["type"], "event");
+
+    console.shutdown();
+    runtime
+        .shutdown_and_wait()
+        .await
+        .expect("failed to stop runtime");
 }
 
 #[tokio::test]

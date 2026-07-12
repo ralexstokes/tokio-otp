@@ -8,17 +8,17 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::get,
 };
-use tokio::sync::{broadcast, watch};
-use tokio_supervisor::{SupervisorEvent, SupervisorSnapshot};
+use tokio::sync::watch;
+use tokio_supervisor::SupervisorSnapshot;
 
-use crate::{ConsoleHandle, StatsSource, ws};
+use crate::{ConsoleHandle, EventSource, StatsSource, ws};
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) snapshots: watch::Receiver<SupervisorSnapshot>,
-    pub(crate) events: broadcast::Sender<SupervisorEvent>,
+    pub(crate) events: EventSource,
     pub(crate) stats: StatsSource,
 }
 
@@ -193,7 +193,7 @@ async fn index() -> Html<&'static str> {
 
 async fn bind_app(
     snapshots: watch::Receiver<SupervisorSnapshot>,
-    events: broadcast::Sender<SupervisorEvent>,
+    events: EventSource,
     stats: StatsSource,
     bind: SocketAddr,
     access_token: Option<String>,
@@ -240,7 +240,7 @@ async fn shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
 
 pub(crate) async fn spawn(
     snapshots: watch::Receiver<SupervisorSnapshot>,
-    events: broadcast::Sender<SupervisorEvent>,
+    events: EventSource,
     stats: StatsSource,
     bind: SocketAddr,
     access_token: Option<String>,
@@ -269,7 +269,7 @@ pub(crate) async fn spawn(
 
 pub(crate) async fn run(
     snapshots: watch::Receiver<SupervisorSnapshot>,
-    events: broadcast::Sender<SupervisorEvent>,
+    events: EventSource,
     stats: StatsSource,
     bind: SocketAddr,
     access_token: Option<String>,
