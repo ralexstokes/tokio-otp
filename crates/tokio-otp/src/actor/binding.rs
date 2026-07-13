@@ -127,12 +127,22 @@ pub enum MailboxMode<M> {
     ///
     /// This mode always has capacity 1; the graph's mailbox capacity setting
     /// does not apply.
+    ///
+    /// Sending never waits for capacity, so an awaited
+    /// [`ActorRef::send`](crate::ActorRef::send) may complete without yielding.
+    /// Tight producer loops must yield with [`tokio::task::yield_now`] or
+    /// rate-limit explicitly.
     Conflate,
     /// One latest-wins slot per key, bounded by the mailbox capacity.
     ///
     /// When the capacity is already occupied by distinct keys, a message for
     /// a new key evicts the oldest unread key. Construct this variant with
     /// [`conflate_by_key`](Self::conflate_by_key).
+    ///
+    /// Sending never waits for capacity, so an awaited
+    /// [`ActorRef::send`](crate::ActorRef::send) may complete without yielding.
+    /// Tight producer loops must yield with [`tokio::task::yield_now`] or
+    /// rate-limit explicitly.
     #[non_exhaustive]
     ConflateByKey {
         #[doc(hidden)]
