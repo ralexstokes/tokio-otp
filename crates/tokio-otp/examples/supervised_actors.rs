@@ -51,6 +51,11 @@ impl Actor for Worker {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), run()).await??;
+    Ok(())
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     let (delivered_tx, mut delivered_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");

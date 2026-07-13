@@ -51,6 +51,11 @@ impl<M: Send + 'static> Actor for Observe<M> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), run()).await??;
+    Ok(())
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
