@@ -281,11 +281,13 @@ impl RuntimeHandle {
         self.supervisor.supervisor(id)
     }
 
-    /// Adds a supervised runtime actor and returns its stable typed ref.
+    /// Adds a supervised runtime actor from a wiring-time template and returns
+    /// its stable typed ref.
     ///
     /// The actor's label is also its direct supervisor child id, so it can be
-    /// removed later with [`remove_child`](Self::remove_child).
-    pub async fn add_actor<A: RawActor>(
+    /// removed later with [`remove_child`](Self::remove_child). The template is
+    /// cloned for each incarnation, so restarts reset actor state.
+    pub async fn add_actor<A: RawActor + Clone>(
         &self,
         label: impl Into<String>,
         actor: A,
@@ -295,9 +297,11 @@ impl RuntimeHandle {
         self.add_constructed_actor(actor, options).await
     }
 
-    /// Adds a supervised runtime actor with explicit per-actor registration
-    /// options and returns its stable typed ref.
-    pub async fn add_actor_with_options<A: RawActor>(
+    /// Adds a supervised runtime actor from a wiring-time template with explicit
+    /// per-actor registration options and returns its stable typed ref.
+    ///
+    /// The template is cloned for each incarnation, so restarts reset actor state.
+    pub async fn add_actor_with_options<A: RawActor + Clone>(
         &self,
         label: impl Into<String>,
         actor: A,

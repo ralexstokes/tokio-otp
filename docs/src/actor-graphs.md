@@ -125,10 +125,26 @@ For lower-level hosting, iterate `graph.actors()` and drive each
 `RunnableActor::run_until` independently. `tokio-otp` performs that adaptation
 for the common supervised runtime.
 
+## Incarnation-local state
+
+The current graph and runtime registration methods take a wiring-time actor
+template and require it to implement `Clone`. Each incarnation receives a fresh
+clone, so a supervised restart resets ordinary fields to their initial values.
+The `Actor` and `RawActor` traits themselves do not require `Clone`: a future
+factory registration API will be able to construct actors containing genuinely
+incarnation-local, non-`Clone` resources such as connections and guards.
+
+Until that factory API is available, put a non-`Clone` resource behind an
+`Arc` and acquire or reset its incarnation-local contents in `Actor::on_start`
+(or at the beginning of `RawActor::run`) before the actor reports readiness.
+Keep durable state that should survive restarts behind a shared handle, in a
+database, or in another actor.
+
 ## Struct Topologies
 
 `#[derive(Topology)]` supports named-field structs whose fields implement
-`RawActor`. Field names become actor labels verbatim, so supervisor child
+`RawActor + Clone`, because each field is a wiring-time template. Field names
+become actor labels verbatim, so supervisor child
 ids, tracing fields, and stats stay human-readable without participating in
 type checking or message routing. The generated `graph_with` accepts a
 preconfigured `GraphBuilder` for graph name, mailbox capacity, and shutdown

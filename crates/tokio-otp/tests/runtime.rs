@@ -78,7 +78,7 @@ impl RawActor for ObserveOnce {
 
 fn build_runtime<A>(actor: A) -> (Runtime, ActorRef<A::Msg>)
 where
-    A: RawActor,
+    A: RawActor + Clone,
 {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor("worker", actor);

@@ -16,9 +16,11 @@ use syn::{
 
 /// Derives a static actor topology from a named-field struct.
 ///
-/// Each field is one actor in the graph. Every field type must implement
-/// `tokio_otp::RawActor`; any `Actor` qualifies through the blanket
-/// impl. For a struct named `Pipeline`, the derive generates:
+/// Each field is one wiring-time actor template in the graph. Every field type
+/// must implement `tokio_otp::RawActor + Clone`; any cloneable `Actor`
+/// qualifies through the blanket impl. The template is cloned for each
+/// incarnation, so restarts reset actor state. For a struct named `Pipeline`,
+/// the derive generates:
 ///
 /// * a `PipelineRefs` struct with one field per topology field, typed
 ///   `ActorRef<<FieldType as RawActor>::Msg>`;
