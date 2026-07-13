@@ -90,8 +90,9 @@
 //! old one. This is deliberate — a mailbox that survived restarts would
 //! redeliver the poison message that caused the crash, converting one
 //! failure into a restart loop. [`ActorRef::send`] rides through restart
-//! windows when a rebind is expected, and restart resets actor state to the
-//! wiring-time value (`Clone` is the reset mechanism; see [`Actor`]).
+//! windows when a rebind is expected. Current template-based registrations
+//! clone the wiring-time value for every incarnation, resetting actor state
+//! on restart (see [`Actor`]).
 //!
 //! Actors can observe a peer incarnation with [`ActorContext::monitor`]. Its
 //! [`Down`] notification is mapped into the observer's message type and

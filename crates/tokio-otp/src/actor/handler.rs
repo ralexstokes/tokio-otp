@@ -51,16 +51,21 @@ pub enum DrainPolicy {
 ///
 /// # Restart resets state
 ///
-/// Every run clones the wiring-time actor value before calling any hook:
-/// `Clone` is the reset mechanism, so a supervised restart starts from the
-/// actor's initial state, not the state at the crash. Acquire
+/// The current template-based registration methods require `Clone` and clone
+/// the wiring-time actor value before every run. A supervised restart therefore
+/// starts from the actor's initial state, not the state at the crash. Acquire
 /// per-incarnation resources (connections, files, sessions) in
 /// [`on_start`](Self::on_start) — the OTP `init` idiom — where a failure is
 /// an ordinary restartable failure. State that must survive restarts belongs
 /// behind shared handles (an `Arc`, a database, another actor's
 /// [`ActorRef`](crate::ActorRef)): cloning shares those instead of resetting
 /// them.
-pub trait Actor: Clone + Send + Sync + 'static {
+///
+/// `Actor` itself does not require `Clone`, leaving room for a future factory
+/// registration API that constructs non-`Clone` state separately for each
+/// incarnation. Until that API exists, put such state behind an `Arc` and
+/// reset incarnation-local contents in `on_start` before accepting messages.
+pub trait Actor: Send + Sync + 'static {
     /// The message type this handler receives.
     type Msg: Send + 'static;
 

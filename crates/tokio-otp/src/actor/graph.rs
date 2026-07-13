@@ -56,7 +56,7 @@ pub(crate) struct TypedRunner<A: RawActor> {
     pub(crate) mailbox_mode: MailboxMode<A::Msg>,
 }
 
-impl<A: RawActor> ErasedRunner for TypedRunner<A> {
+impl<A: RawActor + Clone> ErasedRunner for TypedRunner<A> {
     fn start(&self, start: RunnerStart) -> BoxedActorFuture {
         let actor_shutdown = start.shutdown;
         let timers = ActorTimers::new(&actor_shutdown);
@@ -477,8 +477,10 @@ impl RunnableActorFactory {
         }
     }
 
-    /// Constructs a runnable actor and its stable typed ref.
-    pub fn actor<A: RawActor>(
+    /// Constructs a runnable actor from a wiring-time template and returns its stable typed ref.
+    ///
+    /// The template is cloned for each incarnation, so restarts reset actor state.
+    pub fn actor<A: RawActor + Clone>(
         &self,
         label: impl Into<String>,
         actor: A,
@@ -486,9 +488,11 @@ impl RunnableActorFactory {
         self.actor_with_options(label, actor, ActorOptions::new())
     }
 
-    /// Constructs a runnable actor with explicit per-actor options and its
-    /// stable typed ref.
-    pub fn actor_with_options<A: RawActor>(
+    /// Constructs a runnable actor from a wiring-time template with explicit
+    /// per-actor options and returns its stable typed ref.
+    ///
+    /// The template is cloned for each incarnation, so restarts reset actor state.
+    pub fn actor_with_options<A: RawActor + Clone>(
         &self,
         label: impl Into<String>,
         actor: A,
@@ -504,7 +508,7 @@ impl RunnableActorFactory {
         self.actor_with_binding(actor_id, actor, binding, options.mailbox_mode)
     }
 
-    fn actor_with_binding<A: RawActor>(
+    fn actor_with_binding<A: RawActor + Clone>(
         &self,
         actor_id: Arc<str>,
         actor: A,

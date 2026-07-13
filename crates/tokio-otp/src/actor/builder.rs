@@ -254,12 +254,13 @@ impl GraphBuilder {
         }
     }
 
-    /// Fills a previously opened actor slot.
+    /// Fills a previously opened actor slot from a wiring-time template.
     ///
     /// The slot token's message type must match the actor's message type, so a
     /// mismatched actor is rejected by the compiler. Consuming the token makes
-    /// double fills unrepresentable in ordinary Rust code.
-    pub fn define<A: RawActor>(&mut self, slot: ActorSlot<A::Msg>, actor: A) {
+    /// double fills unrepresentable in ordinary Rust code. The template is
+    /// cloned for each incarnation, so restarts reset actor state.
+    pub fn define<A: RawActor + Clone>(&mut self, slot: ActorSlot<A::Msg>, actor: A) {
         if slot.builder_id != self.builder_id {
             self.errors.push(GraphBuildError::InvalidConfig(
                 "actor slot belongs to a different graph builder",
@@ -293,13 +294,17 @@ impl GraphBuilder {
         }));
     }
 
-    /// Registers an actor and returns its typed, restart-stable ref.
-    pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
+    /// Registers a wiring-time actor template and returns its typed, restart-stable ref.
+    ///
+    /// The template is cloned for each incarnation, so restarts reset actor state.
+    pub fn actor<A: RawActor + Clone>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
         self.actor_with_options(actor_id, actor, ActorOptions::new())
     }
 
-    /// Registers an actor with explicit per-actor options.
-    pub fn actor_with_options<A: RawActor>(
+    /// Registers a wiring-time actor template with explicit per-actor options.
+    ///
+    /// The template is cloned for each incarnation, so restarts reset actor state.
+    pub fn actor_with_options<A: RawActor + Clone>(
         &mut self,
         actor_id: &str,
         actor: A,
@@ -312,7 +317,7 @@ impl GraphBuilder {
         })
     }
 
-    fn finish_actor_registration<A: RawActor>(
+    fn finish_actor_registration<A: RawActor + Clone>(
         &mut self,
         registration: Option<(usize, ActorRef<A::Msg>)>,
         actor: A,
@@ -339,19 +344,22 @@ impl GraphBuilder {
         actor_ref
     }
 
-    /// Registers an actor under its unqualified type name.
+    /// Registers a wiring-time actor template under its unqualified type name.
     ///
     /// If multiple actors have the same type name, later registrations receive
     /// `-2`, `-3`, and so on. Renaming the actor type therefore renames tracing
     /// fields; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
-    pub fn add<A: RawActor>(&mut self, actor: A) -> ActorRef<A::Msg> {
+    /// The template is cloned for each incarnation, so restarts reset actor state.
+    pub fn add<A: RawActor + Clone>(&mut self, actor: A) -> ActorRef<A::Msg> {
         self.add_with_options(actor, ActorOptions::new())
     }
 
-    /// Registers an actor under its unqualified type name with explicit
-    /// per-actor options.
-    pub fn add_with_options<A: RawActor>(
+    /// Registers a wiring-time actor template under its unqualified type name
+    /// with explicit per-actor options.
+    ///
+    /// The template is cloned for each incarnation, so restarts reset actor state.
+    pub fn add_with_options<A: RawActor + Clone>(
         &mut self,
         actor: A,
         options: ActorOptions<A::Msg>,
