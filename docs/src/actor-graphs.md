@@ -245,6 +245,11 @@ oldest unread key when full. Both `send` and `try_send` replace stale state
 without waiting for capacity. `ActorStats::messages_conflated` counts replaced
 or evicted unread messages.
 
+Because a conflating `send` never waits for capacity, awaiting it may complete
+without yielding to the Tokio scheduler. A tight producer loop must call
+`tokio::task::yield_now()` or rate-limit explicitly so other tasks can run,
+especially on a single-thread runtime.
+
 Keyed sends scan at most `mailbox_capacity` unread keys and may evaluate the
 extractor for every comparison. Keep the extractor cheap and prefer numeric
 or interned ids over allocating keys.
