@@ -43,6 +43,9 @@ impl Actor for Health {
                 }
                 if !self.tripped && self.restarts.len() >= BREAKER_THRESHOLD {
                     self.tripped = true;
+                    // Control closes the shared intake gate before awaiting
+                    // cancellations. Even if this bounded wait expires, the
+                    // already-accepted kill switch still takes effect.
                     let _ = tokio::time::timeout(
                         Duration::from_millis(500),
                         self.control.call(|reply| ControlMsg::KillSwitch { reply }),

@@ -1,9 +1,11 @@
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, time::Duration};
 
+use tokio::time::Instant;
 use tokio_otp::{Down, MessageSize, Reply};
 
 pub type VenueId = &'static str;
 pub type OrderKey = String;
+pub const CALL_DEADLINE: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug)]
 pub struct MarketSnapshot {
@@ -65,6 +67,7 @@ pub enum PlaceOutcome {
 pub enum CancelOutcome {
     Cancelled,
     NotFound,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,6 +103,7 @@ pub enum VenueHealth {
 pub struct ReconcilerStatus {
     pub venues: HashMap<VenueId, VenueHealth>,
     pub transitions: HashMap<VenueId, Vec<VenueHealth>>,
+    pub down_reasons: HashMap<VenueId, Vec<tokio_otp::DownReason>>,
 }
 
 #[derive(Debug)]

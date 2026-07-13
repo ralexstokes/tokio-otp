@@ -1,16 +1,11 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use tokio_otp::prelude::*;
 
-use crate::messages::{ControlMsg, GatewayMsg};
-
-const CONTROL_CALL_DEADLINE: Duration = Duration::from_millis(300);
+use crate::messages::{CALL_DEADLINE, ControlMsg, GatewayMsg};
 
 #[derive(Clone)]
 pub struct Control {
@@ -19,19 +14,24 @@ pub struct Control {
 }
 
 impl Control {
+    async fn cancel_gateway(gateway: ActorRef<GatewayMsg>) -> usize {
+        tokio::time::timeout(
+            CALL_DEADLINE,
+            gateway.call(|reply| GatewayMsg::CancelAll { reply }),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+    }
+
     async fn cancel_all(&self) -> usize {
-        let mut total = 0;
-        for gateway in &self.gateways {
-            if let Ok(Ok(cancelled)) = tokio::time::timeout(
-                CONTROL_CALL_DEADLINE,
-                gateway.call(|reply| GatewayMsg::CancelAll { reply }),
-            )
-            .await
-            {
-                total += cancelled;
-            }
-        }
-        total
+        assert_eq!(self.gateways.len(), 2, "the example has exactly two venues");
+        let (venue_a, venue_b) = tokio::join!(
+            Self::cancel_gateway(self.gateways[0].clone()),
+            Self::cancel_gateway(self.gateways[1].clone())
+        );
+        venue_a + venue_b
     }
 }
 

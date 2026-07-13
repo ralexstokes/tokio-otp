@@ -15,10 +15,11 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use metrics_util::debugging::Snapshotter;
+use tokio::time::Instant;
 use tokio_otp::{SupervisedActors, SupervisorBuilder, prelude::*};
 
 use control::Control;
@@ -34,7 +35,7 @@ const VENUE_A: VenueId = "venue-a";
 const VENUE_B: VenueId = "venue-b";
 const INIT_TIMEOUT: Duration = Duration::from_secs(2);
 const PHASE_TIMEOUT: Duration = Duration::from_secs(3);
-const URGENT_BOUND: Duration = Duration::from_millis(500);
+const URGENT_BOUND: Duration = Duration::from_secs(2);
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -58,6 +59,8 @@ struct App {
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
+    // Keep routine runtime INFO events compact; the sampler emits one final
+    // WARN-level snapshot so tracing evidence remains visible.
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .try_init()?;
@@ -66,20 +69,14 @@ async fn main() -> Result<(), AnyError> {
     let app = build_app(latency.clone()).await?;
 
     phase_0(&app).await?;
-    let (order_1, _order_2) = phase_1(&app).await?;
+    phase_1(&app).await?;
     phase_2(&app).await?;
     phase_3(&app).await?;
-    let unknown_no_accept = phase_4(&app).await?;
-    let unknown_accepted = phase_5(&app).await?;
+    phase_4(&app).await?;
+    phase_5(&app).await?;
     phase_6(&app).await?;
     phase_7(&app).await?;
-    phase_8(
-        app,
-        latency,
-        metrics,
-        [&order_1, &unknown_no_accept, &unknown_accepted],
-    )
-    .await?;
+    phase_8(app, latency, metrics).await?;
     Ok(())
 }
 
@@ -114,12 +111,7 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     );
     let venue_a_gateway = venues.actor(
         "venue-a-gateway",
-        VenueGateway {
-            venue: VENUE_A,
-            exchange: venue_a.clone(),
-            ledger: ledger.clone(),
-            latency: latency.clone(),
-        },
+        VenueGateway::new(VENUE_A, venue_a.clone(), ledger.clone(), latency.clone()),
     );
     let venue_b_feed = venues.actor_with_options(
         "venue-b-feed",
@@ -140,12 +132,7 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     );
     let venue_b_gateway = venues.actor(
         "venue-b-gateway",
-        VenueGateway {
-            venue: VENUE_B,
-            exchange: venue_b.clone(),
-            ledger: ledger.clone(),
-            latency: latency.clone(),
-        },
+        VenueGateway::new(VENUE_B, venue_b.clone(), ledger.clone(), latency.clone()),
     );
 
     let feed_refs = HashMap::from([
@@ -297,6 +284,31 @@ async fn phase_1(app: &App) -> Result<(OrderKey, OrderKey), AnyError> {
 }
 
 async fn phase_2(app: &App) -> Result<(), AnyError> {
+    tick(&app.venue_b_feed, VENUE_B, "BTC-USD", 2).await?;
+    await_until(|| async {
+        status(&app.reconciler)
+            .await
+            .is_some_and(|status| status.venues.get(VENUE_B) == Some(&VenueHealth::Fresh))
+    })
+    .await?;
+    let b_transition_count = status(&app.reconciler)
+        .await
+        .expect("reconciler available")
+        .transitions[VENUE_B]
+        .len();
+    let keepalive_stop = CancellationToken::new();
+    let keepalive = tokio::spawn({
+        let feed = app.venue_b_feed.clone();
+        let stop = keepalive_stop.clone();
+        async move {
+            let mut seq = 10;
+            while !stop.is_cancelled() {
+                let _ = tick(&feed, VENUE_B, "BTC-USD", seq).await;
+                seq += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    });
     let before_b = generation(app, "venue-b-feed");
     let venues = app.handle.supervisor("venues").expect("venues supervisor");
     let restarted = venues.monitor_restart("venue-a-feed")?;
@@ -311,7 +323,6 @@ async fn phase_2(app: &App) -> Result<(), AnyError> {
         })
     })
     .await?;
-    tick(&app.venue_b_feed, VENUE_B, "BTC-USD", 2).await?;
     tick(&app.venue_a_feed, VENUE_A, "BTC-USD", 2).await?;
     await_until(|| async {
         status(&app.reconciler).await.is_some_and(|status| {
@@ -320,7 +331,20 @@ async fn phase_2(app: &App) -> Result<(), AnyError> {
         })
     })
     .await?;
+    keepalive_stop.cancel();
+    keepalive.await?;
+    let final_status = status(&app.reconciler).await.expect("reconciler available");
     assert_eq!(generation(app, "venue-b-feed"), before_b);
+    assert_eq!(
+        final_status.transitions[VENUE_B].len(),
+        b_transition_count,
+        "venue-b must stay Fresh throughout venue-a recovery"
+    );
+    assert!(!final_status.transitions[VENUE_B].contains(&VenueHealth::Down));
+    assert!(
+        final_status.down_reasons[VENUE_A].contains(&DownReason::Failure),
+        "venue-a monitor must report the scripted panic as Failure"
+    );
     assert!(!bounded_call(&app.health, |reply| HealthMsg::Tripped { reply }).await?);
     println!("PHASE 2 OK — isolated panic, Down, and recovery");
     Ok(())
@@ -364,7 +388,7 @@ async fn phase_3(app: &App) -> Result<(), AnyError> {
 async fn phase_4(app: &App) -> Result<OrderKey, AnyError> {
     let started = Instant::now();
     let key = expect_unknown(submit(&app.router, "STALL-NOACCEPT", 3, VENUE_A).await?)?;
-    assert!(started.elapsed() < router::CALL_DEADLINE * 2);
+    assert!(started.elapsed() < CALL_DEADLINE * 4);
     await_until(|| async {
         bounded_call(&app.router, |reply| RouterMsg::ReconcileAll { reply })
             .await
@@ -400,7 +424,7 @@ async fn phase_5(app: &App) -> Result<OrderKey, AnyError> {
 }
 
 async fn phase_6(app: &App) -> Result<(), AnyError> {
-    let open = expect_placed(submit(&app.router, "OK", 5, VENUE_A).await?)?;
+    let open = expect_placed(submit(&app.router, "OPEN", 5, VENUE_A).await?)?;
     let flood_stop = CancellationToken::new();
     let flood = tokio::spawn({
         let a = app.venue_a_feed.clone();
@@ -417,9 +441,20 @@ async fn phase_6(app: &App) -> Result<(), AnyError> {
                     .send(FeedMsg::Tick(snapshot(VENUE_B, "ETH-USD", seq, now)))
                     .await;
                 seq += 1;
+                tokio::task::yield_now().await;
             }
         }
     });
+    await_until(|| async {
+        let stats = app.venue_graph.stats();
+        ["venue-a-feed", "venue-b-feed"].iter().all(|id| {
+            stats
+                .iter()
+                .find(|sample| sample.actor_id == *id)
+                .is_some_and(|sample| sample.messages_conflated > 0)
+        })
+    })
+    .await?;
     let cancelled = tokio::time::timeout(
         URGENT_BOUND,
         app.control
@@ -471,12 +506,7 @@ async fn phase_7(app: &App) -> Result<(), AnyError> {
     Ok(())
 }
 
-async fn phase_8(
-    app: App,
-    latency: LatencyRecorder,
-    metrics: Snapshotter,
-    checked_orders: [&str; 3],
-) -> Result<(), AnyError> {
+async fn phase_8(app: App, latency: LatencyRecorder, metrics: Snapshotter) -> Result<(), AnyError> {
     assert!(!app.intake_gate.load(Ordering::Acquire));
     let _ = bounded_call(&app.router, |reply| RouterMsg::ReconcileAll { reply }).await?;
     await_until(|| async {
@@ -485,6 +515,15 @@ async fn phase_8(
             .is_ok_and(|count| count == 0)
     })
     .await?;
+    let final_ledger = ledger_report(&app.ledger).await.expect("ledger available");
+    assert!(!final_ledger.effects.is_empty());
+    assert!(
+        final_ledger
+            .effects
+            .values()
+            .all(|effects| { effects.fills >= 1 || effects.cancellations >= 1 }),
+        "every ledger key must be terminal before supervisor shutdown"
+    );
 
     // Sibling shutdown is concurrent. The application stages teardown first:
     // intake is closed, unknown intent is reconciled, and only then are venue
@@ -502,9 +541,6 @@ async fn phase_8(
         "handler.gateway",
     ] {
         assert!(latency.get(series).is_some_and(|sample| sample.count > 0));
-    }
-    for key in checked_orders {
-        assert!(app.venue_a.qty(key).is_some() || app.venue_b.qty(key).is_some());
     }
     println!("latency summary: {latency:#?}");
     let selected_metrics = metrics

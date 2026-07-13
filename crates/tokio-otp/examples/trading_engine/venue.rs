@@ -1,9 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+use tokio::time::Instant;
 use tokio_otp::prelude::*;
 
 use crate::{
@@ -14,12 +15,9 @@ use crate::{
     telemetry::LatencyRecorder,
 };
 
-const STALL_FOR: Duration = Duration::from_millis(650);
-
 #[derive(Clone, Debug)]
 struct SimOrder {
     status: OrderStatus,
-    qty: i64,
 }
 
 #[derive(Debug, Default)]
@@ -92,20 +90,25 @@ impl ExchangeSim {
             key.to_owned(),
             SimOrder {
                 status: OrderStatus::Accepted,
-                qty,
             },
         );
+        tracing::debug!(order_key = key, qty, "exchange accepted order");
         state.open.insert(key.to_owned());
         *state.accept_counts.entry(key.to_owned()).or_default() += 1;
         true
     }
 
-    pub fn fill(&self, key: &str) {
+    pub fn fill(&self, key: &str) -> bool {
         let mut state = self.0.lock().expect("exchange lock poisoned");
-        if let Some(order) = state.orders.get_mut(key) {
-            order.status = OrderStatus::Filled;
+        let Some(order) = state.orders.get_mut(key) else {
+            return false;
+        };
+        if order.status != OrderStatus::Accepted {
+            return false;
         }
+        order.status = OrderStatus::Filled;
         state.open.remove(key);
+        true
     }
 
     pub fn query(&self, key: &str) -> QueryOutcome {
@@ -124,6 +127,9 @@ impl ExchangeSim {
         let Some(order) = state.orders.get_mut(key) else {
             return CancelOutcome::NotFound;
         };
+        if order.status != OrderStatus::Accepted {
+            return CancelOutcome::NotFound;
+        }
         order.status = OrderStatus::Cancelled;
         state.open.remove(key);
         CancelOutcome::Cancelled
@@ -157,15 +163,6 @@ impl ExchangeSim {
             .orders
             .get(key)
             .map(|order| order.status)
-    }
-
-    pub fn qty(&self, key: &str) -> Option<i64> {
-        self.0
-            .lock()
-            .expect("exchange lock poisoned")
-            .orders
-            .get(key)
-            .map(|order| order.qty)
     }
 }
 
@@ -209,16 +206,47 @@ impl Actor for VenueFeed {
 
 #[derive(Clone)]
 pub struct VenueGateway {
-    pub venue: VenueId,
-    pub exchange: ExchangeSim,
-    pub ledger: ActorRef<LedgerMsg>,
-    pub latency: LatencyRecorder,
+    venue: VenueId,
+    exchange: ExchangeSim,
+    ledger: ActorRef<LedgerMsg>,
+    latency: LatencyRecorder,
+    stalled_replies: Arc<Mutex<Vec<Reply<PlaceOutcome>>>>,
+}
+
+impl VenueGateway {
+    pub fn new(
+        venue: VenueId,
+        exchange: ExchangeSim,
+        ledger: ActorRef<LedgerMsg>,
+        latency: LatencyRecorder,
+    ) -> Self {
+        Self {
+            venue,
+            exchange,
+            ledger,
+            latency,
+            stalled_replies: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn stall(&self, reply: Reply<PlaceOutcome>) {
+        self.stalled_replies
+            .lock()
+            .expect("stalled reply lock poisoned")
+            .push(reply);
+    }
 }
 
 impl Actor for VenueGateway {
     type Msg = GatewayMsg;
 
     async fn on_start(&mut self, _ctx: &ActorContext<GatewayMsg>) -> ActorResult {
+        // Stalled replies belong to the actor session. A restart drops them,
+        // allowing abandoned callers to observe the incarnation boundary.
+        self.stalled_replies
+            .lock()
+            .expect("stalled reply lock poisoned")
+            .clear();
         self.exchange.open_gateway_session(self.venue);
         Ok(())
     }
@@ -233,16 +261,17 @@ impl Actor for VenueGateway {
                 reply,
             } => {
                 let attempt = self.exchange.note_attempt(&key);
+                // Only the first attempt follows the scripted stall. A
+                // reconciliation re-place uses the same idempotency key and
+                // must be able to reach the exchange.
                 if symbol == "STALL-NOACCEPT" && attempt == 1 {
-                    tokio::time::sleep(STALL_FOR).await;
-                    drop(reply);
+                    self.stall(reply);
                     return Ok(());
                 }
 
                 let inserted = self.exchange.accept(&key, qty);
                 if symbol == "ACCEPT-NOACK" && attempt == 1 {
-                    tokio::time::sleep(STALL_FOR).await;
-                    drop(reply);
+                    self.stall(reply);
                     return Ok(());
                 }
 
@@ -254,14 +283,16 @@ impl Actor for VenueGateway {
                             venue: self.venue,
                         })
                         .await?;
-                    ctx.send_after(
-                        GatewayMsg::DeliverFill {
-                            key,
-                            qty,
-                            enqueued_at: Instant::now(),
-                        },
-                        Duration::from_millis(25),
-                    );
+                    if symbol != "OPEN" {
+                        ctx.send_after(
+                            GatewayMsg::DeliverFill {
+                                key,
+                                qty,
+                                enqueued_at: Instant::now(),
+                            },
+                            Duration::from_millis(25),
+                        );
+                    }
                 }
             }
             GatewayMsg::DeliverFill {
@@ -269,15 +300,16 @@ impl Actor for VenueGateway {
                 qty,
                 enqueued_at,
             } => {
-                self.exchange.fill(&key);
-                self.ledger
-                    .send(LedgerMsg::Fill {
-                        key,
-                        venue: self.venue,
-                        qty,
-                        enqueued_at,
-                    })
-                    .await?;
+                if self.exchange.fill(&key) {
+                    self.ledger
+                        .send(LedgerMsg::Fill {
+                            key,
+                            venue: self.venue,
+                            qty,
+                            enqueued_at,
+                        })
+                        .await?;
+                }
             }
             GatewayMsg::Query { key, reply } => reply.send(self.exchange.query(&key)),
             GatewayMsg::Cancel { key, reply } => {

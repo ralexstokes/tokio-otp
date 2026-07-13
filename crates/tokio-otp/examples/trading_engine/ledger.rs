@@ -1,5 +1,4 @@
-use std::time::Instant;
-
+use tokio::time::Instant;
 use tokio_otp::prelude::*;
 
 use crate::{
@@ -28,7 +27,7 @@ impl Actor for Ledger {
     async fn handle(&mut self, message: LedgerMsg, _ctx: &ActorContext<LedgerMsg>) -> ActorResult {
         match message {
             LedgerMsg::Ack { key, venue } => {
-                let _venue = venue;
+                tracing::debug!(venue, order_key = key, "order acknowledged");
                 self.report.effects.entry(key).or_default().acknowledgements += 1;
             }
             LedgerMsg::Fill {
@@ -37,8 +36,7 @@ impl Actor for Ledger {
                 qty,
                 enqueued_at,
             } => {
-                let _venue = venue;
-                let _qty = qty;
+                tracing::debug!(venue, qty, order_key = key, "order filled");
                 self.latency.record(
                     "queue.fill",
                     Instant::now().saturating_duration_since(enqueued_at),
@@ -46,7 +44,7 @@ impl Actor for Ledger {
                 self.report.effects.entry(key).or_default().fills += 1;
             }
             LedgerMsg::Cancelled { key, venue } => {
-                let _venue = venue;
+                tracing::debug!(venue, order_key = key, "order cancelled");
                 self.report.effects.entry(key).or_default().cancellations += 1;
             }
             LedgerMsg::Report { reply } => reply.send(self.report.clone()),

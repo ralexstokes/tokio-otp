@@ -45,7 +45,17 @@ pub async fn sample(runtime: RuntimeHandle, venue_graph: Graph, stop: Cancellati
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            _ = stop.cancelled() => break,
+            _ = stop.cancelled() => {
+                // The periodic INFO samples stay quiet under the example's
+                // WARN filter; emit one visible sample as acceptance evidence.
+                tracing::warn!(
+                    snapshot = ?runtime.snapshot(),
+                    core_stats = ?runtime.actor_stats(),
+                    venue_stats = ?venue_graph.stats(),
+                    "final trading engine telemetry sample"
+                );
+                break;
+            },
             _ = interval.tick() => {
                 tracing::info!(
                     snapshot = ?runtime.snapshot(),

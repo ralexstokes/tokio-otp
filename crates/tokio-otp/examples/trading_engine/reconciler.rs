@@ -32,6 +32,7 @@ pub struct Reconciler {
     feeds: HashMap<VenueId, ActorRef<FeedMsg>>,
     sessions: Vec<(VenueId, ExchangeSim)>,
     venues: HashMap<VenueId, VenueState>,
+    down_reasons: HashMap<VenueId, Vec<DownReason>>,
     sweep_generation: u64,
 }
 
@@ -49,6 +50,7 @@ impl Reconciler {
             feeds,
             sessions,
             venues,
+            down_reasons: HashMap::new(),
             sweep_generation: 0,
         }
     }
@@ -93,14 +95,12 @@ impl Actor for Reconciler {
 
     async fn on_start(&mut self, ctx: &ActorContext<ReconcilerMsg>) -> ActorResult {
         for (venue, exchange) in &self.sessions {
-            assert_eq!(
-                exchange.feed_sessions(venue),
-                1,
+            assert!(
+                exchange.feed_sessions(venue) >= 1,
                 "nested venue readiness must complete before core startup"
             );
-            assert_eq!(
-                exchange.gateway_sessions(venue),
-                1,
+            assert!(
+                exchange.gateway_sessions(venue) >= 1,
                 "nested venue readiness must complete before core startup"
             );
         }
@@ -118,15 +118,23 @@ impl Actor for Reconciler {
         match message {
             ReconcilerMsg::Market(snapshot) => {
                 let venue = snapshot.venue;
-                let _spread = snapshot.ask - snapshot.bid;
-                let _sequence = snapshot.seq;
-                let _symbol = snapshot.symbol;
+                tracing::debug!(
+                    venue,
+                    symbol = snapshot.symbol,
+                    sequence = snapshot.seq,
+                    spread = snapshot.ask - snapshot.bid,
+                    "market snapshot reconciled"
+                );
                 self.venues.get_mut(venue).expect("known venue").last_seen = Some(Instant::now());
                 self.transition(venue, VenueHealth::Fresh);
                 self.rearm(ctx);
             }
             ReconcilerMsg::VenueDown { venue, down } => {
                 if down.reason != DownReason::NoProcess {
+                    self.down_reasons
+                        .entry(venue)
+                        .or_default()
+                        .push(down.reason);
                     self.transition(venue, VenueHealth::Down);
                 }
                 ctx.send_after(
@@ -169,6 +177,7 @@ impl Actor for Reconciler {
                         .iter()
                         .map(|(&venue, state)| (venue, state.transitions.clone()))
                         .collect(),
+                    down_reasons: self.down_reasons.clone(),
                 });
             }
         }

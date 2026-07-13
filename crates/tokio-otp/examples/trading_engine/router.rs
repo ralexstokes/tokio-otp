@@ -4,17 +4,14 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 use tokio_otp::prelude::*;
 
 use crate::messages::{
-    CancelOutcome, GatewayMsg, LedgerMsg, OrderKey, PlaceOutcome, QueryOutcome, RouterMsg,
-    SubmitResult, VenueId,
+    CALL_DEADLINE, CancelOutcome, GatewayMsg, LedgerMsg, OrderKey, PlaceOutcome, QueryOutcome,
+    RouterMsg, SubmitResult, VenueId,
 };
-
-pub const CALL_DEADLINE: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug)]
 struct OrderIntent {
@@ -111,7 +108,7 @@ impl Actor for OrderRouter {
                     return Ok(());
                 };
                 let gateway = self.gateways.get(intent.venue).expect("known venue");
-                let outcome = tokio::time::timeout(
+                let outcome = match tokio::time::timeout(
                     CALL_DEADLINE,
                     gateway.call(|reply| GatewayMsg::Cancel {
                         key: key.clone(),
@@ -119,9 +116,10 @@ impl Actor for OrderRouter {
                     }),
                 )
                 .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or(CancelOutcome::NotFound);
+                {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(_)) | Err(_) => CancelOutcome::Unknown,
+                };
                 reply.send(outcome);
             }
             RouterMsg::ReconcileAll { reply } => {
