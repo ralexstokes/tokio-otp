@@ -1,0 +1,186 @@
+use std::{collections::HashMap, time::Duration};
+
+use tokio::time::Instant;
+use tokio_otp::prelude::*;
+
+use crate::{
+    messages::{FeedMsg, ReconcilerMsg, ReconcilerStatus, VenueHealth, VenueId},
+    venue::ExchangeSim,
+};
+
+pub const STALE_AFTER: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Debug)]
+struct VenueState {
+    last_seen: Option<Instant>,
+    health: VenueHealth,
+    transitions: Vec<VenueHealth>,
+}
+
+impl Default for VenueState {
+    fn default() -> Self {
+        Self {
+            last_seen: None,
+            health: VenueHealth::Stale,
+            transitions: vec![VenueHealth::Stale],
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Reconciler {
+    feeds: HashMap<VenueId, ActorRef<FeedMsg>>,
+    sessions: Vec<(VenueId, ExchangeSim)>,
+    venues: HashMap<VenueId, VenueState>,
+    down_reasons: HashMap<VenueId, Vec<DownReason>>,
+    sweep_generation: u64,
+}
+
+impl Reconciler {
+    pub fn new(
+        feeds: HashMap<VenueId, ActorRef<FeedMsg>>,
+        sessions: Vec<(VenueId, ExchangeSim)>,
+    ) -> Self {
+        let venues = feeds
+            .keys()
+            .copied()
+            .map(|venue| (venue, VenueState::default()))
+            .collect();
+        Self {
+            feeds,
+            sessions,
+            venues,
+            down_reasons: HashMap::new(),
+            sweep_generation: 0,
+        }
+    }
+
+    fn monitor(&self, venue: VenueId, ctx: &ActorContext<ReconcilerMsg>) {
+        let feed = self.feeds.get(venue).expect("known venue");
+        ctx.monitor(feed, move |down| ReconcilerMsg::VenueDown { venue, down });
+    }
+
+    fn transition(&mut self, venue: VenueId, health: VenueHealth) {
+        let state = self.venues.get_mut(venue).expect("known venue");
+        if state.health != health {
+            state.health = health;
+            state.transitions.push(health);
+        }
+    }
+
+    fn rearm(&mut self, ctx: &ActorContext<ReconcilerMsg>) {
+        let now = Instant::now();
+        let earliest = self
+            .venues
+            .values()
+            .filter(|state| state.health == VenueHealth::Fresh)
+            .filter_map(|state| state.last_seen.map(|seen| seen + STALE_AFTER))
+            .min();
+        self.sweep_generation = self.sweep_generation.wrapping_add(1);
+        if let Some(deadline) = earliest {
+            ctx.state_timeout(
+                ReconcilerMsg::StaleSweep {
+                    generation: self.sweep_generation,
+                },
+                deadline.saturating_duration_since(now),
+            );
+        } else {
+            ctx.clear_state_timeout();
+        }
+    }
+}
+
+impl Actor for Reconciler {
+    type Msg = ReconcilerMsg;
+
+    async fn on_start(&mut self, ctx: &ActorContext<ReconcilerMsg>) -> ActorResult {
+        for (venue, exchange) in &self.sessions {
+            assert!(
+                exchange.feed_sessions(venue) >= 1,
+                "nested venue readiness must complete before core startup"
+            );
+            assert!(
+                exchange.gateway_sessions(venue) >= 1,
+                "nested venue readiness must complete before core startup"
+            );
+        }
+        for venue in self.feeds.keys().copied() {
+            self.monitor(venue, ctx);
+        }
+        Ok(())
+    }
+
+    async fn handle(
+        &mut self,
+        message: ReconcilerMsg,
+        ctx: &ActorContext<ReconcilerMsg>,
+    ) -> ActorResult {
+        match message {
+            ReconcilerMsg::Market(snapshot) => {
+                let venue = snapshot.venue;
+                tracing::debug!(
+                    venue,
+                    symbol = snapshot.symbol,
+                    sequence = snapshot.seq,
+                    spread = snapshot.ask - snapshot.bid,
+                    "market snapshot reconciled"
+                );
+                self.venues.get_mut(venue).expect("known venue").last_seen = Some(Instant::now());
+                self.transition(venue, VenueHealth::Fresh);
+                self.rearm(ctx);
+            }
+            ReconcilerMsg::VenueDown { venue, down } => {
+                if down.reason != DownReason::NoProcess {
+                    self.down_reasons
+                        .entry(venue)
+                        .or_default()
+                        .push(down.reason);
+                    self.transition(venue, VenueHealth::Down);
+                }
+                ctx.send_after(
+                    ReconcilerMsg::Remonitor { venue },
+                    Duration::from_millis(25),
+                );
+                self.rearm(ctx);
+            }
+            ReconcilerMsg::Remonitor { venue } => self.monitor(venue, ctx),
+            ReconcilerMsg::StaleSweep { generation } => {
+                if generation != self.sweep_generation {
+                    return Ok(());
+                }
+                let now = Instant::now();
+                let stale = self
+                    .venues
+                    .iter()
+                    .filter_map(|(&venue, state)| {
+                        (state.health == VenueHealth::Fresh
+                            && state
+                                .last_seen
+                                .is_some_and(|seen| now.duration_since(seen) >= STALE_AFTER))
+                        .then_some(venue)
+                    })
+                    .collect::<Vec<_>>();
+                for venue in stale {
+                    self.transition(venue, VenueHealth::Stale);
+                }
+                self.rearm(ctx);
+            }
+            ReconcilerMsg::Status { reply } => {
+                reply.send(ReconcilerStatus {
+                    venues: self
+                        .venues
+                        .iter()
+                        .map(|(&venue, state)| (venue, state.health))
+                        .collect(),
+                    transitions: self
+                        .venues
+                        .iter()
+                        .map(|(&venue, state)| (venue, state.transitions.clone()))
+                        .collect(),
+                    down_reasons: self.down_reasons.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}

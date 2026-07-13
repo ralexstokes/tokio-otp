@@ -40,6 +40,11 @@ impl Actor for Worker {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), run()).await??;
+    Ok(())
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     let release = Arc::new(Notify::new());
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let (handled_tx, mut handled_rx) = mpsc::unbounded_channel();

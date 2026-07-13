@@ -32,3 +32,7 @@ tokio = { workspace = true, features = ["signal", "test-util"] }
 tokio-util.workspace = true
 tracing-subscriber.workspace = true
 trybuild.workspace = true
+
+[[example]]
+name = "trading_engine"
+required-features = ["metrics"]
