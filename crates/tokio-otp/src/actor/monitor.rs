@@ -19,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 /// newest event, so it is never dropped. This caps the memory a stalled
 /// observer can pin regardless of how fast its target churns.
 const WATCH_BUFFER_CAP: usize = 128;
+// Overflow needs room for both a `Lagged` marker and a retained real event.
+const _: () = assert!(WATCH_BUFFER_CAP >= 2);
 
 /// Notification that an actor incarnation has exited.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -334,7 +336,7 @@ impl MonitorHub {
         state.lifecycle = Lifecycle::Terminated(generation);
         let terminated = self.terminated_event(generation);
         for watcher in state.watchers.drain(..) {
-            if watcher.cancellation.is_cancelled() {
+            if !watcher.is_live() {
                 continue;
             }
             if let Some(down) = &down {
