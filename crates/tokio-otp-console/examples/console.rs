@@ -151,13 +151,11 @@ fn telemetry_supervisor() -> Result<Supervisor, Box<dyn Error>> {
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");
-    let frontend = builder.actor(
-        "frontend",
-        Frontend {
-            worker: worker_ref.clone(),
-        },
-    );
-    builder.define(worker_slot, Worker);
+    let frontend_worker = worker_ref.clone();
+    let frontend = builder.actor("frontend", move || Frontend {
+        worker: frontend_worker.clone(),
+    });
+    builder.define(worker_slot, || Worker);
     let graph = builder.build()?;
 
     let root = SupervisorBuilder::new()
@@ -199,7 +197,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             sleep(Duration::from_secs(12)).await;
             let Ok(burst) = dynamic
-                .add_actor("burst", Burst, DynamicActorOptions::default())
+                .add_actor("burst", || Burst, DynamicActorOptions::default())
                 .await
             else {
                 break;

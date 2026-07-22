@@ -14,12 +14,13 @@ use tokio::{
 use tokio_otp::{ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Runtime};
 use tokio_supervisor::{Strategy, SupervisorBuilder};
 
-fn build_runtime<A>(actor: A) -> (Runtime, ActorRef<A::Msg>)
+fn build_runtime<A, F>(factory: F) -> (Runtime, ActorRef<A::Msg>)
 where
-    A: RawActor + Clone,
+    A: RawActor,
+    F: Fn() -> A + Send + Sync + 'static,
 {
     let mut builder = GraphBuilder::new();
-    let actor_ref = builder.actor("timer", actor);
+    let actor_ref = builder.actor("timer", factory);
     let graph = builder.build().expect("valid graph");
     let runtime = tokio_otp::SupervisedActors::new(graph)
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
@@ -47,8 +48,8 @@ impl RawActor for OneShot {
 #[tokio::test(start_paused = true)]
 async fn send_after_fires_once() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(OneShot {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || OneShot {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -90,8 +91,8 @@ impl RawActor for CancelledTimer {
 #[tokio::test(start_paused = true)]
 async fn cancelling_send_after_prevents_delivery() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(CancelledTimer {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || CancelledTimer {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -125,8 +126,8 @@ impl RawActor for StateTimeout {
 #[tokio::test(start_paused = true)]
 async fn state_timeout_fires() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(StateTimeout {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || StateTimeout {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -163,8 +164,8 @@ impl RawActor for ReplacedStateTimeout {
 #[tokio::test(start_paused = true)]
 async fn new_state_timeout_cancels_previous_timeout() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(ReplacedStateTimeout {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || ReplacedStateTimeout {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -207,8 +208,8 @@ impl RawActor for ClearedStateTimeout {
 #[tokio::test(start_paused = true)]
 async fn clearing_state_timeout_prevents_delivery() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(ClearedStateTimeout {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || ClearedStateTimeout {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -245,8 +246,8 @@ impl RawActor for SequentialStateTimeouts {
 #[tokio::test(start_paused = true)]
 async fn state_timeout_can_be_rescheduled_after_firing() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(SequentialStateTimeouts {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || SequentialStateTimeouts {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -287,8 +288,8 @@ impl RawActor for ClearsEmptyStateTimeout {
 #[tokio::test(start_paused = true)]
 async fn clearing_empty_state_timeout_is_a_noop() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(ClearsEmptyStateTimeout {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || ClearsEmptyStateTimeout {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -327,8 +328,8 @@ impl RawActor for Interval {
 #[tokio::test(start_paused = true)]
 async fn interval_repeats_until_cancelled() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(Interval {
-        observed: observed_tx,
+    let (runtime, _) = build_runtime(move || Interval {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -376,9 +377,10 @@ impl RawActor for RestartingTimer {
 #[tokio::test(start_paused = true)]
 async fn restart_cancels_previous_incarnations_timers() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(RestartingTimer {
-        runs: Arc::new(AtomicUsize::new(0)),
-        observed: observed_tx,
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (runtime, _) = build_runtime(move || RestartingTimer {
+        runs: runs.clone(),
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -424,9 +426,10 @@ impl RawActor for RestartingStateTimeout {
 #[tokio::test(start_paused = true)]
 async fn restart_cancels_previous_incarnations_state_timeout() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, _) = build_runtime(RestartingStateTimeout {
-        runs: Arc::new(AtomicUsize::new(0)),
-        observed: observed_tx,
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (runtime, _) = build_runtime(move || RestartingStateTimeout {
+        runs: runs.clone(),
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -488,14 +491,15 @@ async fn interval_waits_for_mailbox_capacity_and_skips_missed_ticks() {
 
     let mut builder = GraphBuilder::new();
     builder.mailbox_capacity(1);
-    let actor_ref = builder.actor(
-        "timer",
-        BackpressureInterval {
-            ready: Arc::clone(&ready),
-            release: Arc::clone(&release),
-            observed: observed_tx,
-        },
-    );
+    let actor_ref = builder.actor("timer", {
+        let ready = ready.clone();
+        let release = release.clone();
+        move || BackpressureInterval {
+            ready: ready.clone(),
+            release: release.clone(),
+            observed: observed_tx.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let runtime = tokio_otp::SupervisedActors::new(graph)
         .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))

@@ -59,7 +59,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
 
     let mut builder = GraphBuilder::new();
-    let frontend = builder.add(Observe::<String>::new(observed_tx));
+    let frontend = builder.add(move || Observe::<String>::new(observed_tx.clone()));
     let graph = builder.build()?;
     let actor = graph.actors()[0].clone();
     let first_run = tokio::spawn({

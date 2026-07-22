@@ -70,7 +70,7 @@ impl RawActor for ReplyImmediately {
 #[tokio::test(start_paused = true)]
 async fn timeout_before_mailbox_binding_drops_the_request() {
     let mut builder = GraphBuilder::new();
-    let rpc = builder.actor("rpc", ReplyImmediately);
+    let rpc = builder.actor("rpc", || ReplyImmediately);
     let graph = builder.build().expect("valid graph");
 
     assert!(
@@ -128,14 +128,14 @@ async fn timeout_under_fifo_backpressure_drops_the_unaccepted_request() {
     let release = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
     builder.mailbox_capacity(1);
-    let rpc = builder.actor(
-        "rpc",
-        GatedMailbox {
-            started: started_tx,
-            release: Arc::clone(&release),
-            observed: observed_tx,
-        },
-    );
+    let rpc = builder.actor("rpc", {
+        let release = release.clone();
+        move || GatedMailbox {
+            started: started_tx.clone(),
+            release: release.clone(),
+            observed: observed_tx.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let (stop_token, task) = start(actor(&graph, "rpc"));
     started_rx.recv().await.expect("actor started");
@@ -195,15 +195,16 @@ async fn timeout_after_acceptance_does_not_cancel_actor_work_or_late_reply() {
     let release = Arc::new(Notify::new());
     let effects = Arc::new(AtomicUsize::new(0));
     let mut builder = GraphBuilder::new();
-    let rpc = builder.actor(
-        "rpc",
-        DelayedReply {
-            accepted: accepted_tx,
-            release: Arc::clone(&release),
-            effects: Arc::clone(&effects),
-            replied: replied_tx,
-        },
-    );
+    let rpc = builder.actor("rpc", {
+        let release = release.clone();
+        let effects = effects.clone();
+        move || DelayedReply {
+            accepted: accepted_tx.clone(),
+            release: release.clone(),
+            effects: effects.clone(),
+            replied: replied_tx.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let (stop_token, task) = start(actor(&graph, "rpc"));
 
@@ -248,13 +249,13 @@ async fn accepted_unread_request_lost_with_incarnation_reports_reply_dropped() {
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let exit = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
-    let rpc = builder.actor(
-        "rpc",
-        ExitWithoutReceiving {
-            started: started_tx,
-            exit: Arc::clone(&exit),
-        },
-    );
+    let rpc = builder.actor("rpc", {
+        let exit = exit.clone();
+        move || ExitWithoutReceiving {
+            started: started_tx.clone(),
+            exit: exit.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let (_stop_token, task) = start(actor(&graph, "rpc"));
     started_rx.recv().await.expect("actor started");

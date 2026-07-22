@@ -99,27 +99,39 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     venues.mailbox_capacity(16);
     let venue_a_feed = venues.actor_with_options(
         "venue-a-feed",
-        VenueFeed {
-            venue: VENUE_A,
-            exchange: venue_a.clone(),
-            reconciler: reconciler.clone(),
-            latency: latency.clone(),
+        {
+            let exchange = venue_a.clone();
+            let reconciler = reconciler.clone();
+            let latency = latency.clone();
+            move || VenueFeed {
+                venue: VENUE_A,
+                exchange: exchange.clone(),
+                reconciler: reconciler.clone(),
+                latency: latency.clone(),
+            }
         },
         ActorOptions::new()
             .mailbox(MailboxMode::Conflate)
             .message_size(),
     );
-    let venue_a_gateway = venues.actor(
-        "venue-a-gateway",
-        VenueGateway::new(VENUE_A, venue_a.clone(), ledger.clone(), latency.clone()),
-    );
+    let venue_a_gateway = venues.actor("venue-a-gateway", {
+        let exchange = venue_a.clone();
+        let ledger = ledger.clone();
+        let latency = latency.clone();
+        move || VenueGateway::new(VENUE_A, exchange.clone(), ledger.clone(), latency.clone())
+    });
     let venue_b_feed = venues.actor_with_options(
         "venue-b-feed",
-        VenueFeed {
-            venue: VENUE_B,
-            exchange: venue_b.clone(),
-            reconciler: reconciler.clone(),
-            latency: latency.clone(),
+        {
+            let exchange = venue_b.clone();
+            let reconciler = reconciler.clone();
+            let latency = latency.clone();
+            move || VenueFeed {
+                venue: VENUE_B,
+                exchange: exchange.clone(),
+                reconciler: reconciler.clone(),
+                latency: latency.clone(),
+            }
         },
         ActorOptions::new()
             .mailbox(MailboxMode::conflate_by_key(
@@ -130,10 +142,12 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
             ))
             .message_size(),
     );
-    let venue_b_gateway = venues.actor(
-        "venue-b-gateway",
-        VenueGateway::new(VENUE_B, venue_b.clone(), ledger.clone(), latency.clone()),
-    );
+    let venue_b_gateway = venues.actor("venue-b-gateway", {
+        let exchange = venue_b.clone();
+        let ledger = ledger.clone();
+        let latency = latency.clone();
+        move || VenueGateway::new(VENUE_B, exchange.clone(), ledger.clone(), latency.clone())
+    });
 
     let feed_refs = HashMap::from([
         (VENUE_A, venue_a_feed.clone()),
@@ -143,26 +157,30 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
         (VENUE_A, venue_a_gateway.clone()),
         (VENUE_B, venue_b_gateway.clone()),
     ]);
-    core.define(
-        reconciler_slot,
-        Reconciler::new(
-            feed_refs,
-            vec![(VENUE_A, venue_a.clone()), (VENUE_B, venue_b.clone())],
-        ),
-    );
-    core.define(ledger_slot, Ledger::new(latency));
-    core.define(
-        router_slot,
-        OrderRouter::new(gateways.clone(), ledger.clone(), intake_gate.clone()),
-    );
-    core.define(
-        control_slot,
-        Control {
-            gateways: vec![venue_a_gateway, venue_b_gateway],
+    core.define(reconciler_slot, {
+        let exchanges = vec![(VENUE_A, venue_a.clone()), (VENUE_B, venue_b.clone())];
+        move || Reconciler::new(feed_refs.clone(), exchanges.clone())
+    });
+    core.define(ledger_slot, {
+        let latency = latency.clone();
+        move || Ledger::new(latency.clone())
+    });
+    core.define(router_slot, {
+        let ledger = ledger.clone();
+        let intake_gate = intake_gate.clone();
+        move || OrderRouter::new(gateways.clone(), ledger.clone(), intake_gate.clone())
+    });
+    core.define(control_slot, {
+        let intake_gate = intake_gate.clone();
+        move || Control {
+            gateways: vec![venue_a_gateway.clone(), venue_b_gateway.clone()],
             intake_gate: intake_gate.clone(),
-        },
-    );
-    core.define(health_slot, Health::new(control.clone()));
+        }
+    });
+    core.define(health_slot, {
+        let control = control.clone();
+        move || Health::new(control.clone())
+    });
 
     let venue_graph = venues.build()?;
     let core_graph = core.build()?;

@@ -59,15 +59,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (delivered_tx, mut delivered_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");
-    let orders = builder.actor("front-desk", Frontend { worker: worker_ref });
-    builder.define(
-        worker_slot,
-        Worker {
-            runs: Arc::new(AtomicUsize::new(0)),
-            delivered: delivered_tx,
-            run: 0,
-        },
-    );
+    let frontend_worker = worker_ref.clone();
+    let orders = builder.actor("front-desk", move || Frontend {
+        worker: frontend_worker.clone(),
+    });
+    let worker_runs = Arc::new(AtomicUsize::new(0));
+    builder.define(worker_slot, move || Worker {
+        runs: worker_runs.clone(),
+        delivered: delivered_tx.clone(),
+        run: 0,
+    });
     let graph = builder.build()?;
 
     let runtime = Runtime::builder()

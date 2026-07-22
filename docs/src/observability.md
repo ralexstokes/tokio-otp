@@ -56,7 +56,7 @@ impl MessageSize for Upload {
 
 let uploads = graph.actor_with_options(
     "uploads",
-    UploadActor::new(),
+    UploadActor::new,
     ActorOptions::new().message_size(),
 );
 ```

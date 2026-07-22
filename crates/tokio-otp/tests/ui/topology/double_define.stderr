@@ -3,7 +3,7 @@ error[E0382]: use of moved value: `slot`
    |
 16 |     let (slot, _worker) = builder.slot::<()>("worker");
    |          ---- move occurs because `slot` has type `ActorSlot<()>`, which does not implement the `Copy` trait
-17 |     builder.define(slot, Worker);
+17 |     builder.define(slot, || Worker);
    |                    ---- value moved here
-18 |     builder.define(slot, Worker);
+18 |     builder.define(slot, || Worker);
    |                    ^^^^ value used here after move

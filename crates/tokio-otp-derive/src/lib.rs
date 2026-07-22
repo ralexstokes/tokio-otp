@@ -16,23 +16,24 @@ use syn::{
 
 /// Derives a static actor topology from a named-field struct.
 ///
-/// Each field is one wiring-time actor template in the graph. Every field type
-/// must implement `tokio_otp::RawActor + Clone`; any cloneable `Actor`
-/// qualifies through the blanket impl. The template is cloned for each
-/// incarnation, so restarts reset actor state. For a struct named `Pipeline`,
-/// the derive generates:
+/// Each field declares one actor type in the graph. Every field type must
+/// implement `tokio_otp::RawActor`; any `Actor` qualifies through the blanket
+/// impl. For a struct named `Pipeline`, the derive generates:
 ///
 /// * a `PipelineRefs` struct with one field per topology field, typed
 ///   `ActorRef<<FieldType as RawActor>::Msg>`;
+/// * a generic `PipelineFactories` struct with one factory field per topology
+///   field;
 /// * `Pipeline::graph(wire)`, which builds the graph with a default
 ///   `GraphBuilder`;
 /// * `Pipeline::graph_with(builder, wire)`, which accepts a preconfigured
 ///   `GraphBuilder` — graph name, mailbox capacity, shutdown timeouts, and
 ///   any extra actors registered by hand.
 ///
-/// The `wire` closure receives `&PipelineRefs` before any actor value is
-/// constructed, so actors can capture each other's refs even when the graph
-/// is cyclic — no forward references or string lookups required:
+/// The `wire` closure receives `&PipelineRefs` before any actor incarnation is
+/// constructed, so factories can capture each other's refs even when the graph
+/// is cyclic — no forward references or string lookups required. Each factory
+/// is called once for the initial start and once per supervised restart:
 ///
 /// ```
 /// # use tokio_otp::{ActorContext, ActorRef, ActorResult, Actor};
@@ -40,7 +41,6 @@ use syn::{
 /// # struct ParserMsg;
 /// # struct SinkMsg;
 /// #
-/// # #[derive(Clone)]
 /// # struct Frontend {
 /// #     parser: ActorRef<ParserMsg>,
 /// # }
@@ -55,7 +55,6 @@ use syn::{
 /// #     }
 /// # }
 /// #
-/// # #[derive(Clone)]
 /// # struct Parser {
 /// #     frontend: ActorRef<FrontendMsg>,
 /// #     sink: ActorRef<SinkMsg>,
@@ -67,7 +66,6 @@ use syn::{
 /// #     }
 /// # }
 /// #
-/// # #[derive(Clone)]
 /// # struct Sink;
 /// # impl Actor for Sink {
 /// #     type Msg = SinkMsg;
@@ -84,15 +82,20 @@ use syn::{
 /// }
 ///
 /// # fn main() -> Result<(), tokio_otp::GraphBuildError> {
-/// let graph = Pipeline::graph(|refs| Pipeline {
-///     frontend: Frontend {
-///         parser: refs.parser.clone(),
-///     },
-///     parser: Parser {
-///         frontend: refs.frontend.clone(),
-///         sink: refs.sink.clone(),
-///     },
-///     sink: Sink,
+/// let graph = Pipeline::graph(|refs| {
+///     let parser = refs.parser.clone();
+///     let frontend = refs.frontend.clone();
+///     let sink = refs.sink.clone();
+///     PipelineFactories {
+///         frontend: move || Frontend {
+///             parser: parser.clone(),
+///         },
+///         parser: move || Parser {
+///             frontend: frontend.clone(),
+///             sink: sink.clone(),
+///         },
+///         sink: || Sink,
+///     }
 /// })?;
 /// # let _ = graph;
 /// # Ok(())
@@ -133,8 +136,11 @@ use syn::{
 ///   least one actor;
 /// * a field whose type is not an actor fails to compile;
 /// * wiring a ref whose message type does not match fails to compile;
-/// * filling the same field twice is unrepresentable — the generated code
-///   owns exactly one actor value per field.
+/// * omitting or repeating a factory field is rejected by ordinary struct
+///   literal checking;
+/// * returning the wrong actor type from a field factory fails to compile;
+/// * filling the same slot twice is unrepresentable — the generated code owns
+///   exactly one slot token per field.
 ///
 /// # Errors
 ///
@@ -162,7 +168,6 @@ use syn::{
 /// #         self.0.len()
 /// #     }
 /// # }
-/// # #[derive(Clone)]
 /// # struct SnapshotActor;
 /// # impl RawActor for SnapshotActor {
 /// #     type Msg = Snapshot;
@@ -239,6 +244,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     }
 
     let refs = format_ident!("{topology}Refs");
+    let factories = format_ident!("{topology}Factories");
 
     let field_idents: Vec<_> = fields
         .iter()
@@ -247,6 +253,9 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let field_vis: Vec<_> = fields.iter().map(|field| &field.vis).collect();
     let field_types: Vec<_> = fields.iter().map(|field| &field.ty).collect();
     let field_names: Vec<_> = field_idents.iter().map(|ident| ident.to_string()).collect();
+    let factory_params: Vec<_> = (0..field_idents.len())
+        .map(|index| format_ident!("F{index}"))
+        .collect();
     let (actor_options, edges) = parse_field_attributes(&fields, emit_metadata, &field_idents)?;
     let slot_idents: Vec<_> = field_idents
         .iter()
@@ -331,28 +340,55 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             )*
         }
 
+        #vis struct #factories<#(#factory_params),*> {
+            #(
+                #[allow(dead_code)]
+                #field_vis #field_idents: #factory_params,
+            )*
+        }
+
         impl #topology {
             #metadata_method
 
-            #vis fn graph(
-                wire: impl FnOnce(&#refs) -> #topology,
-            ) -> ::core::result::Result<::tokio_otp::Graph, ::tokio_otp::GraphBuildError> {
+            #vis fn graph<#(#factory_params),*>(
+                wire: impl FnOnce(&#refs) -> #factories<#(#factory_params),*>,
+            ) -> ::core::result::Result<::tokio_otp::Graph, ::tokio_otp::GraphBuildError>
+            where
+                #(
+                    #factory_params: ::core::ops::Fn() -> #field_types
+                        + ::core::marker::Send
+                        + ::core::marker::Sync
+                        + 'static,
+                )*
+            {
                 Self::graph_with(::tokio_otp::GraphBuilder::new(), wire)
             }
 
-            #vis fn graph_with(
+            #vis fn graph_with<#(#factory_params),*>(
                 mut builder: ::tokio_otp::GraphBuilder,
-                wire: impl FnOnce(&#refs) -> #topology,
-            ) -> ::core::result::Result<::tokio_otp::Graph, ::tokio_otp::GraphBuildError> {
+                wire: impl FnOnce(&#refs) -> #factories<#(#factory_params),*>,
+            ) -> ::core::result::Result<::tokio_otp::Graph, ::tokio_otp::GraphBuildError>
+            where
+                #(
+                    #factory_params: ::core::ops::Fn() -> #field_types
+                        + ::core::marker::Send
+                        + ::core::marker::Sync
+                        + 'static,
+                )*
+            {
+                let _mark_topology_fields_used = |value: Self| {
+                    let Self { #(#field_idents),* } = value;
+                    let _ = (#(#field_idents),*);
+                };
                 #(#slot_calls)*
 
                 let refs = #refs {
                     #(#field_idents,)*
                 };
-                let this = wire(&refs);
+                let factories = wire(&refs);
 
                 #(
-                    builder.define(#slot_idents, this.#field_idents);
+                    builder.define(#slot_idents, factories.#field_idents);
                 )*
 
                 builder.build()

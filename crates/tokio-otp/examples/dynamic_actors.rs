@@ -60,15 +60,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let orders = handle
         .add_actor(
             "front-desk",
-            Frontend { rush: None },
+            || Frontend { rush: None },
             DynamicActorOptions::default(),
         )
         .await?;
     let rush = handle
         .add_actor(
             "rush-press",
-            RushPress {
-                observed: observed_tx,
+            move || RushPress {
+                observed: observed_tx.clone(),
             },
             DynamicActorOptions::default(),
         )

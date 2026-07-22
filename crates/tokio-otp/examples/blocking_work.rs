@@ -45,8 +45,8 @@ impl Actor for Worker {
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let worker = builder.add(Worker {
-        observed: observed_tx,
+    let worker = builder.add(move || Worker {
+        observed: observed_tx.clone(),
     });
     let graph = builder.build()?;
 

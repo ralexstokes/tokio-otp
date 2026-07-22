@@ -57,19 +57,18 @@ impl Actor for Printer {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut graph = GraphBuilder::new();
-    let directory = graph.actor(
-        "directory",
-        Directory::<String> {
-            entries: HashMap::new(),
-        },
-    );
+    let directory = graph.actor("directory", || Directory::<String> {
+        entries: HashMap::new(),
+    });
     let handle = Runtime::builder().graph(graph.build()?).build()?.spawn();
 
     let (printed, mut output) = mpsc::unbounded_channel();
     let printer = handle
         .add_actor(
             "printer",
-            Printer { printed },
+            move || Printer {
+                printed: printed.clone(),
+            },
             DynamicActorOptions::default(),
         )
         .await?;

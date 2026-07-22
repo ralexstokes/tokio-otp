@@ -51,10 +51,10 @@ struct OptionsGraph {
 }
 
 fn main() {
-    OptionsGraph::graph(|_| OptionsGraph {
-        mailbox_only: MailboxWorker,
-        message_size_only: SizedWorker,
-        combined: SizedWorker,
+    OptionsGraph::graph(|_| OptionsGraphFactories {
+        mailbox_only: || MailboxWorker,
+        message_size_only: || SizedWorker,
+        combined: || SizedWorker,
     })
     .expect("options graph builds");
 }
