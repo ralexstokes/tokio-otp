@@ -68,13 +68,11 @@ impl RawActor for ReturnsResult {
 #[tokio::test]
 async fn run_blocking_returns_the_closure_result() {
     let (observed_tx, observed_rx) = oneshot::channel();
+    let observed = sender_slot(observed_tx);
     let mut builder = GraphBuilder::new();
-    builder.actor(
-        "worker",
-        ReturnsResult {
-            observed: sender_slot(observed_tx),
-        },
-    );
+    builder.actor("worker", move || ReturnsResult {
+        observed: observed.clone(),
+    });
     let graph = builder.build().expect("valid graph");
     let (stop, task) = start_graph(&graph);
 
@@ -110,14 +108,15 @@ impl RawActor for WaitsForShutdown {
 async fn run_blocking_token_is_cancelled_on_actor_shutdown() {
     let started = Arc::new(Notify::new());
     let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    let cancelled = sender_slot(cancelled_tx);
     let mut builder = GraphBuilder::new();
-    builder.actor(
-        "worker",
-        WaitsForShutdown {
+    builder.actor("worker", {
+        let started = started.clone();
+        move || WaitsForShutdown {
             started: started.clone(),
-            cancelled: sender_slot(cancelled_tx),
-        },
-    );
+            cancelled: cancelled.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let (stop, task) = start_graph(&graph);
 
@@ -172,15 +171,17 @@ async fn dropping_run_blocking_future_cancels_its_token() {
     let started = Arc::new(Notify::new());
     let drop_future = Arc::new(Notify::new());
     let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    let cancelled = sender_slot(cancelled_tx);
     let mut builder = GraphBuilder::new();
-    builder.actor(
-        "worker",
-        DropsFuture {
+    builder.actor("worker", {
+        let started = started.clone();
+        let drop_future = drop_future.clone();
+        move || DropsFuture {
             started: started.clone(),
             drop_future: drop_future.clone(),
-            cancelled: sender_slot(cancelled_tx),
-        },
-    );
+            cancelled: cancelled.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let (stop, task) = start_graph(&graph);
 
@@ -224,16 +225,18 @@ async fn shutdown_timeout_backstops_a_closure_that_ignores_cancellation() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(AtomicBool::new(false));
     let (finished_tx, finished_rx) = oneshot::channel();
+    let finished = sender_slot(finished_tx);
     let mut builder = GraphBuilder::new();
     builder.actor_shutdown_timeout(Duration::from_millis(50));
-    builder.actor(
-        "worker",
-        IgnoresCancellation {
+    builder.actor("worker", {
+        let started = started.clone();
+        let release = release.clone();
+        move || IgnoresCancellation {
             started: started.clone(),
             release: release.clone(),
-            finished: sender_slot(finished_tx),
-        },
-    );
+            finished: finished.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let (stop, task) = start_graph(&graph);
 
@@ -268,7 +271,7 @@ impl RawActor for Panics {
 #[tokio::test]
 async fn blocking_panic_propagates_as_actor_panic() {
     let mut builder = GraphBuilder::new();
-    builder.actor("worker", Panics);
+    builder.actor("worker", || Panics);
     let graph = builder.build().expect("valid graph");
 
     let actor = graph.actors()[0].clone();

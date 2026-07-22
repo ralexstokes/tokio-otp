@@ -76,12 +76,13 @@ impl RawActor for ObserveOnce {
     }
 }
 
-fn build_runtime<A>(actor: A) -> (Runtime, ActorRef<A::Msg>)
+fn build_runtime<A, F>(factory: F) -> (Runtime, ActorRef<A::Msg>)
 where
     A: RawActor,
+    F: Fn() -> A + Send + Sync + 'static,
 {
     let mut builder = GraphBuilder::new();
-    let actor_ref = builder.actor("worker", actor);
+    let actor_ref = builder.actor("worker", factory);
     let graph = builder.build().expect("valid graph");
 
     let runtime = SupervisedActors::new(graph)
@@ -94,8 +95,8 @@ where
 #[tokio::test]
 async fn runtime_spawn_combines_actor_refs_and_supervisor_control() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, worker_ref) = build_runtime(Observe {
-        observed: observed_tx,
+    let (runtime, worker_ref) = build_runtime(move || Observe {
+        observed: observed_tx.clone(),
     });
 
     let handle = runtime.spawn();
@@ -126,8 +127,8 @@ async fn runtime_spawn_combines_actor_refs_and_supervisor_control() {
 #[tokio::test]
 async fn runtime_handle_enumerates_actor_stats() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, worker_ref) = build_runtime(Observe {
-        observed: observed_tx,
+    let (runtime, worker_ref) = build_runtime(move || Observe {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -170,8 +171,8 @@ impl RawActor for FailAfterObserve {
 #[tokio::test]
 async fn actor_stats_accumulate_across_supervised_restarts() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, worker_ref) = build_runtime(FailAfterObserve {
-        observed: observed_tx,
+    let (runtime, worker_ref) = build_runtime(move || FailAfterObserve {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -212,8 +213,8 @@ async fn actor_stats_accumulate_across_supervised_restarts() {
 #[tokio::test]
 async fn runtime_into_supervisor_spawn_accepts_ref_cloned_before_startup() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, worker_ref) = build_runtime(ObserveOnce {
-        observed: observed_tx,
+    let (runtime, worker_ref) = build_runtime(move || ObserveOnce {
+        observed: observed_tx.clone(),
     });
 
     let handle = runtime.into_supervisor().spawn();
@@ -257,8 +258,8 @@ async fn runtime_into_supervisor_spawn_accepts_ref_cloned_before_startup() {
 #[tokio::test]
 async fn runtime_spawn_wait_drives_to_completion_with_control_surface() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, worker_ref) = build_runtime(ObserveOnce {
-        observed: observed_tx,
+    let (runtime, worker_ref) = build_runtime(move || ObserveOnce {
+        observed: observed_tx.clone(),
     });
 
     let handle = runtime.spawn();
@@ -314,12 +315,9 @@ async fn runtime_spawn_wait_drives_to_completion_with_control_surface() {
 async fn runtime_builder_wires_graph_into_supervised_runtime() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.actor(
-        "worker",
-        Observe {
-            observed: observed_tx,
-        },
-    );
+    let worker_ref = builder.actor("worker", move || Observe {
+        observed: observed_tx.clone(),
+    });
     let graph = builder.build().expect("valid graph");
 
     let runtime = Runtime::builder()
@@ -349,8 +347,8 @@ async fn runtime_builder_wires_graph_into_supervised_runtime() {
 #[tokio::test]
 async fn snapshot_wait_reports_all_children_running_after_spawn() {
     let mut builder = GraphBuilder::new();
-    builder.actor("one", Drain::<()>::new());
-    builder.actor("two", Drain::<()>::new());
+    builder.actor("one", Drain::<()>::new);
+    builder.actor("two", Drain::<()>::new);
     let graph = builder.build().expect("valid graph");
 
     let runtime = SupervisedActors::new(graph)
@@ -396,7 +394,7 @@ impl RawActor for FailOnMessage {
 #[tokio::test]
 async fn runtime_handle_monitor_restart_delegates_to_supervisor() {
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.actor("worker", FailOnMessage);
+    let worker_ref = builder.actor("worker", || FailOnMessage);
     let graph = builder.build().expect("valid graph");
 
     let runtime = Runtime::builder()
@@ -428,14 +426,14 @@ async fn runtime_handle_monitor_restart_delegates_to_supervisor() {
 async fn nested_supervisor_handle_adds_and_restarts_runnable_actor() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut graph_builder = GraphBuilder::new();
-    graph_builder.actor("factory-anchor", Drain::<()>::new());
+    graph_builder.actor("factory-anchor", Drain::<()>::new);
     let graph = graph_builder.build().expect("graph is valid");
-    let (actor, actor_ref) = graph.dynamic_factory().actor(
-        "subscription",
-        FailAfterObserve {
-            observed: observed_tx,
-        },
-    );
+    let (actor, actor_ref) =
+        graph
+            .dynamic_factory()
+            .actor("subscription", move || FailAfterObserve {
+                observed: observed_tx.clone(),
+            });
 
     let nested = SupervisorBuilder::new()
         .build()
@@ -523,7 +521,7 @@ impl RawActor for AlwaysFails {
 #[tokio::test]
 async fn send_fails_after_restart_intensity_is_exhausted() {
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.actor("worker", AlwaysFails);
+    let worker_ref = builder.actor("worker", || AlwaysFails);
     let graph = builder.build().expect("valid graph");
 
     let runtime = Runtime::builder()
@@ -586,20 +584,19 @@ impl Actor for ResettingCounter {
     }
 }
 
-/// D10: `Clone` is the reset mechanism — a supervised restart clones the
-/// wiring-time actor value, so the new incarnation starts from initial
-/// state, and `on_start` runs once per incarnation.
+/// A supervised restart invokes the factory again, so the new incarnation
+/// starts from fresh ordinary state and `on_start` runs once per incarnation.
 #[tokio::test]
-async fn supervised_restart_resets_actor_state_to_the_wiring_time_value() {
+async fn supervised_restart_constructs_fresh_actor_state() {
     let on_starts = Arc::new(AtomicUsize::new(0));
     let mut builder = GraphBuilder::new();
-    let counter = builder.actor(
-        "counter",
-        ResettingCounter {
+    let counter = builder.actor("counter", {
+        let on_starts = on_starts.clone();
+        move || ResettingCounter {
             total: 0,
-            on_starts: Arc::clone(&on_starts),
-        },
-    );
+            on_starts: on_starts.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
 
     let runtime = Runtime::builder()
@@ -633,7 +630,7 @@ async fn supervised_restart_resets_actor_state_to_the_wiring_time_value() {
             .expect("total resolved after restart")
             .expect("total replied after restart"),
         0,
-        "restart resets state to the wiring-time value"
+        "restart receives freshly constructed state"
     );
     assert_eq!(
         on_starts.load(Ordering::SeqCst),
@@ -654,7 +651,7 @@ fn runtime_builder_allows_an_empty_runtime() {
 
 #[tokio::test]
 async fn runtime_into_supervisor_round_trips_supervisor() {
-    let (runtime, _worker_ref) = build_runtime(Drain::<()>::new());
+    let (runtime, _worker_ref) = build_runtime(Drain::<()>::new);
 
     let supervisor = runtime.into_supervisor();
     let runtime = Runtime::new(supervisor);
@@ -685,12 +682,12 @@ async fn actor_deadline_can_complete_before_strict_supervisor_deadline() {
     let started = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
     builder.actor_shutdown_timeout(Duration::from_millis(20));
-    builder.actor(
-        "worker",
-        PendingActor {
+    builder.actor("worker", {
+        let started = started.clone();
+        move || PendingActor {
             started: started.clone(),
-        },
-    );
+        }
+    });
     let runtime = SupervisedActors::new(builder.build().expect("valid graph"))
         .shutdown(ShutdownPolicy::cooperative_strict(Duration::from_secs(1)))
         .build_runtime(SupervisorBuilder::new())
@@ -711,12 +708,12 @@ async fn strict_supervisor_deadline_can_abort_before_actor_deadline() {
     let started = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
     builder.actor_shutdown_timeout(Duration::from_secs(1));
-    builder.actor(
-        "worker",
-        PendingActor {
+    builder.actor("worker", {
+        let started = started.clone();
+        move || PendingActor {
             started: started.clone(),
-        },
-    );
+        }
+    });
     let runtime = SupervisedActors::new(builder.build().expect("valid graph"))
         .shutdown(ShutdownPolicy::cooperative_strict(Duration::from_millis(
             20,
@@ -739,12 +736,12 @@ async fn aborting_supervisor_deadline_can_complete_before_actor_deadline() {
     let started = Arc::new(Notify::new());
     let mut builder = GraphBuilder::new();
     builder.actor_shutdown_timeout(Duration::from_secs(1));
-    builder.actor(
-        "worker",
-        PendingActor {
+    builder.actor("worker", {
+        let started = started.clone();
+        move || PendingActor {
             started: started.clone(),
-        },
-    );
+        }
+    });
     let runtime = SupervisedActors::new(builder.build().expect("valid graph"))
         .shutdown(ShutdownPolicy::cooperative_then_abort(
             Duration::from_millis(20),
@@ -765,8 +762,8 @@ async fn aborting_supervisor_deadline_can_complete_before_actor_deadline() {
 #[tokio::test]
 async fn handle_actor_stats_track_graph_and_runtime_added_actors() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let (runtime, worker_ref) = build_runtime(Observe {
-        observed: observed_tx,
+    let (runtime, worker_ref) = build_runtime(move || Observe {
+        observed: observed_tx.clone(),
     });
     let handle = runtime.spawn();
 
@@ -786,7 +783,7 @@ async fn handle_actor_stats_track_graph_and_runtime_added_actors() {
     assert_eq!(worker.messages_accepted, 1);
 
     let extra = handle
-        .add_actor("extra", Drain::<()>::new(), DynamicActorOptions::default())
+        .add_actor("extra", Drain::<()>::new, DynamicActorOptions::default())
         .await
         .expect("actor added");
     extra.send(()).await.expect("message sent");

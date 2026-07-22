@@ -4,14 +4,13 @@ A runtime does not need a graph at all: `Runtime::builder().build()` starts
 empty and idles until `RuntimeHandle::add_actor` adds a typed actor. Each
 added actor becomes a supervised child whose id is the actor's label, and
 `add_actor` returns the typed `ActorRef<M>` directly — there is no registry
-and no string lookup. Refs travel the way any other value does: cloned into
-actor state at construction, or delivered by message.
+and no string lookup. Refs travel the way any other value does: cloned into an
+incarnation by its factory, or delivered by message.
 
 ```rust,no_run
 use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, Runtime};
 use tokio_supervisor::Strategy;
 
-#[derive(Clone)]
 struct FrontDesk {
     rush: Option<ActorRef<String>>,
 }
@@ -43,7 +42,6 @@ impl Actor for FrontDesk {
     }
 }
 
-#[derive(Clone)]
 struct RushPress;
 
 impl Actor for RushPress {
@@ -61,10 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = runtime.spawn();
 
     let orders = handle
-        .add_actor("front-desk", FrontDesk { rush: None }, DynamicActorOptions::default())
+        .add_actor("front-desk", || FrontDesk { rush: None }, DynamicActorOptions::default())
         .await?;
     let rush = handle
-        .add_actor("rush-press", RushPress, DynamicActorOptions::default())
+        .add_actor("rush-press", || RushPress, DynamicActorOptions::default())
         .await?;
 
     // Distribute the ref by message — the mailbox is the discovery channel.
@@ -100,7 +98,7 @@ use tokio_otp::{DynamicActorOptions, SupervisorHandleExt};
 
 let (actor, subscription) = graph
     .dynamic_factory()
-    .actor("btc-usd", Subscription::new());
+    .actor("btc-usd", Subscription::new);
 let venue = handle.supervisor("coinbase").expect("venue is running");
 
 venue

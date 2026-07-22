@@ -49,18 +49,19 @@ pub enum DrainPolicy {
 /// Hand-writing [`RawActor::run`] remains the escape hatch for actors that need
 /// custom loop control.
 ///
-/// # Restart resets state
+/// # Incarnation construction
 ///
-/// Every run clones the wiring-time actor value before calling any hook:
-/// `Clone` is the reset mechanism, so a supervised restart starts from the
-/// actor's initial state, not the state at the crash. Acquire
-/// per-incarnation resources (connections, files, sessions) in
-/// [`on_start`](Self::on_start) — the OTP `init` idiom — where a failure is
-/// an ordinary restartable failure. State that must survive restarts belongs
-/// behind shared handles (an `Arc`, a database, another actor's
-/// [`ActorRef`](crate::ActorRef)): cloning shares those instead of resetting
-/// them.
-pub trait Actor: Clone + Send + Sync + 'static {
+/// Registration takes a reusable synchronous `Fn() -> A` factory. It is
+/// invoked once for the initial start and once per supervised restart, so
+/// ordinary actor fields are fresh incarnation-local state and need not
+/// implement [`Clone`]. Factory captures should be durable configuration or
+/// shared handles that intentionally survive restarts, such as an `Arc`, a
+/// database handle, or another actor's [`ActorRef`](crate::ActorRef).
+///
+/// Acquire fallible or asynchronous per-incarnation resources (connections,
+/// files, sessions) in [`on_start`](Self::on_start) — the OTP `init` idiom —
+/// where failure already participates in supervision and readiness.
+pub trait Actor: Send + Sync + 'static {
     /// The message type this handler receives.
     type Msg: Send + 'static;
 

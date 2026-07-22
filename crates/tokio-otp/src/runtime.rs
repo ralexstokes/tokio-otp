@@ -281,33 +281,45 @@ impl RuntimeHandle {
         self.supervisor.supervisor(id)
     }
 
-    /// Adds a supervised runtime actor and returns its stable typed ref.
+    /// Adds a supervised runtime actor from an incarnation factory and returns
+    /// its stable typed ref.
     ///
     /// The actor's label is also its direct supervisor child id, so it can be
-    /// removed later with [`remove_child`](Self::remove_child).
-    pub async fn add_actor<A: RawActor>(
+    /// removed later with [`remove_child`](Self::remove_child). The factory is
+    /// invoked exactly once per initial start or supervised restart.
+    pub async fn add_actor<A, F>(
         &self,
         label: impl Into<String>,
-        actor: A,
+        factory: F,
         options: DynamicActorOptions,
-    ) -> Result<ActorRef<A::Msg>, ControlError> {
-        let actor = self.actors.actor_factory.actor(label, actor);
+    ) -> Result<ActorRef<A::Msg>, ControlError>
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
+        let actor = self.actors.actor_factory.actor(label, factory);
         self.add_constructed_actor(actor, options).await
     }
 
-    /// Adds a supervised runtime actor with explicit per-actor registration
-    /// options and returns its stable typed ref.
-    pub async fn add_actor_with_options<A: RawActor>(
+    /// Adds a supervised runtime actor from an incarnation factory with explicit
+    /// per-actor registration options and returns its stable typed ref.
+    ///
+    /// The factory is invoked exactly once per initial start or supervised restart.
+    pub async fn add_actor_with_options<A, F>(
         &self,
         label: impl Into<String>,
-        actor: A,
+        factory: F,
         actor_options: ActorOptions<A::Msg>,
         dynamic_options: DynamicActorOptions,
-    ) -> Result<ActorRef<A::Msg>, ControlError> {
+    ) -> Result<ActorRef<A::Msg>, ControlError>
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
         let actor = self
             .actors
             .actor_factory
-            .actor_with_options(label, actor, actor_options);
+            .actor_with_options(label, factory, actor_options);
         self.add_constructed_actor(actor, dynamic_options).await
     }
 

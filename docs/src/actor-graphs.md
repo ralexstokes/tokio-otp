@@ -27,7 +27,6 @@ enum ShippingMsg {
     Total(Reply<usize>),
 }
 
-#[derive(Clone)]
 struct FrontDesk {
     press: ActorRef<Order>,
 }
@@ -41,7 +40,6 @@ impl Actor for FrontDesk {
     }
 }
 
-#[derive(Clone)]
 struct Press {
     shipping: ActorRef<ShippingMsg>,
 }
@@ -57,7 +55,7 @@ impl Actor for Press {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Shipping {
     shipped: usize,
 }
@@ -96,14 +94,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut entry_points = None;
     let graph = PrintShop::graph_with(builder, |refs| {
         entry_points = Some((refs.front_desk.clone(), refs.shipping.clone()));
-        PrintShop {
-            front_desk: FrontDesk {
-                press: refs.press.clone(),
+        let press = refs.press.clone();
+        let shipping = refs.shipping.clone();
+        PrintShopFactories {
+            front_desk: move || FrontDesk {
+                press: press.clone(),
             },
-            press: Press {
-                shipping: refs.shipping.clone(),
+            press: move || Press {
+                shipping: shipping.clone(),
             },
-            shipping: Shipping::default(),
+            shipping: Shipping::default,
         }
     })?;
     let (orders, shipping) = entry_points.expect("wiring closure ran");
@@ -125,6 +125,34 @@ For lower-level hosting, iterate `graph.actors()` and drive each
 `RunnableActor::run_until` independently. `tokio-otp` performs that adaptation
 for the common supervised runtime.
 
+## Incarnation-local state
+
+Every registration method takes a reusable synchronous factory. The runtime
+calls it exactly once for the initial start and once for every supervised
+restart, so ordinary actor fields are fresh incarnation-local state. The actor
+type does not need `Clone`, and a synchronously constructible non-`Clone` guard
+or resource can live directly in the actor.
+
+Constructor functions are the common case:
+
+```rust,ignore
+builder.actor("worker", Worker::new);
+builder.add(Worker::new);
+```
+
+For a wired actor, capture only durable configuration or handles and clone
+those while constructing each incarnation:
+
+```rust,ignore
+let ledger = ledger_ref.clone();
+builder.actor("gateway", move || Gateway::new(ledger.clone()));
+```
+
+Fallible or asynchronous acquisition belongs in `Actor::on_start` or at the
+beginning of `RawActor::run`, where failure already participates in supervision
+and readiness. Durable state that should survive restarts belongs behind a
+shared handle, in a database, or in another actor.
+
 ## Struct Topologies
 
 `#[derive(Topology)]` supports named-field structs whose fields implement
@@ -138,8 +166,9 @@ The derive keeps topology shape in the type system:
 
 - a field whose type is not an actor is a compile error
 - wiring a ref with the wrong message type is a compile error
-- filling the same field twice is impossible because the generated code owns
-  one actor value per field
+- every factory field must be present exactly once in the generated
+  `<Topology>Factories` struct literal
+- each factory must return its declared actor type
 - a topology with no actors is a compile error
 
 Configure an individual actor's mailbox or message-size observation with a
@@ -194,12 +223,12 @@ Enable the `serde` feature to serialize the metadata types.
 Use `GraphBuilder` directly when actors are dynamic, generated in a loop, or
 need explicit observability names:
 
-- `builder.add(actor)` registers an actor under its unqualified type name,
+- `builder.add(factory)` registers an actor under its unqualified type name,
   suffixing repeats as `Worker-2`, `Worker-3`, and so on
-- `builder.actor(id, actor)` registers an actor under an explicit id
-- `builder.actor_with_options(id, actor, options)` combines per-actor settings
+- `builder.actor(id, factory)` registers an actor under an explicit id
+- `builder.actor_with_options(id, factory, options)` combines per-actor settings
   such as mailbox delivery and message-size observation
-- `builder.slot::<M>(id)` plus `builder.define(slot, actor)` opens and fills a
+- `builder.slot::<M>(id)` plus `builder.define(slot, factory)` opens and fills a
   token-protected slot for hand-written cyclic wiring
 
 The direct builder still validates runtime configuration facts:
@@ -225,13 +254,13 @@ use tokio_otp::{ActorOptions, MailboxMode};
 
 let latest = builder.actor_with_options(
     "latest-market",
-    market_actor,
+    MarketActor::new,
     ActorOptions::new().mailbox(MailboxMode::Conflate),
 );
 
 let per_symbol = builder.actor_with_options(
     "market-by-symbol",
-    keyed_market_actor,
+    KeyedMarketActor::new,
     ActorOptions::new().mailbox(MailboxMode::conflate_by_key(
         |tick: &Tick| tick.symbol_id,
     )),

@@ -35,14 +35,17 @@ async fn actors_gate_sequential_start_on_on_start_and_run_continuations_first() 
     let order = Arc::new(Mutex::new(Vec::new()));
     let release = Arc::new(Notify::new());
     let mut graph = GraphBuilder::new();
-    let first = graph.add(Probe {
+    let first_order = order.clone();
+    let first_release = release.clone();
+    let first = graph.add(move || Probe {
         name: "first",
-        order: Arc::clone(&order),
-        release: Some(Arc::clone(&release)),
+        order: first_order.clone(),
+        release: Some(first_release.clone()),
     });
-    graph.add(Probe {
+    let second_order = order.clone();
+    graph.add(move || Probe {
         name: "second",
-        order: Arc::clone(&order),
+        order: second_order.clone(),
         release: None,
     });
 
@@ -101,7 +104,7 @@ impl Actor for FailsOnStart {
 #[tokio::test]
 async fn failed_actor_start_disarms_readiness_without_panicking() {
     let mut graph = GraphBuilder::new();
-    graph.add(FailsOnStart);
+    graph.add(|| FailsOnStart);
     let handle = Runtime::builder()
         .graph(graph.build().unwrap())
         .restart(RestartPolicy::Never)
@@ -144,8 +147,9 @@ impl Actor for DrainContinuation {
 async fn drain_processes_continuations_queued_by_drained_messages() {
     let handled = Arc::new(Mutex::new(Vec::new()));
     let mut graph = GraphBuilder::new();
-    let actor = graph.add(DrainContinuation {
-        handled: Arc::clone(&handled),
+    let actor_handled = handled.clone();
+    let actor = graph.add(move || DrainContinuation {
+        handled: actor_handled.clone(),
     });
     let handle = Runtime::builder()
         .graph(graph.build().unwrap())
@@ -172,7 +176,7 @@ impl RawActor for PromptRaw {
 #[tokio::test]
 async fn prompt_raw_actor_delivers_readiness_before_completion() {
     let mut graph = GraphBuilder::new();
-    graph.add(PromptRaw);
+    graph.add(|| PromptRaw);
     let handle = Runtime::builder()
         .graph(graph.build().unwrap())
         .restart(RestartPolicy::Never)

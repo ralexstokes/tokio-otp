@@ -104,8 +104,11 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
     let sink = handle
         .add_actor(
             "sink",
-            Observe {
-                observed: observed_tx.clone(),
+            {
+                let observed_tx = observed_tx.clone();
+                move || Observe {
+                    observed: observed_tx.clone(),
+                }
             },
             DynamicActorOptions::default(),
         )
@@ -123,8 +126,8 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
     let replacement = handle
         .add_actor(
             "sink",
-            Observe {
-                observed: observed_tx,
+            move || Observe {
+                observed: observed_tx.clone(),
             },
             DynamicActorOptions::default(),
         )
@@ -148,7 +151,7 @@ async fn runtime_added_actor_can_observe_message_sizes() {
     let sink = handle
         .add_actor_with_options(
             "sink",
-            Drain::<SizedMessage>::new(),
+            Drain::<SizedMessage>::new,
             ActorOptions::new().message_size(),
             DynamicActorOptions::default(),
         )
@@ -193,8 +196,11 @@ async fn runtime_added_actor_uses_non_default_mailbox_options() {
     let sink = handle
         .add_actor_with_options(
             "sink",
-            GatedDrain {
-                release: Arc::clone(&release),
+            {
+                let release = release.clone();
+                move || GatedDrain {
+                    release: release.clone(),
+                }
             },
             ActorOptions::new().mailbox(MailboxMode::Conflate),
             DynamicActorOptions::default(),
@@ -218,14 +224,14 @@ async fn runtime_added_actor_uses_non_default_mailbox_options() {
 async fn runtime_added_ref_is_distributed_to_static_actor_by_message() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let forwarder = builder.actor("forwarder", Forwarder);
+    let forwarder = builder.actor("forwarder", || Forwarder);
     let handle = build_runtime(builder.build().expect("valid graph")).spawn();
 
     let sink = handle
         .add_actor(
             "sink",
-            Observe {
-                observed: observed_tx,
+            move || Observe {
+                observed: observed_tx.clone(),
             },
             DynamicActorOptions::default(),
         )
@@ -264,18 +270,17 @@ impl RawActor for ForwardTo {
 async fn runtime_added_actor_can_receive_static_ref_at_creation() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let sink = builder.actor(
-        "sink",
-        Observe {
-            observed: observed_tx,
-        },
-    );
+    let sink = builder.actor("sink", move || Observe {
+        observed: observed_tx.clone(),
+    });
     let handle = build_runtime(builder.build().expect("valid graph")).spawn();
 
     let dynamic = handle
         .add_actor(
             "dynamic",
-            ForwardTo { target: sink },
+            move || ForwardTo {
+                target: sink.clone(),
+            },
             DynamicActorOptions::default(),
         )
         .await
@@ -307,7 +312,7 @@ async fn timed_out_removal_terminates_the_typed_ref() {
     let actor_ref = handle
         .add_actor(
             "dynamic",
-            PendingActor,
+            || PendingActor,
             DynamicActorOptions::new().shutdown(ShutdownPolicy::cooperative_strict(
                 Duration::from_millis(20),
             )),
@@ -325,11 +330,7 @@ async fn timed_out_removal_terminates_the_typed_ref() {
     ));
 
     handle
-        .add_actor(
-            "dynamic",
-            Drain::<()>::new(),
-            DynamicActorOptions::default(),
-        )
+        .add_actor("dynamic", Drain::<()>::new, DynamicActorOptions::default())
         .await
         .expect("label reusable after timed-out removal");
     handle.shutdown_and_wait().await.expect("clean shutdown");
@@ -347,11 +348,7 @@ async fn runtime_new_supports_runtime_added_actors() {
     let handle = Runtime::new(supervisor).spawn();
 
     let actor_ref = handle
-        .add_actor(
-            "dynamic",
-            Drain::<()>::new(),
-            DynamicActorOptions::default(),
-        )
+        .add_actor("dynamic", Drain::<()>::new, DynamicActorOptions::default())
         .await
         .expect("all runtimes support actor creation");
     assert_eq!(actor_ref.id(), "dynamic");

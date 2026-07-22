@@ -81,21 +81,23 @@ async fn supervised_actors_restart_only_the_failed_actor() {
 
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");
-    let frontend_ref = builder.actor(
-        "frontend",
-        Frontend {
-            worker: worker_ref,
-            starts: Arc::clone(&frontend_starts),
-        },
-    );
-    builder.define(
-        worker_slot,
-        Worker {
-            observed: observed_tx,
-            starts: Arc::clone(&worker_starts),
-            failed: oneshot_slot(failed_tx),
-        },
-    );
+    let frontend_ref = builder.actor("frontend", {
+        let worker_ref = worker_ref.clone();
+        let frontend_starts = frontend_starts.clone();
+        move || Frontend {
+            worker: worker_ref.clone(),
+            starts: frontend_starts.clone(),
+        }
+    });
+    let failed = oneshot_slot(failed_tx);
+    builder.define(worker_slot, {
+        let worker_starts = worker_starts.clone();
+        move || Worker {
+            observed: observed_tx.clone(),
+            starts: worker_starts.clone(),
+            failed: failed.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
@@ -168,16 +170,14 @@ async fn send_waits_during_permanent_restart_window() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (first_exited_tx, first_exited_rx) = oneshot::channel();
     let runs = Arc::new(AtomicUsize::new(0));
+    let first_exited = oneshot_slot(first_exited_tx);
 
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.actor(
-        "worker",
-        CleanThenReceive {
-            runs,
-            first_exited: oneshot_slot(first_exited_tx),
-            observed: observed_tx,
-        },
-    );
+    let worker_ref = builder.actor("worker", move || CleanThenReceive {
+        runs: runs.clone(),
+        first_exited: first_exited.clone(),
+        observed: observed_tx.clone(),
+    });
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
@@ -239,14 +239,12 @@ impl RawActor for NotifyCleanExit {
 #[tokio::test]
 async fn send_to_cleanly_exiting_transient_returns_actor_terminated_promptly() {
     let (exited_tx, exited_rx) = oneshot::channel();
+    let exited = oneshot_slot(exited_tx);
 
     let mut builder = GraphBuilder::new();
-    let worker_ref = builder.actor(
-        "worker",
-        NotifyCleanExit {
-            exited: oneshot_slot(exited_tx),
-        },
-    );
+    let worker_ref = builder.actor("worker", move || NotifyCleanExit {
+        exited: exited.clone(),
+    });
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)
@@ -327,15 +325,13 @@ impl RawActor for RestartingRpc {
 async fn call_succeeds_across_restart_window() {
     let (failed_tx, failed_rx) = oneshot::channel();
     let runs = Arc::new(AtomicUsize::new(0));
+    let failed = oneshot_slot(failed_tx);
 
     let mut builder = GraphBuilder::new();
-    let rpc_ref = builder.actor(
-        "rpc",
-        RestartingRpc {
-            runs,
-            failed: oneshot_slot(failed_tx),
-        },
-    );
+    let rpc_ref = builder.actor("rpc", move || RestartingRpc {
+        runs: runs.clone(),
+        failed: failed.clone(),
+    });
     let graph = builder.build().expect("valid graph");
 
     let supervisor = SupervisedActors::new(graph)

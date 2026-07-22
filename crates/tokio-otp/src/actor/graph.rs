@@ -50,47 +50,58 @@ pub(crate) trait ErasedRunner: Send + Sync {
     fn start(&self, start: RunnerStart) -> BoxedActorFuture;
 }
 
-pub(crate) struct TypedRunner<A: RawActor> {
-    pub(crate) actor: A,
+pub(crate) struct TypedRunner<A: RawActor, F> {
+    pub(crate) factory: Arc<F>,
     pub(crate) binding: Arc<BindingCore<A::Msg>>,
     pub(crate) mailbox_mode: MailboxMode<A::Msg>,
 }
 
-impl<A: RawActor> ErasedRunner for TypedRunner<A> {
+impl<A, F> ErasedRunner for TypedRunner<A, F>
+where
+    A: RawActor,
+    F: Fn() -> A + Send + Sync + 'static,
+{
     fn start(&self, start: RunnerStart) -> BoxedActorFuture {
-        let actor_shutdown = start.shutdown;
-        let timers = ActorTimers::new(&actor_shutdown);
-        let monitors = ActorMonitors::new(&actor_shutdown);
-        let observability = start.observability;
-        let (sender, mailbox) = mailbox(&self.mailbox_mode, start.mailbox_capacity);
-        let actor_id = self.binding.actor_id().clone();
-        let bound_mailbox = BindingGuard::bind(
-            self.binding.clone(),
-            MailboxRef::new(actor_id.clone(), sender),
-            observability.clone(),
-            start.rebind_policy,
-        );
-        let myself = ActorRef::from_core(&self.binding, Some(actor_id.clone()));
-        let monitor_hub = self.binding.monitor_hub();
-        let ctx = ActorContext {
-            id: actor_id,
-            mailbox,
-            myself,
-            shutdown: actor_shutdown,
-            observability,
-            timers,
-            state_timeout: Mutex::new(None),
-            monitors,
-            ready: Mutex::new(Some(start.ready)),
-            continuations: Mutex::new(Default::default()),
-        };
-        let mut actor = self.actor.clone();
-        if !actor.readiness_gated() {
-            ctx.mark_ready();
-        }
-        let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
+        let factory = self.factory.clone();
+        let binding = self.binding.clone();
+        let mailbox_mode = self.mailbox_mode.clone();
 
         Box::pin(async move {
+            let actor_shutdown = start.shutdown;
+            let timers = ActorTimers::new(&actor_shutdown);
+            let monitors = ActorMonitors::new(&actor_shutdown);
+            let observability = start.observability;
+            let (sender, mailbox) = mailbox(&mailbox_mode, start.mailbox_capacity);
+            let actor_id = binding.actor_id().clone();
+            let bound_mailbox = BindingGuard::bind(
+                binding.clone(),
+                MailboxRef::new(actor_id.clone(), sender),
+                observability.clone(),
+                start.rebind_policy,
+            );
+            let myself = ActorRef::from_core(&binding, Some(actor_id.clone()));
+            let monitor_hub = binding.monitor_hub();
+            let ctx = ActorContext {
+                id: actor_id,
+                mailbox,
+                myself,
+                shutdown: actor_shutdown,
+                observability,
+                timers,
+                state_timeout: Mutex::new(None),
+                monitors,
+                ready: Mutex::new(Some(start.ready)),
+                continuations: Mutex::new(Default::default()),
+            };
+            let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
+            // Binding is deliberately deferred until this actor future's first
+            // poll so construction happens inside the bound, instrumented
+            // future. Constructor panics then follow the same binding,
+            // monitoring, and supervision path as startup and run panics.
+            let mut actor = factory();
+            if !actor.readiness_gated() {
+                ctx.mark_ready();
+            }
             let _bound_mailbox = bound_mailbox;
             let result = actor.run(ctx).await;
             let reason = if result.is_ok() {
@@ -477,23 +488,38 @@ impl RunnableActorFactory {
         }
     }
 
-    /// Constructs a runnable actor and its stable typed ref.
-    pub fn actor<A: RawActor>(
+    /// Constructs a runnable actor from a reusable incarnation factory and
+    /// returns its stable typed ref.
+    ///
+    /// The factory is invoked exactly once for the initial run and once for
+    /// every supervised restart.
+    pub fn actor<A, F>(
         &self,
         label: impl Into<String>,
-        actor: A,
-    ) -> (RunnableActor, ActorRef<A::Msg>) {
-        self.actor_with_options(label, actor, ActorOptions::new())
+        factory: F,
+    ) -> (RunnableActor, ActorRef<A::Msg>)
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
+        self.actor_with_options(label, factory, ActorOptions::new())
     }
 
-    /// Constructs a runnable actor with explicit per-actor options and its
-    /// stable typed ref.
-    pub fn actor_with_options<A: RawActor>(
+    /// Constructs a runnable actor from a reusable incarnation factory with
+    /// explicit per-actor options and returns its stable typed ref.
+    ///
+    /// The factory is invoked exactly once for the initial run and once for
+    /// every supervised restart.
+    pub fn actor_with_options<A, F>(
         &self,
         label: impl Into<String>,
-        actor: A,
+        factory: F,
         options: ActorOptions<A::Msg>,
-    ) -> (RunnableActor, ActorRef<A::Msg>) {
+    ) -> (RunnableActor, ActorRef<A::Msg>)
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
         let actor_id: Arc<str> = label.into().into();
         let binding = Arc::new(match options.size_hint {
             Some(size_hint) => {
@@ -501,22 +527,26 @@ impl RunnableActorFactory {
             }
             None => BindingCore::<A::Msg>::new(actor_id.clone()),
         });
-        self.actor_with_binding(actor_id, actor, binding, options.mailbox_mode)
+        self.actor_with_binding(actor_id, factory, binding, options.mailbox_mode)
     }
 
-    fn actor_with_binding<A: RawActor>(
+    fn actor_with_binding<A, F>(
         &self,
         actor_id: Arc<str>,
-        actor: A,
+        factory: F,
         binding: Arc<BindingCore<A::Msg>>,
         mailbox_mode: MailboxMode<A::Msg>,
-    ) -> (RunnableActor, ActorRef<A::Msg>) {
+    ) -> (RunnableActor, ActorRef<A::Msg>)
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
         let actor_ref = ActorRef::from_core(&binding, None);
         let runnable = RunnableActor::new(RunnableActorParts {
             actor_id,
             binding_lifecycle: binding.clone(),
             runner: Arc::new(TypedRunner {
-                actor,
+                factory: Arc::new(factory),
                 binding,
                 mailbox_mode,
             }),

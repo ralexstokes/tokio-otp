@@ -31,8 +31,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let worker = builder.add(Worker {
-        completed: completed_tx,
+    let worker = builder.add(move || Worker {
+        completed: completed_tx.clone(),
     });
     let graph = builder.build()?;
 

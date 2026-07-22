@@ -1,0 +1,16 @@
+error[E0271]: expected `{closure@wrong_factory_return.rs:29:59}` to return `Worker`, but it returns `Other`
+  --> tests/ui/topology/wrong_factory_return.rs:29:62
+   |
+29 |     Application::graph(|_| ApplicationFactories { worker: || Other }).unwrap();
+   |                                                           -- ^^^^^ expected `Worker`, found `Other`
+   |                                                           |
+   |                                                           this closure
+   |
+note: required by a bound in `Application::graph`
+  --> tests/ui/topology/wrong_factory_return.rs:25:13
+   |
+23 | #[derive(Topology)]
+   |          -------- required by a bound in this associated function
+24 | struct Application {
+25 |     worker: Worker,
+   |             ^^^^^^ required by this bound in `Application::graph`

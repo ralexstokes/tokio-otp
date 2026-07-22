@@ -57,20 +57,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
     let (worker_slot, worker_ref) = builder.slot::<String>("worker");
-    let frontend = builder.actor(
-        "frontend",
-        Frontend {
+    let frontend = builder.actor("frontend", {
+        let worker_ref = worker_ref.clone();
+        move || Frontend {
             worker: worker_ref.clone(),
-        },
-    );
-    builder.define(
-        worker_slot,
-        Worker {
-            runs: Arc::new(AtomicUsize::new(0)),
-            observed: observed_tx,
-            run: 0,
-        },
-    );
+        }
+    });
+    let worker_runs = Arc::new(AtomicUsize::new(0));
+    builder.define(worker_slot, move || Worker {
+        runs: worker_runs.clone(),
+        observed: observed_tx.clone(),
+        run: 0,
+    });
     let graph = builder.build()?;
 
     let children = SupervisedActors::new(graph)

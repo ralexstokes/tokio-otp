@@ -10,12 +10,6 @@ impl<M> Idle<M> {
     }
 }
 
-impl<M> Clone for Idle<M> {
-    fn clone(&self) -> Self {
-        Self(PhantomData)
-    }
-}
-
 impl<M: Send + 'static> RawActor for Idle<M> {
     type Msg = M;
 
@@ -37,12 +31,12 @@ fn main() {
 
     let mut zero_capacity = GraphBuilder::new();
     zero_capacity.mailbox_capacity(0);
-    zero_capacity.actor("worker", Idle::<()>::new());
+    zero_capacity.actor("worker", Idle::<()>::new);
     report("zero mailbox capacity", zero_capacity.build());
 
     let mut duplicate = GraphBuilder::new();
-    duplicate.actor("worker", Idle::<()>::new());
-    duplicate.actor("worker", Idle::<()>::new());
+    duplicate.actor("worker", Idle::<()>::new);
+    duplicate.actor("worker", Idle::<()>::new);
     report("duplicate actor ids", duplicate.build());
 
     let mut missing = GraphBuilder::new();
@@ -51,19 +45,19 @@ fn main() {
 
     let mut empty_name = GraphBuilder::new();
     empty_name.name("");
-    empty_name.actor("worker", Idle::<()>::new());
+    empty_name.actor("worker", Idle::<()>::new);
     report("empty graph name", empty_name.build());
 
     // Message-type mismatches now fail at compile time:
     //
     // let mut builder = GraphBuilder::new();
     // let (slot, _worker) = builder.slot::<u32>("worker");
-    // builder.define(slot, Idle::<String>::new());
+    // builder.define(slot, Idle::<String>::new);
     //
     // Reusing a slot token also fails at compile time because `define`
     // consumes it:
     //
     // let (slot, _worker) = builder.slot::<String>("worker");
-    // builder.define(slot, Idle::<String>::new());
-    // builder.define(slot, Idle::<String>::new());
+    // builder.define(slot, Idle::<String>::new);
+    // builder.define(slot, Idle::<String>::new);
 }

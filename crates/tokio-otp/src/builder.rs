@@ -36,7 +36,7 @@ use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut graph = GraphBuilder::new();
-/// let echo = graph.add(Echo);
+/// let echo = graph.add(|| Echo);
 ///
 /// let runtime = Runtime::builder()
 ///     .graph(graph.build()?)

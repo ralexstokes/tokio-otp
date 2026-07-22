@@ -25,7 +25,6 @@ restart, transparently reconnecting to the replacement:
 ```rust
 use tokio_otp::prelude::*;
 
-#[derive(Clone)]
 struct FrontDesk {
     press: ActorRef<String>,
 }
@@ -44,8 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wire a static graph with typed, restart-stable actor refs.
     let mut builder = GraphBuilder::new();
     let (press_slot, press_ref) = builder.slot::<String>("press");
-    let orders = builder.actor("front-desk", FrontDesk { press: press_ref });
-    builder.define(press_slot, Press::default()); // an actor that occasionally jams
+    let orders = builder.actor("front-desk", move || FrontDesk {
+        press: press_ref.clone(),
+    });
+    builder.define(press_slot, Press::default); // an actor that occasionally jams
     let graph = builder.build()?;
 
     // Run every actor as its own supervised child.

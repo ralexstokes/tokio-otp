@@ -14,6 +14,6 @@ impl Actor for Worker {
 fn main() {
     let mut builder = GraphBuilder::new();
     let (slot, _worker) = builder.slot::<()>("worker");
-    builder.define(slot, Worker);
-    builder.define(slot, Worker);
+    builder.define(slot, || Worker);
+    builder.define(slot, || Worker);
 }

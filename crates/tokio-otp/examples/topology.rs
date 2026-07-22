@@ -80,16 +80,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut frontend = None;
     let graph = Pipeline::graph(|refs| {
         frontend = Some(refs.frontend.clone());
-        Pipeline {
-            frontend: Frontend {
-                parser: refs.parser.clone(),
-                acked: acked_tx,
+        let parser = refs.parser.clone();
+        let frontend_ref = refs.frontend.clone();
+        let sink = refs.sink.clone();
+        PipelineFactories {
+            frontend: move || Frontend {
+                parser: parser.clone(),
+                acked: acked_tx.clone(),
             },
-            parser: Parser {
-                frontend: refs.frontend.clone(),
-                sink: refs.sink.clone(),
+            parser: move || Parser {
+                frontend: frontend_ref.clone(),
+                sink: sink.clone(),
             },
-            sink: Sink { out: out_tx },
+            sink: move || Sink {
+                out: out_tx.clone(),
+            },
         }
     })?;
     let frontend = frontend.expect("topology closure captured frontend ref");

@@ -52,10 +52,13 @@ async fn conflate_keeps_only_the_newest_unread_message() {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor_with_options(
         "ticks",
-        GatedCollector {
-            started: started_tx,
-            release: Arc::clone(&release),
-            received: received_tx,
+        {
+            let release = release.clone();
+            move || GatedCollector {
+                started: started_tx.clone(),
+                release: release.clone(),
+                received: received_tx.clone(),
+            }
         },
         ActorOptions::new().mailbox(MailboxMode::Conflate),
     );
@@ -111,10 +114,13 @@ async fn actor_options_combine_conflation_and_message_size_observation() {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor_with_options(
         "snapshots",
-        GatedCollector {
-            started: started_tx,
-            release: Arc::clone(&release),
-            received: received_tx,
+        {
+            let release = release.clone();
+            move || GatedCollector {
+                started: started_tx.clone(),
+                release: release.clone(),
+                received: received_tx.clone(),
+            }
         },
         ActorOptions::new()
             .mailbox(MailboxMode::Conflate)
@@ -167,14 +173,14 @@ async fn conflate_by_key_replaces_values_and_evicts_the_oldest_key_at_capacity()
         "market-data",
         ActorOptions::new().mailbox(MailboxMode::conflate_by_key(|tick: &Tick| tick.symbol)),
     );
-    builder.define(
-        slot,
-        GatedCollector {
-            started: started_tx,
-            release: Arc::clone(&release),
-            received: received_tx,
-        },
-    );
+    builder.define(slot, {
+        let release = release.clone();
+        move || GatedCollector {
+            started: started_tx.clone(),
+            release: release.clone(),
+            received: received_tx.clone(),
+        }
+    });
     let graph = builder.build().expect("valid graph");
     let actor = graph.actors()[0].clone();
     let stop = CancellationToken::new();
@@ -249,10 +255,13 @@ async fn replaced_call_reports_reply_dropped() {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor_with_options(
         "requests",
-        GatedCollector {
-            started: started_tx,
-            release: Arc::clone(&release),
-            received: received_tx,
+        {
+            let release = release.clone();
+            move || GatedCollector {
+                started: started_tx.clone(),
+                release: release.clone(),
+                received: received_tx.clone(),
+            }
         },
         ActorOptions::new().mailbox(MailboxMode::Conflate),
     );
@@ -332,10 +341,13 @@ async fn drain_policy_handles_latest_message_after_shutdown() {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor_with_options(
         "drain",
-        GatedDrainActor {
-            started: started_tx,
-            release: Arc::clone(&release),
-            received: received_tx,
+        {
+            let release = release.clone();
+            move || GatedDrainActor {
+                started: started_tx.clone(),
+                release: release.clone(),
+                received: received_tx.clone(),
+            }
         },
         ActorOptions::new().mailbox(MailboxMode::Conflate),
     );
@@ -368,10 +380,13 @@ async fn poisoned_key_match_lock_recovers_without_panicking_in_drop() {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor_with_options(
         "poison-recovery",
-        GatedCollector {
-            started: started_tx,
-            release: Arc::clone(&release),
-            received: received_tx,
+        {
+            let release = release.clone();
+            move || GatedCollector {
+                started: started_tx.clone(),
+                release: release.clone(),
+                received: received_tx.clone(),
+            }
         },
         ActorOptions::new().mailbox(MailboxMode::conflate_by_key({
             let panic_once = Arc::clone(&panic_once);

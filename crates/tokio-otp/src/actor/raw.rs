@@ -19,15 +19,18 @@ pub type ActorResult = Result<(), BoxError>;
 ///
 /// Implementors can use
 /// `async fn run(&mut self, ctx: ActorContext<Self::Msg>) -> ActorResult` in
-/// their trait impls. Each run receives a fresh clone of the wiring-time actor
-/// value, so mutations are private to the run and a restart resets state to
-/// the wiring-time value; per-incarnation resources are acquired inside
-/// [`run`](Self::run).
+/// their trait impls. Registration takes a reusable synchronous `Fn() -> A`
+/// factory and invokes it once per initial start or supervised restart. Each
+/// run therefore owns fresh incarnation-local state, including non-[`Clone`]
+/// fields. Capture only durable configuration and shared handles that should
+/// survive restarts in the factory; acquire fallible or asynchronous resources
+/// at the start of [`run`](Self::run), where failure participates in
+/// supervision and readiness.
 ///
 /// This trait is deliberately not implemented for plain closures: an actor is
 /// a named type that implements `RawActor`, which keeps the message type visible
 /// at the definition site and the actor's state explicit.
-pub trait RawActor: Clone + Send + Sync + 'static {
+pub trait RawActor: Send + Sync + 'static {
     /// The message type this actor receives.
     type Msg: Send + 'static;
 

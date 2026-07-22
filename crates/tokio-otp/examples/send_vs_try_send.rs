@@ -29,8 +29,8 @@ impl RawActor for OneMessageSink {
 async fn main() -> Result<(), Box<dyn Error>> {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let mut builder = GraphBuilder::new();
-    let sink_ref = builder.add(OneMessageSink {
-        observed: observed_tx,
+    let sink_ref = builder.add(move || OneMessageSink {
+        observed: observed_tx.clone(),
     });
     let graph = builder.build()?;
     let sink = graph.actors()[0].clone();

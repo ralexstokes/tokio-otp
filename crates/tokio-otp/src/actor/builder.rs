@@ -131,7 +131,7 @@ impl<M> ActorSlot<M> {
 /// Registration methods mint restart-stable, typed [`ActorRef`]s immediately,
 /// so refs can be captured by other actors' state. Cyclic graphs use
 /// [`slot`](Self::slot) to create refs first and [`define`](Self::define) to
-/// fill the slots once actor values have been wired.
+/// fill the slots once actor factories have been wired.
 ///
 /// # Mailboxes and cycles
 ///
@@ -254,12 +254,17 @@ impl GraphBuilder {
         }
     }
 
-    /// Fills a previously opened actor slot.
+    /// Fills a previously opened actor slot from a reusable incarnation factory.
     ///
     /// The slot token's message type must match the actor's message type, so a
     /// mismatched actor is rejected by the compiler. Consuming the token makes
-    /// double fills unrepresentable in ordinary Rust code.
-    pub fn define<A: RawActor>(&mut self, slot: ActorSlot<A::Msg>, actor: A) {
+    /// double fills unrepresentable in ordinary Rust code. The factory is
+    /// invoked exactly once per initial start or supervised restart.
+    pub fn define<A, F>(&mut self, slot: ActorSlot<A::Msg>, factory: F)
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
         if slot.builder_id != self.builder_id {
             self.errors.push(GraphBuildError::InvalidConfig(
                 "actor slot belongs to a different graph builder",
@@ -287,37 +292,53 @@ impl GraphBuilder {
             .downcast::<MailboxMode<A::Msg>>()
             .unwrap_or_else(|_| unreachable!("message type enforced by ActorSlot"));
         slot.runner = Some(Arc::new(TypedRunner {
-            actor,
+            factory: Arc::new(factory),
             binding,
             mailbox_mode: *mailbox_mode,
         }));
     }
 
-    /// Registers an actor and returns its typed, restart-stable ref.
-    pub fn actor<A: RawActor>(&mut self, actor_id: &str, actor: A) -> ActorRef<A::Msg> {
-        self.actor_with_options(actor_id, actor, ActorOptions::new())
+    /// Registers an incarnation factory and returns its typed, restart-stable ref.
+    ///
+    /// The factory is invoked exactly once per initial start or supervised restart.
+    pub fn actor<A, F>(&mut self, actor_id: &str, factory: F) -> ActorRef<A::Msg>
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
+        self.actor_with_options(actor_id, factory, ActorOptions::new())
     }
 
-    /// Registers an actor with explicit per-actor options.
-    pub fn actor_with_options<A: RawActor>(
+    /// Registers an incarnation factory with explicit per-actor options.
+    ///
+    /// The factory is invoked exactly once per initial start or supervised restart.
+    pub fn actor_with_options<A, F>(
         &mut self,
         actor_id: &str,
-        actor: A,
+        factory: F,
         options: ActorOptions<A::Msg>,
-    ) -> ActorRef<A::Msg> {
+    ) -> ActorRef<A::Msg>
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
         let size_hint = options.size_hint;
         let registration = self.push_slot_with_options(actor_id, options);
-        self.finish_actor_registration(registration, actor, || {
+        self.finish_actor_registration(registration, factory, || {
             Self::detached_ref(actor_id, size_hint)
         })
     }
 
-    fn finish_actor_registration<A: RawActor>(
+    fn finish_actor_registration<A, F>(
         &mut self,
         registration: Option<(usize, ActorRef<A::Msg>)>,
-        actor: A,
+        factory: F,
         detached: impl FnOnce() -> ActorRef<A::Msg>,
-    ) -> ActorRef<A::Msg> {
+    ) -> ActorRef<A::Msg>
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
         let Some((index, actor_ref)) = registration else {
             return detached();
         };
@@ -332,30 +353,41 @@ impl GraphBuilder {
             .downcast::<MailboxMode<A::Msg>>()
             .unwrap_or_else(|_| unreachable!("message type id already verified"));
         slot.runner = Some(Arc::new(TypedRunner {
-            actor,
+            factory: Arc::new(factory),
             binding,
             mailbox_mode: *mailbox_mode,
         }));
         actor_ref
     }
 
-    /// Registers an actor under its unqualified type name.
+    /// Registers an incarnation factory under its actor's unqualified type name.
     ///
     /// If multiple actors have the same type name, later registrations receive
     /// `-2`, `-3`, and so on. Renaming the actor type therefore renames tracing
     /// fields; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
-    pub fn add<A: RawActor>(&mut self, actor: A) -> ActorRef<A::Msg> {
-        self.add_with_options(actor, ActorOptions::new())
+    /// The factory is invoked exactly once per initial start or supervised restart.
+    pub fn add<A, F>(&mut self, factory: F) -> ActorRef<A::Msg>
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
+        self.add_with_options(factory, ActorOptions::new())
     }
 
-    /// Registers an actor under its unqualified type name with explicit
-    /// per-actor options.
-    pub fn add_with_options<A: RawActor>(
+    /// Registers an incarnation factory under its actor's unqualified type name
+    /// with explicit per-actor options.
+    ///
+    /// The factory is invoked exactly once per initial start or supervised restart.
+    pub fn add_with_options<A, F>(
         &mut self,
-        actor: A,
+        factory: F,
         options: ActorOptions<A::Msg>,
-    ) -> ActorRef<A::Msg> {
+    ) -> ActorRef<A::Msg>
+    where
+        A: RawActor,
+        F: Fn() -> A + Send + Sync + 'static,
+    {
         let base = short_type_name(type_name::<A>());
         let mut actor_id = base.to_owned();
         let mut suffix = 2;
@@ -363,7 +395,7 @@ impl GraphBuilder {
             actor_id = format!("{base}-{suffix}");
             suffix += 1;
         }
-        self.actor_with_options(&actor_id, actor, options)
+        self.actor_with_options(&actor_id, factory, options)
     }
 
     /// Validates the graph and returns an immutable [`Graph`].

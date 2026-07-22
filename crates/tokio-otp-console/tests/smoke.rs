@@ -452,7 +452,7 @@ async fn runtime_convenience_wires_public_observability() {
         .expect("failed to add runtime child");
 
     runtime
-        .add_actor("tracked", IdleActor, DynamicActorOptions::default())
+        .add_actor("tracked", || IdleActor, DynamicActorOptions::default())
         .await
         .expect("failed to add runtime actor");
 
