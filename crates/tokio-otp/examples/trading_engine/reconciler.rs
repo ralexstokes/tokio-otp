@@ -145,6 +145,12 @@ impl Actor for Reconciler {
                     MonitorEvent::Terminated { .. } => {
                         self.transition(venue, VenueHealth::Down);
                     }
+                    MonitorEvent::Lagged { dropped, .. } => {
+                        // Overload resync point: the reconciler re-derives
+                        // health from subsequent events and the next tick, so
+                        // no transition is applied here.
+                        tracing::debug!(venue, dropped, "venue feed monitor lagged");
+                    }
                     _ => {}
                 }
                 self.rearm(ctx);

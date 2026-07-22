@@ -62,6 +62,21 @@ pub enum MonitorEvent {
     /// The current incarnation exited. If the supervisor restarts the actor,
     /// a matching [`Up`](Self::Up) follows.
     Down(Down),
+    /// One or more transitions were dropped because the observer could not
+    /// keep up (its mailbox stayed full while the target churned), and the
+    /// per-watch buffer overflowed.
+    ///
+    /// This is a resynchronization point, not an edge: the events immediately
+    /// before it are gone, so a consumer that reacts to individual `Up`/`Down`
+    /// transitions should treat the following events as the target's current
+    /// state rather than assuming strict `Up`/`Down` alternation. Emitted only
+    /// under sustained overload; a healthy observer never sees it.
+    Lagged {
+        /// Stable id of the watched actor.
+        actor_id: String,
+        /// Number of transitions dropped since the last delivered event.
+        dropped: u64,
+    },
     /// The actor is permanently gone. No further events will be delivered.
     Terminated {
         /// Stable id of the watched actor.
@@ -106,14 +121,16 @@ impl MonitorRef {
 /// a full mailbox, so an unbounded hand-off would let a churning target pin
 /// arbitrary memory behind a stalled observer.
 pub(crate) struct WatchQueue {
+    actor_id: String,
     events: Mutex<VecDeque<MonitorEvent>>,
     notify: Notify,
     closed: AtomicBool,
 }
 
 impl WatchQueue {
-    fn new() -> Arc<Self> {
+    fn new(actor_id: &str) -> Arc<Self> {
         Arc::new(Self {
+            actor_id: actor_id.to_owned(),
             events: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
             closed: AtomicBool::new(false),
@@ -124,17 +141,42 @@ impl WatchQueue {
         self.events.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stages one event, dropping the oldest if the buffer is full. The
-    /// terminal event is always the newest, so overflow never drops it.
+    /// Stages one event. When the buffer is full the oldest real events are
+    /// dropped to make room, and the loss is recorded in a single
+    /// [`MonitorEvent::Lagged`] marker kept at the front, so overflow is
+    /// signalled rather than silent. The terminal event is always the newest,
+    /// so overflow never drops it.
     fn push(&self, event: MonitorEvent) {
         {
             let mut events = self.events();
-            if events.len() >= WATCH_BUFFER_CAP {
-                events.pop_front();
+            while events.len() >= WATCH_BUFFER_CAP {
+                self.record_drop(&mut events);
             }
             events.push_back(event);
         }
         self.notify.notify_one();
+    }
+
+    /// Frees one slot by dropping the oldest real event, folding the loss into
+    /// a single `Lagged` marker at the front of the buffer.
+    fn record_drop(&self, events: &mut VecDeque<MonitorEvent>) {
+        if let Some(MonitorEvent::Lagged { .. }) = events.front() {
+            // A marker already leads the buffer: drop the oldest real event
+            // that follows it and bump the count.
+            events.remove(1);
+            if let Some(MonitorEvent::Lagged { dropped, .. }) = events.front_mut() {
+                *dropped = dropped.saturating_add(1);
+            }
+        } else {
+            // Replace the oldest real event with a fresh marker. This keeps
+            // the length unchanged, so the caller's loop drops one more real
+            // event before there is room to append.
+            events.pop_front();
+            events.push_front(MonitorEvent::Lagged {
+                actor_id: self.actor_id.clone(),
+                dropped: 1,
+            });
+        }
     }
 
     /// Removes the next staged event, if any. Called only by the forwarder.
@@ -148,13 +190,29 @@ impl WatchQueue {
         self.notify.notified()
     }
 
-    /// Marks the forwarder gone so the hub stops staging into a dead queue.
-    pub(crate) fn close(&self) {
+    fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+}
+
+/// Owns a forwarder's end of a [`WatchQueue`] and closes it on drop, so the
+/// hub stops staging into the queue whether the forwarder exits normally or
+/// unwinds through a panicking `map` closure.
+pub(crate) struct WatchQueueGuard(Arc<WatchQueue>);
+
+impl WatchQueueGuard {
+    pub(crate) fn queue(&self) -> &WatchQueue {
+        &self.0
+    }
+}
+
+impl Drop for WatchQueueGuard {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
@@ -220,14 +278,14 @@ impl MonitorHub {
     /// Events are staged while holding the hub lock, which totally orders
     /// them per watch; staging is a non-blocking buffer push, so no user code
     /// runs under the lock.
-    pub(crate) fn register_watch(&self, cancellation: CancellationToken) -> Arc<WatchQueue> {
-        let queue = WatchQueue::new();
+    pub(crate) fn register_watch(&self, cancellation: CancellationToken) -> WatchQueueGuard {
+        let queue = WatchQueue::new(&self.actor_id);
         let mut state = self.state();
         state.watchers.retain(Watcher::is_live);
         match state.lifecycle {
             Lifecycle::Terminated(generation) => {
                 queue.push(self.terminated_event(generation));
-                return queue;
+                return WatchQueueGuard(queue);
             }
             Lifecycle::Running(generation) => {
                 queue.push(self.up(generation));
@@ -238,7 +296,7 @@ impl MonitorHub {
             cancellation,
             queue: Arc::clone(&queue),
         });
-        queue
+        WatchQueueGuard(queue)
     }
 
     pub(crate) fn started(&self) {
@@ -369,23 +427,90 @@ mod tests {
         }
     }
 
+    fn down_event(generation: u64) -> MonitorEvent {
+        MonitorEvent::Down(Down {
+            actor_id: "peer".to_owned(),
+            generation,
+            reason: DownReason::Failure,
+        })
+    }
+
+    fn lagged_count(events: &VecDeque<MonitorEvent>) -> u64 {
+        let markers = events
+            .iter()
+            .filter_map(|event| match event {
+                MonitorEvent::Lagged { dropped, .. } => Some(*dropped),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            markers.len() <= 1,
+            "at most one coalesced Lagged marker is kept"
+        );
+        assert!(
+            markers.is_empty() || matches!(events.front(), Some(MonitorEvent::Lagged { .. })),
+            "the Lagged marker leads the buffer"
+        );
+        markers.first().copied().unwrap_or(0)
+    }
+
     #[test]
-    fn queue_drops_oldest_beyond_cap() {
-        let queue = WatchQueue::new();
+    fn queue_coalesces_overflow_into_lagged() {
+        let queue = WatchQueue::new("peer");
         let overflow = 5;
-        for generation in 0..(WATCH_BUFFER_CAP as u64 + overflow) {
+        let total = WATCH_BUFFER_CAP as u64 + overflow;
+        for generation in 0..total {
             queue.push(up_event(generation));
         }
 
-        assert_eq!(queue.events().len(), WATCH_BUFFER_CAP);
-        // The oldest `overflow` events were dropped; the surviving front is
-        // the first event that still fits the bound.
-        assert_eq!(queue.pop(), Some(up_event(overflow)));
+        let events = queue.events();
+        assert_eq!(events.len(), WATCH_BUFFER_CAP);
+        // Every dropped event is accounted for by the single leading marker,
+        // and the newest event is always retained.
+        assert!(lagged_count(&events) > 0);
+        assert_eq!(events.back(), Some(&up_event(total - 1)));
+    }
+
+    #[test]
+    fn alternating_overflow_is_flagged_not_silent() {
+        let queue = WatchQueue::new("peer");
+        // Twice the capacity of alternating Up/Down forces heavy overflow.
+        for generation in 0..(WATCH_BUFFER_CAP as u64) {
+            queue.push(up_event(generation));
+            queue.push(down_event(generation));
+        }
+
+        let events = queue.events();
+        assert_eq!(events.len(), WATCH_BUFFER_CAP);
+        // A consumer never silently sees a Down without its Up: the dropped
+        // span is fronted by an explicit Lagged resync marker.
+        assert!(
+            matches!(events.front(), Some(MonitorEvent::Lagged { .. })),
+            "overflow must surface a resync marker, not silently orphan a transition"
+        );
+        assert!(lagged_count(&events) > 0);
+    }
+
+    #[test]
+    fn dropping_guard_closes_queue_and_prunes_watcher() {
+        let hub = MonitorHub::new("peer");
+        let guard = hub.register_watch(CancellationToken::new());
+        assert_eq!(hub.state().watchers.len(), 1);
+
+        // A panicking `map` closure unwinds the forwarder, which drops the
+        // guard; that must close the queue so the hub stops staging into it.
+        drop(guard);
+        hub.started();
+        assert_eq!(
+            hub.state().watchers.len(),
+            0,
+            "a closed watch must be pruned on the next lifecycle event"
+        );
     }
 
     #[test]
     fn terminal_event_survives_overflow() {
-        let queue = WatchQueue::new();
+        let queue = WatchQueue::new("peer");
         for generation in 0..(WATCH_BUFFER_CAP as u64 * 2) {
             queue.push(up_event(generation));
         }

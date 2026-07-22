@@ -96,7 +96,8 @@
 //! Actors can watch a peer with [`ActorContext::watch`]. The watch follows
 //! the logical actor across restarts: each [`MonitorEvent`] — `Up` when an
 //! incarnation starts, `Down` when it exits, a final `Terminated` when the
-//! actor is permanently gone — is mapped into the observer's message type and
+//! actor is permanently gone, and `Lagged` if a stalled observer misses
+//! transitions under overload — is mapped into the observer's message type and
 //! delivered through the ordinary mailbox. [`MonitorRef::cancel`] suppresses
 //! future delivery, and all watches are cancelled automatically when the
 //! observing actor stops or restarts.

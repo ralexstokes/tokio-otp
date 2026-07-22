@@ -41,6 +41,9 @@ impl Actor for Coordinator {
                     down.actor_id, down.generation, down.reason
                 );
             }
+            MonitorEvent::Lagged { actor_id, dropped } => {
+                eprintln!("{actor_id} watch lagged, {dropped} transitions dropped");
+            }
             MonitorEvent::Terminated { actor_id, .. } => {
                 eprintln!("{actor_id} is permanently gone");
             }
@@ -62,6 +65,11 @@ re-registered while the target lives. Events arrive in lifecycle order:
   covers a clean return and cooperative shutdown; `DownReason::Failure` covers
   errors, panics, aborts, and a dropped actor run. If the supervisor restarts
   the actor, a matching `Up` follows.
+- `MonitorEvent::Lagged` — one or more transitions were dropped because the
+  observer could not keep up under sustained overload. This is a
+  resynchronization point, not an edge: treat the events that follow it as the
+  target's current state rather than assuming strict `Up`/`Down` alternation. A
+  healthy observer never sees it.
 - `MonitorEvent::Terminated` — the actor is permanently gone (its binding was
   terminated, or it was dropped without ever starting). No further events
   will be delivered.
@@ -86,10 +94,14 @@ transition must be observed.
 Undelivered events are held in a bounded per-watch buffer. Under normal load
 this is never a factor — lifecycle events are rare. But if an observer's
 mailbox stays full while its target restarts in a tight loop, the buffer caps
-the memory that can accumulate: the oldest staged events are dropped, so the
-observer resynchronizes to recent history plus the current state once it
-catches up rather than replaying the entire storm. The terminal `Terminated`
-event is always the newest event, so it is never dropped.
+the memory that can accumulate: the oldest staged events are dropped. The loss
+is never silent — the dropped span is folded into a single `Lagged` marker, so
+the observer learns it fell behind and can resynchronize to the current state
+rather than replaying the entire storm. Because no mailbox mode can guarantee
+that every transition is observed under sustained overload, consumers that
+react to individual transitions should treat `Lagged` as a resync point. The
+terminal `Terminated` event is always the newest event, so it is never
+dropped.
 
 For one-shot, incarnation-scoped monitoring — "tell me if the incarnation I
 am talking to right now dies" — watch the target, act on the first `Down`,

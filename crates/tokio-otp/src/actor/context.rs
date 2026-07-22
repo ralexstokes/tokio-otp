@@ -481,9 +481,10 @@ impl<M: Send + 'static> ActorContext<M> {
     /// mailbox may replace an unread event with a later one, so use a FIFO
     /// mailbox when every transition must be observed. Undelivered events are
     /// staged in a bounded per-watch buffer, so an observer whose mailbox
-    /// stays full while its target restarts in a tight loop coalesces the
-    /// storm into recent history plus the current state rather than growing
-    /// memory without bound; the terminal `Terminated` is never dropped.
+    /// stays full while its target restarts in a tight loop cannot grow memory
+    /// without bound. On overflow the oldest transitions are dropped and the
+    /// loss surfaces as a [`MonitorEvent::Lagged`] resync marker rather than
+    /// silently; the terminal `Terminated` is never dropped.
     pub fn watch<T, F>(&self, target: &ActorRef<T>, mut map: F) -> MonitorRef
     where
         T: Send + 'static,
@@ -496,14 +497,17 @@ impl<M: Send + 'static> ActorContext<M> {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return monitor;
         };
-        let queue = target.monitors.register_watch(cancellation.clone());
+        // The guard closes the queue on drop, so the hub stops staging events
+        // whether this task exits normally or unwinds through a panicking
+        // `map` closure.
+        let guard = target.monitors.register_watch(cancellation.clone());
         let myself = self.myself();
         runtime.spawn(async move {
             loop {
                 // Arm the wake-up before observing the queue so a push that
                 // races an empty drain is not lost.
-                let waiter = queue.waiter();
-                if let Some(event) = queue.pop() {
+                let waiter = guard.queue().waiter();
+                if let Some(event) = guard.queue().pop() {
                     let terminal = matches!(event, MonitorEvent::Terminated { .. });
                     let message = map(event);
                     tokio::select! {
@@ -522,8 +526,6 @@ impl<M: Send + 'static> ActorContext<M> {
                     _ = waiter => {}
                 }
             }
-            // Stop the hub from staging into a queue no one drains.
-            queue.close();
         });
 
         monitor
