@@ -6,7 +6,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{oneshot, watch},
     time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
@@ -479,7 +479,11 @@ impl<M: Send + 'static> ActorContext<M> {
     ///
     /// Delivery uses the observer's ordinary mailbox policy. A conflating
     /// mailbox may replace an unread event with a later one, so use a FIFO
-    /// mailbox when every transition must be observed.
+    /// mailbox when every transition must be observed. Undelivered events are
+    /// staged in a bounded per-watch buffer, so an observer whose mailbox
+    /// stays full while its target restarts in a tight loop coalesces the
+    /// storm into recent history plus the current state rather than growing
+    /// memory without bound; the terminal `Terminated` is never dropped.
     pub fn watch<T, F>(&self, target: &ActorRef<T>, mut map: F) -> MonitorRef
     where
         T: Send + 'static,
@@ -492,20 +496,14 @@ impl<M: Send + 'static> ActorContext<M> {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return monitor;
         };
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let queue = target.monitors.register_watch(cancellation.clone());
         let myself = self.myself();
-        let forwarder = {
-            let cancellation = cancellation.clone();
-            async move {
-                loop {
-                    let event = tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => break,
-                        event = receiver.recv() => match event {
-                            Some(event) => event,
-                            None => break,
-                        },
-                    };
+        runtime.spawn(async move {
+            loop {
+                // Arm the wake-up before observing the queue so a push that
+                // races an empty drain is not lost.
+                let waiter = queue.waiter();
+                if let Some(event) = queue.pop() {
                     let terminal = matches!(event, MonitorEvent::Terminated { .. });
                     let message = map(event);
                     tokio::select! {
@@ -516,11 +514,17 @@ impl<M: Send + 'static> ActorContext<M> {
                     if terminal {
                         break;
                     }
+                    continue;
+                }
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break,
+                    _ = waiter => {}
                 }
             }
-        };
-        runtime.spawn(forwarder);
-        target.monitors.register_watch(cancellation, sender);
+            // Stop the hub from staging into a queue no one drains.
+            queue.close();
+        });
 
         monitor
     }

@@ -83,6 +83,14 @@ for capacity and preserve every accepted notification. A conflating mailbox
 may replace an unread event with a later one, so use FIFO when every
 transition must be observed.
 
+Undelivered events are held in a bounded per-watch buffer. Under normal load
+this is never a factor — lifecycle events are rare. But if an observer's
+mailbox stays full while its target restarts in a tight loop, the buffer caps
+the memory that can accumulate: the oldest staged events are dropped, so the
+observer resynchronizes to recent history plus the current state once it
+catches up rather than replaying the entire storm. The terminal `Terminated`
+event is always the newest event, so it is never dropped.
+
 For one-shot, incarnation-scoped monitoring — "tell me if the incarnation I
 am talking to right now dies" — watch the target, act on the first `Down`,
 and cancel the `MonitorRef`.

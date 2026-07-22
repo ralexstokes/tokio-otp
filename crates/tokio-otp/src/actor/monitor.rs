@@ -1,7 +1,24 @@
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, futures::Notified};
 use tokio_util::sync::CancellationToken;
+
+/// Maximum number of undelivered events staged for a single watch.
+///
+/// Lifecycle events are rare in normal operation (one per restart cycle), so
+/// this bound is only reached when an observer's mailbox stays full while its
+/// target restarts in a tight loop. Beyond the bound the oldest staged event
+/// is dropped, which coalesces a restart storm into recent history plus the
+/// current state; the terminal [`MonitorEvent::Terminated`] is always the
+/// newest event, so it is never dropped. This caps the memory a stalled
+/// observer can pin regardless of how fast its target churns.
+const WATCH_BUFFER_CAP: usize = 128;
 
 /// Notification that an actor incarnation has exited.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,18 +97,83 @@ impl MonitorRef {
     }
 }
 
+/// Bounded, drop-oldest staging buffer between a target's [`MonitorHub`] and
+/// one observer's forwarder task.
+///
+/// The hub pushes events without awaiting (it holds its own lock); the
+/// forwarder drains them and applies the observer's mailbox backpressure. The
+/// bound lives here rather than in the mailbox because the hub cannot block on
+/// a full mailbox, so an unbounded hand-off would let a churning target pin
+/// arbitrary memory behind a stalled observer.
+pub(crate) struct WatchQueue {
+    events: Mutex<VecDeque<MonitorEvent>>,
+    notify: Notify,
+    closed: AtomicBool,
+}
+
+impl WatchQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            events: Mutex::new(VecDeque::new()),
+            notify: Notify::new(),
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    fn events(&self) -> MutexGuard<'_, VecDeque<MonitorEvent>> {
+        self.events.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Stages one event, dropping the oldest if the buffer is full. The
+    /// terminal event is always the newest, so overflow never drops it.
+    fn push(&self, event: MonitorEvent) {
+        {
+            let mut events = self.events();
+            if events.len() >= WATCH_BUFFER_CAP {
+                events.pop_front();
+            }
+            events.push_back(event);
+        }
+        self.notify.notify_one();
+    }
+
+    /// Removes the next staged event, if any. Called only by the forwarder.
+    pub(crate) fn pop(&self) -> Option<MonitorEvent> {
+        self.events().pop_front()
+    }
+
+    /// A future that resolves when an event may be waiting. Arm it before
+    /// observing an empty queue to avoid a lost wake-up.
+    pub(crate) fn waiter(&self) -> Notified<'_> {
+        self.notify.notified()
+    }
+
+    /// Marks the forwarder gone so the hub stops staging into a dead queue.
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+}
+
 struct Watcher {
     cancellation: CancellationToken,
-    sender: mpsc::UnboundedSender<MonitorEvent>,
+    queue: Arc<WatchQueue>,
 }
 
 impl Watcher {
     fn is_live(&self) -> bool {
-        !self.cancellation.is_cancelled() && !self.sender.is_closed()
+        !self.cancellation.is_cancelled() && !self.queue.is_closed()
     }
 
     fn notify(&self, event: &MonitorEvent) -> bool {
-        !self.cancellation.is_cancelled() && self.sender.send(event.clone()).is_ok()
+        if !self.is_live() {
+            return false;
+        }
+        self.queue.push(event.clone());
+        true
     }
 }
 
@@ -126,38 +208,37 @@ impl MonitorHub {
         }
     }
 
-    /// Registers a persistent watch on this logical actor.
+    /// Registers a persistent watch on this logical actor and returns its
+    /// staging queue for the caller's forwarder to drain.
     ///
-    /// A running target reports an immediate [`MonitorEvent::Up`] for the
+    /// A running target stages an immediate [`MonitorEvent::Up`] for the
     /// current incarnation. A target between incarnations (or before its
     /// first start) stays silent until the next start. A terminated target
-    /// reports an immediate final [`MonitorEvent::Terminated`] and is not
+    /// stages an immediate final [`MonitorEvent::Terminated`] and is not
     /// registered.
     ///
-    /// Events are pushed while holding the hub lock, which totally orders
-    /// them per watch; the sends are non-blocking unbounded-channel pushes,
-    /// so no user code runs under the lock.
-    pub(crate) fn register_watch(
-        &self,
-        cancellation: CancellationToken,
-        sender: mpsc::UnboundedSender<MonitorEvent>,
-    ) {
+    /// Events are staged while holding the hub lock, which totally orders
+    /// them per watch; staging is a non-blocking buffer push, so no user code
+    /// runs under the lock.
+    pub(crate) fn register_watch(&self, cancellation: CancellationToken) -> Arc<WatchQueue> {
+        let queue = WatchQueue::new();
         let mut state = self.state();
         state.watchers.retain(Watcher::is_live);
         match state.lifecycle {
             Lifecycle::Terminated(generation) => {
-                let _ = sender.send(self.terminated_event(generation));
-                return;
+                queue.push(self.terminated_event(generation));
+                return queue;
             }
             Lifecycle::Running(generation) => {
-                let _ = sender.send(self.up(generation));
+                queue.push(self.up(generation));
             }
             Lifecycle::Pending | Lifecycle::Exited(_) => {}
         }
         state.watchers.push(Watcher {
             cancellation,
-            sender,
+            queue: Arc::clone(&queue),
         });
+        queue
     }
 
     pub(crate) fn started(&self) {
@@ -199,9 +280,9 @@ impl MonitorHub {
                 continue;
             }
             if let Some(down) = &down {
-                let _ = watcher.sender.send(down.clone());
+                watcher.queue.push(down.clone());
             }
-            let _ = watcher.sender.send(terminated.clone());
+            watcher.queue.push(terminated.clone());
         }
     }
 
@@ -274,5 +355,50 @@ impl ActorMonitors {
 impl Drop for ActorMonitors {
     fn drop(&mut self) {
         self.0.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn up_event(generation: u64) -> MonitorEvent {
+        MonitorEvent::Up {
+            actor_id: "peer".to_owned(),
+            generation,
+        }
+    }
+
+    #[test]
+    fn queue_drops_oldest_beyond_cap() {
+        let queue = WatchQueue::new();
+        let overflow = 5;
+        for generation in 0..(WATCH_BUFFER_CAP as u64 + overflow) {
+            queue.push(up_event(generation));
+        }
+
+        assert_eq!(queue.events().len(), WATCH_BUFFER_CAP);
+        // The oldest `overflow` events were dropped; the surviving front is
+        // the first event that still fits the bound.
+        assert_eq!(queue.pop(), Some(up_event(overflow)));
+    }
+
+    #[test]
+    fn terminal_event_survives_overflow() {
+        let queue = WatchQueue::new();
+        for generation in 0..(WATCH_BUFFER_CAP as u64 * 2) {
+            queue.push(up_event(generation));
+        }
+        let terminated = MonitorEvent::Terminated {
+            actor_id: "peer".to_owned(),
+            generation: Some(7),
+        };
+        queue.push(terminated.clone());
+
+        let mut last = None;
+        while let Some(event) = queue.pop() {
+            last = Some(event);
+        }
+        assert_eq!(last, Some(terminated));
     }
 }
