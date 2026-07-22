@@ -376,6 +376,9 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                         + 'static,
                 )*
             {
+                // The topology struct is never constructed; its fields only name actor types.
+                // Destructuring it here marks the user's fields as read so they do not trigger
+                // `dead_code` warnings on every derive.
                 let _mark_topology_fields_used = |value: Self| {
                     let Self { #(#field_idents),* } = value;
                     let _ = (#(#field_idents),*);

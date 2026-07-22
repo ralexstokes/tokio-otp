@@ -94,9 +94,10 @@ where
                 continuations: Mutex::new(Default::default()),
             };
             let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
-            // Construct inside the bound actor future so constructor panics
-            // follow the same binding, monitoring, and supervision path as
-            // startup and run panics.
+            // Binding is deliberately deferred until this actor future's first
+            // poll so construction happens inside the bound, instrumented
+            // future. Constructor panics then follow the same binding,
+            // monitoring, and supervision path as startup and run panics.
             let mut actor = factory();
             if !actor.readiness_gated() {
                 ctx.mark_ready();
