@@ -469,7 +469,11 @@ impl std::fmt::Debug for RunnableActor {
     }
 }
 
-/// Factory for constructing runtime-added actors that share execution settings.
+/// Registration surface for constructing runtime-added actors that share
+/// execution settings.
+///
+/// Its [`actor`](Self::actor) methods accept an [`ActorFactory`], which is the
+/// reusable recipe that constructs each actor incarnation.
 #[derive(Clone, Debug)]
 pub struct RunnableActorFactory {
     observability: GraphObservability,
