@@ -10,7 +10,7 @@
 - [Bounded request/reply](request-reply.md)
 - [Supervised actors](supervised-actors.md)
 - [Actor timers](actor-timers.md)
-- [Actor monitors](actor-monitors.md)
+- [Watching actors](actor-monitors.md)
 - [Dynamic actors](dynamic-actors.md)
 - [Observability](observability.md)
 

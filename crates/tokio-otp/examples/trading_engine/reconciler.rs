@@ -55,9 +55,9 @@ impl Reconciler {
         }
     }
 
-    fn monitor(&self, venue: VenueId, ctx: &ActorContext<ReconcilerMsg>) {
+    fn watch(&self, venue: VenueId, ctx: &ActorContext<ReconcilerMsg>) {
         let feed = self.feeds.get(venue).expect("known venue");
-        ctx.monitor(feed, move |down| ReconcilerMsg::VenueDown { venue, down });
+        ctx.watch(feed, move |event| ReconcilerMsg::Feed { venue, event });
     }
 
     fn transition(&mut self, venue: VenueId, health: VenueHealth) {
@@ -105,7 +105,7 @@ impl Actor for Reconciler {
             );
         }
         for venue in self.feeds.keys().copied() {
-            self.monitor(venue, ctx);
+            self.watch(venue, ctx);
         }
         Ok(())
     }
@@ -129,21 +129,26 @@ impl Actor for Reconciler {
                 self.transition(venue, VenueHealth::Fresh);
                 self.rearm(ctx);
             }
-            ReconcilerMsg::VenueDown { venue, down } => {
-                if down.reason != DownReason::NoProcess {
-                    self.down_reasons
-                        .entry(venue)
-                        .or_default()
-                        .push(down.reason);
-                    self.transition(venue, VenueHealth::Down);
+            ReconcilerMsg::Feed { venue, event } => {
+                match event {
+                    MonitorEvent::Up { generation, .. } => {
+                        tracing::debug!(venue, generation, "venue feed up");
+                        self.transition(venue, VenueHealth::Stale);
+                    }
+                    MonitorEvent::Down(down) => {
+                        self.down_reasons
+                            .entry(venue)
+                            .or_default()
+                            .push(down.reason);
+                        self.transition(venue, VenueHealth::Down);
+                    }
+                    MonitorEvent::Terminated { .. } => {
+                        self.transition(venue, VenueHealth::Down);
+                    }
+                    _ => {}
                 }
-                ctx.send_after(
-                    ReconcilerMsg::Remonitor { venue },
-                    Duration::from_millis(25),
-                );
                 self.rearm(ctx);
             }
-            ReconcilerMsg::Remonitor { venue } => self.monitor(venue, ctx),
             ReconcilerMsg::StaleSweep { generation } => {
                 if generation != self.sweep_generation {
                     return Ok(());

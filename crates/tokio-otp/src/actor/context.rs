@@ -6,7 +6,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
@@ -17,7 +17,7 @@ use crate::actor::{
         MessageSizeObserver, SendOutcome,
     },
     error::{CallError, SendError, TryRecvError},
-    monitor::{ActorMonitors, Down, MonitorHub, MonitorRef},
+    monitor::{ActorMonitors, MonitorEvent, MonitorHub, MonitorRef},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
 
@@ -464,50 +464,63 @@ impl<M: Send + 'static> ActorContext<M> {
         self.myself.clone()
     }
 
-    /// Monitors the target actor's current incarnation.
+    /// Watches the target logical actor across restarts.
     ///
-    /// When that incarnation exits, `map` converts its [`Down`] information
-    /// into this actor's message type and the result is delivered through this
-    /// actor's mailbox. A target that has not started yet is monitored from its
-    /// first incarnation; an exited, terminated, or detached target delivers
-    /// an immediate [`DownReason::NoProcess`](crate::DownReason::NoProcess).
-    /// Monitors are automatically cancelled when this observer incarnation
-    /// stops or restarts.
+    /// Each lifecycle transition of the target is converted by `map` into
+    /// this actor's message type and delivered through this actor's mailbox,
+    /// in lifecycle order: [`MonitorEvent::Up`] when an incarnation starts,
+    /// [`MonitorEvent::Down`] when it exits, and a final
+    /// [`MonitorEvent::Terminated`] when the target is permanently gone. A
+    /// target that is already running delivers an immediate `Up` for the
+    /// current incarnation; a target between incarnations stays silent until
+    /// the next start, so a watch never races a supervisor restart. Watches
+    /// are automatically cancelled when this observer incarnation stops or
+    /// restarts, so register them on start.
     ///
     /// Delivery uses the observer's ordinary mailbox policy. A conflating
-    /// mailbox may replace an unread monitor message, so use a FIFO mailbox
-    /// when every `Down` must be observed.
-    pub fn monitor<T, F>(&self, target: &ActorRef<T>, map: F) -> MonitorRef
+    /// mailbox may replace an unread event with a later one, so use a FIFO
+    /// mailbox when every transition must be observed.
+    pub fn watch<T, F>(&self, target: &ActorRef<T>, mut map: F) -> MonitorRef
     where
         T: Send + 'static,
-        F: FnOnce(Down) -> M + Send + 'static,
+        F: FnMut(MonitorEvent) -> M + Send + 'static,
     {
         let cancellation = self.monitors.child_token();
         let monitor = MonitorRef {
             cancellation: cancellation.clone(),
         };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return monitor;
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel();
         let myself = self.myself();
-        let runtime = tokio::runtime::Handle::try_current().ok();
-
-        target.monitors.register(
-            cancellation.clone(),
-            Box::new(move |down| {
-                if cancellation.is_cancelled() {
-                    return;
-                }
-                let Some(runtime) = runtime else {
-                    return;
-                };
-                runtime.spawn(async move {
-                    let message = map(down);
+        let forwarder = {
+            let cancellation = cancellation.clone();
+            async move {
+                loop {
+                    let event = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => break,
+                        event = receiver.recv() => match event {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
+                    let terminal = matches!(event, MonitorEvent::Terminated { .. });
+                    let message = map(event);
                     tokio::select! {
                         biased;
-                        () = cancellation.cancelled() => {}
+                        () = cancellation.cancelled() => break,
                         _ = myself.send(message) => {}
                     }
-                });
-            }),
-        );
+                    if terminal {
+                        break;
+                    }
+                }
+            }
+        };
+        runtime.spawn(forwarder);
+        target.monitors.register_watch(cancellation, sender);
 
         monitor
     }

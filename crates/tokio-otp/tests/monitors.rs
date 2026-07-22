@@ -5,8 +5,8 @@ use tokio::{
     time::timeout,
 };
 use tokio_otp::{
-    ActorContext, ActorRef, ActorResult, Down, DownReason, GraphBuilder, MonitorRef, RawActor,
-    RebindPolicy, RunnableActor, RunnableActorFactory, SupervisedActors,
+    ActorContext, ActorRef, ActorResult, Down, DownReason, GraphBuilder, MonitorEvent, MonitorRef,
+    RawActor, RebindPolicy, RunnableActor, RunnableActorFactory, SupervisedActors,
 };
 use tokio_supervisor::{ShutdownPolicy, SupervisorBuilder};
 use tokio_util::sync::CancellationToken;
@@ -35,36 +35,32 @@ impl RawActor for Peer {
 }
 
 enum ObserverMessage {
-    Down(Down),
-    Watch,
+    Event(MonitorEvent),
     Crash,
 }
 
 #[derive(Clone)]
 struct Observer {
     peer: ActorRef<PeerMessage>,
-    observed: mpsc::UnboundedSender<Down>,
+    observed: mpsc::UnboundedSender<MonitorEvent>,
     started: mpsc::UnboundedSender<()>,
-    cancel_monitor: bool,
+    cancel_watch: bool,
 }
 
 impl RawActor for Observer {
     type Msg = ObserverMessage;
 
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
-        let monitor = ctx.monitor(&self.peer, ObserverMessage::Down);
-        if self.cancel_monitor {
-            monitor.cancel();
+        let watch = ctx.watch(&self.peer, ObserverMessage::Event);
+        if self.cancel_watch {
+            watch.cancel();
         }
         self.started.send(()).expect("start receiver alive");
 
         while let Some(message) = ctx.recv().await {
             match message {
-                ObserverMessage::Down(down) => {
-                    self.observed.send(down).expect("observer receiver alive");
-                }
-                ObserverMessage::Watch => {
-                    ctx.monitor(&self.peer, ObserverMessage::Down);
+                ObserverMessage::Event(event) => {
+                    self.observed.send(event).expect("observer receiver alive");
                 }
                 ObserverMessage::Crash => panic!("deliberate observer panic"),
             }
@@ -80,10 +76,10 @@ struct Fixture {
     observer: RunnableActor,
     observer_ref: ActorRef<ObserverMessage>,
     observer_started: mpsc::UnboundedReceiver<()>,
-    observed: mpsc::UnboundedReceiver<Down>,
+    observed: mpsc::UnboundedReceiver<MonitorEvent>,
 }
 
-fn fixture(cancel_monitor: bool) -> Fixture {
+fn fixture(cancel_watch: bool) -> Fixture {
     let factory = RunnableActorFactory::new();
     let (peer_started_tx, peer_started) = mpsc::unbounded_channel();
     let (peer, peer_ref) = factory.actor("peer", move || Peer {
@@ -97,7 +93,7 @@ fn fixture(cancel_monitor: bool) -> Fixture {
             peer: peer_ref.clone(),
             observed: observed_tx.clone(),
             started: observer_started_tx.clone(),
-            cancel_monitor,
+            cancel_watch,
         }
     });
     Fixture {
@@ -118,15 +114,52 @@ async fn started(receiver: &mut mpsc::UnboundedReceiver<()>) {
         .expect("start sender alive");
 }
 
-async fn down(receiver: &mut mpsc::UnboundedReceiver<Down>) -> Down {
+async fn next_event(receiver: &mut mpsc::UnboundedReceiver<MonitorEvent>) -> MonitorEvent {
     timeout(Duration::from_secs(1), receiver.recv())
         .await
-        .expect("down delivered promptly")
+        .expect("event delivered promptly")
         .expect("observer sender alive")
 }
 
+async fn assert_silence(receiver: &mut mpsc::UnboundedReceiver<MonitorEvent>) {
+    assert!(
+        timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .is_err(),
+        "no further events expected"
+    );
+}
+
+fn up(actor_id: &str, generation: u64) -> MonitorEvent {
+    MonitorEvent::Up {
+        actor_id: actor_id.to_owned(),
+        generation,
+    }
+}
+
+fn expect_down(event: MonitorEvent) -> Down {
+    match event {
+        MonitorEvent::Down(down) => down,
+        other => panic!("expected Down, got {other:?}"),
+    }
+}
+
+fn expect_terminated(event: MonitorEvent, actor_id: &str) -> Option<u64> {
+    match event {
+        MonitorEvent::Terminated {
+            actor_id: id,
+            generation,
+            ..
+        } => {
+            assert_eq!(id, actor_id);
+            generation
+        }
+        other => panic!("expected Terminated, got {other:?}"),
+    }
+}
+
 #[tokio::test]
-async fn monitor_reports_panicked_peer_as_failure() {
+async fn watch_reports_panicked_peer_as_failure() {
     let mut fixture = fixture(false);
     let peer = fixture.peer.clone();
     let peer_task =
@@ -141,16 +174,22 @@ async fn monitor_reports_panicked_peer_as_failure() {
     });
     started(&mut fixture.peer_started).await;
     started(&mut fixture.observer_started).await;
+    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
 
     fixture
         .peer_ref
         .send(PeerMessage::Panic)
         .await
         .expect("panic command sent");
-    let notification = down(&mut fixture.observed).await;
+    let notification = expect_down(next_event(&mut fixture.observed).await);
     assert_eq!(notification.actor_id, "peer");
     assert_eq!(notification.generation, 0);
     assert_eq!(notification.reason, DownReason::Failure);
+    assert_eq!(
+        expect_terminated(next_event(&mut fixture.observed).await, "peer"),
+        Some(0),
+        "RebindPolicy::Never terminates the binding after the failed run"
+    );
 
     assert!(peer_task.await.expect_err("peer task panicked").is_panic());
     observer_stop.cancel();
@@ -161,7 +200,7 @@ async fn monitor_reports_panicked_peer_as_failure() {
 }
 
 #[tokio::test]
-async fn monitor_reports_clean_stop_as_normal() {
+async fn watch_reports_clean_stop_as_normal() {
     let mut fixture = fixture(false);
     let peer = fixture.peer.clone();
     let peer_task =
@@ -176,13 +215,21 @@ async fn monitor_reports_clean_stop_as_normal() {
     });
     started(&mut fixture.peer_started).await;
     started(&mut fixture.observer_started).await;
+    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
 
     fixture
         .peer_ref
         .send(PeerMessage::Stop)
         .await
         .expect("stop command sent");
-    assert_eq!(down(&mut fixture.observed).await.reason, DownReason::Normal);
+    assert_eq!(
+        expect_down(next_event(&mut fixture.observed).await).reason,
+        DownReason::Normal
+    );
+    assert_eq!(
+        expect_terminated(next_event(&mut fixture.observed).await, "peer"),
+        Some(0)
+    );
     peer_task
         .await
         .expect("peer task joined")
@@ -196,7 +243,7 @@ async fn monitor_reports_clean_stop_as_normal() {
 }
 
 #[tokio::test]
-async fn cancelled_monitor_suppresses_delivery() {
+async fn cancelled_watch_suppresses_delivery() {
     let mut fixture = fixture(true);
     let peer = fixture.peer.clone();
     let peer_task =
@@ -215,17 +262,13 @@ async fn cancelled_monitor_suppresses_delivery() {
         .send(PeerMessage::Panic)
         .await
         .expect("panic command sent");
-    assert!(
-        timeout(Duration::from_millis(100), fixture.observed.recv())
-            .await
-            .is_err()
-    );
+    assert_silence(&mut fixture.observed).await;
     assert!(peer_task.await.expect_err("peer task panicked").is_panic());
     observer_task.abort();
 }
 
 #[tokio::test]
-async fn observer_restart_clears_old_monitors() {
+async fn observer_restart_clears_old_watches() {
     let mut fixture = fixture(false);
     let peer = fixture.peer.clone();
     let peer_task =
@@ -239,6 +282,7 @@ async fn observer_restart_clears_old_monitors() {
             .await
     });
     started(&mut fixture.observer_started).await;
+    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
     fixture
         .observer_ref
         .send(ObserverMessage::Crash)
@@ -258,18 +302,21 @@ async fn observer_restart_clears_old_monitors() {
             .await
     });
     started(&mut fixture.observer_started).await;
+    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
     fixture
         .peer_ref
         .send(PeerMessage::Stop)
         .await
         .expect("stop command sent");
-    assert_eq!(down(&mut fixture.observed).await.reason, DownReason::Normal);
-    assert!(
-        timeout(Duration::from_millis(100), fixture.observed.recv())
-            .await
-            .is_err(),
-        "the cancelled first-incarnation monitor must not also deliver"
+    assert_eq!(
+        expect_down(next_event(&mut fixture.observed).await).reason,
+        DownReason::Normal
     );
+    assert_eq!(
+        expect_terminated(next_event(&mut fixture.observed).await, "peer"),
+        Some(0)
+    );
+    assert_silence(&mut fixture.observed).await;
 
     peer_task
         .await
@@ -279,7 +326,7 @@ async fn observer_restart_clears_old_monitors() {
 }
 
 #[tokio::test]
-async fn monitoring_dead_peer_delivers_immediate_no_process() {
+async fn watching_terminated_peer_delivers_immediate_terminated() {
     let mut fixture = fixture(false);
     fixture.peer.terminate_binding();
     let observer = fixture.observer.clone();
@@ -290,15 +337,17 @@ async fn monitoring_dead_peer_delivers_immediate_no_process() {
     });
     started(&mut fixture.observer_started).await;
 
-    let notification = down(&mut fixture.observed).await;
-    assert_eq!(notification.actor_id, "peer");
-    assert_eq!(notification.generation, 0);
-    assert_eq!(notification.reason, DownReason::NoProcess);
+    assert_eq!(
+        expect_terminated(next_event(&mut fixture.observed).await, "peer"),
+        None,
+        "a never-started terminated target has no last generation"
+    );
+    assert_silence(&mut fixture.observed).await;
     observer_task.abort();
 }
 
 #[tokio::test]
-async fn monitoring_detached_peer_delivers_immediate_no_process() {
+async fn watching_detached_peer_delivers_immediate_terminated() {
     let factory = RunnableActorFactory::new();
     let (observed_tx, mut observed) = mpsc::unbounded_channel();
     let (started_tx, mut observer_started) = mpsc::unbounded_channel();
@@ -312,7 +361,7 @@ async fn monitoring_detached_peer_delivers_immediate_no_process() {
         peer: detached_peer.clone(),
         observed: observed_tx.clone(),
         started: started_tx.clone(),
-        cancel_monitor: false,
+        cancel_watch: false,
     });
     let observer_task = tokio::spawn(async move {
         observer
@@ -321,12 +370,15 @@ async fn monitoring_detached_peer_delivers_immediate_no_process() {
     });
     started(&mut observer_started).await;
 
-    assert_eq!(down(&mut observed).await.reason, DownReason::NoProcess);
+    assert_eq!(
+        expect_terminated(next_event(&mut observed).await, "detached-peer"),
+        None
+    );
     observer_task.abort();
 }
 
 #[tokio::test]
-async fn monitor_generation_increments_after_peer_restart() {
+async fn watch_survives_peer_restart_without_reregistration() {
     let mut fixture = fixture(false);
     let observer = fixture.observer.clone();
     let observer_task = tokio::spawn(async move {
@@ -342,12 +394,15 @@ async fn monitor_generation_increments_after_peer_restart() {
     });
     started(&mut fixture.peer_started).await;
     started(&mut fixture.observer_started).await;
+    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
     fixture
         .peer_ref
         .send(PeerMessage::Panic)
         .await
         .expect("panic command sent");
-    assert_eq!(down(&mut fixture.observed).await.generation, 0);
+    let notification = expect_down(next_event(&mut fixture.observed).await);
+    assert_eq!(notification.generation, 0);
+    assert_eq!(notification.reason, DownReason::Failure);
     assert!(
         first_task
             .await
@@ -362,17 +417,17 @@ async fn monitor_generation_increments_after_peer_restart() {
             .await
     });
     started(&mut fixture.peer_started).await;
-    fixture
-        .observer_ref
-        .send(ObserverMessage::Watch)
-        .await
-        .expect("watch command sent");
+    assert_eq!(
+        next_event(&mut fixture.observed).await,
+        up("peer", 1),
+        "the original watch reports the replacement incarnation"
+    );
     fixture
         .peer_ref
         .send(PeerMessage::Stop)
         .await
         .expect("stop command sent");
-    let notification = down(&mut fixture.observed).await;
+    let notification = expect_down(next_event(&mut fixture.observed).await);
     assert_eq!(notification.generation, 1);
     assert_eq!(notification.reason, DownReason::Normal);
 
@@ -384,7 +439,55 @@ async fn monitor_generation_increments_after_peer_restart() {
 }
 
 #[tokio::test]
-async fn pre_start_monitor_attaches_to_first_incarnation() {
+async fn watch_registered_between_incarnations_waits_for_next_up() {
+    let mut fixture = fixture(false);
+    let first_peer = fixture.peer.clone();
+    let first_task = tokio::spawn(async move {
+        first_peer
+            .run_until(pending::<()>(), RebindPolicy::OnFailure)
+            .await
+    });
+    started(&mut fixture.peer_started).await;
+    fixture
+        .peer_ref
+        .send(PeerMessage::Panic)
+        .await
+        .expect("panic command sent");
+    assert!(
+        first_task
+            .await
+            .expect_err("first peer task panicked")
+            .is_panic()
+    );
+
+    let observer = fixture.observer.clone();
+    let observer_task = tokio::spawn(async move {
+        observer
+            .run_until(pending::<()>(), RebindPolicy::Never)
+            .await
+    });
+    started(&mut fixture.observer_started).await;
+    assert_silence(&mut fixture.observed).await;
+
+    let second_peer = fixture.peer.clone();
+    let second_task = tokio::spawn(async move {
+        second_peer
+            .run_until(pending::<()>(), RebindPolicy::Never)
+            .await
+    });
+    started(&mut fixture.peer_started).await;
+    assert_eq!(
+        next_event(&mut fixture.observed).await,
+        up("peer", 1),
+        "a watch registered in the restart gap converges without retry"
+    );
+
+    second_task.abort();
+    observer_task.abort();
+}
+
+#[tokio::test]
+async fn pre_start_watch_attaches_to_first_incarnation() {
     let mut fixture = fixture(false);
     let observer = fixture.observer.clone();
     let observer_task = tokio::spawn(async move {
@@ -393,22 +496,19 @@ async fn pre_start_monitor_attaches_to_first_incarnation() {
             .await
     });
     started(&mut fixture.observer_started).await;
-    assert!(
-        timeout(Duration::from_millis(50), fixture.observed.recv())
-            .await
-            .is_err()
-    );
+    assert_silence(&mut fixture.observed).await;
 
     let peer = fixture.peer.clone();
     let peer_task =
         tokio::spawn(async move { peer.run_until(pending::<()>(), RebindPolicy::Never).await });
     started(&mut fixture.peer_started).await;
+    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
     fixture
         .peer_ref
         .send(PeerMessage::Stop)
         .await
         .expect("stop command sent");
-    let notification = down(&mut fixture.observed).await;
+    let notification = expect_down(next_event(&mut fixture.observed).await);
     assert_eq!(notification.generation, 0);
     assert_eq!(notification.reason, DownReason::Normal);
 
@@ -435,9 +535,17 @@ async fn shutdown_request_reports_normal_exit() {
     });
     started(&mut fixture.peer_started).await;
     started(&mut fixture.observer_started).await;
+    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
 
     peer_stop.cancel();
-    assert_eq!(down(&mut fixture.observed).await.reason, DownReason::Normal);
+    assert_eq!(
+        expect_down(next_event(&mut fixture.observed).await).reason,
+        DownReason::Normal
+    );
+    assert_eq!(
+        expect_terminated(next_event(&mut fixture.observed).await, "peer"),
+        Some(0)
+    );
     peer_task
         .await
         .expect("peer task joined")
@@ -446,7 +554,7 @@ async fn shutdown_request_reports_normal_exit() {
 }
 
 #[tokio::test]
-async fn two_observers_receive_the_same_down() {
+async fn two_observers_receive_the_same_events() {
     let mut fixture = fixture(false);
     let factory = RunnableActorFactory::new();
     let (second_observed_tx, mut second_observed) = mpsc::unbounded_channel();
@@ -457,7 +565,7 @@ async fn two_observers_receive_the_same_down() {
             peer: peer_ref.clone(),
             observed: second_observed_tx.clone(),
             started: second_started_tx.clone(),
-            cancel_monitor: false,
+            cancel_watch: false,
         }
     });
     let first_observer = fixture.observer.clone();
@@ -483,9 +591,11 @@ async fn two_observers_receive_the_same_down() {
         .send(PeerMessage::Stop)
         .await
         .expect("stop command sent");
-    let first = down(&mut fixture.observed).await;
-    let second = down(&mut second_observed).await;
-    assert_eq!(first, second);
+    for _ in 0..3 {
+        let first = next_event(&mut fixture.observed).await;
+        let second = next_event(&mut second_observed).await;
+        assert_eq!(first, second);
+    }
 
     peer_task
         .await
@@ -499,33 +609,37 @@ async fn two_observers_receive_the_same_down() {
 struct GatedObserver {
     peer: ActorRef<PeerMessage>,
     gate: Arc<Notify>,
-    monitor: mpsc::UnboundedSender<MonitorRef>,
-    observed: mpsc::UnboundedSender<Down>,
+    watch: mpsc::UnboundedSender<MonitorRef>,
+    observed: mpsc::UnboundedSender<MonitorEvent>,
 }
 
 impl RawActor for GatedObserver {
-    type Msg = Down;
+    type Msg = MonitorEvent;
 
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
-        let monitor = ctx.monitor(&self.peer, |down| down);
-        self.monitor.send(monitor).expect("monitor receiver alive");
+        let watch = ctx.watch(&self.peer, |event| event);
+        self.watch.send(watch).expect("watch receiver alive");
         self.gate.notified().await;
-        if let Some(down) = ctx.recv().await {
-            self.observed.send(down).expect("observer receiver alive");
+        while let Some(event) = ctx.recv().await {
+            let done = matches!(event, MonitorEvent::Down(_));
+            self.observed.send(event).expect("observer receiver alive");
+            if done {
+                break;
+            }
         }
         Ok(())
     }
 }
 
 #[tokio::test]
-async fn cloned_monitor_cancels_and_cannot_retract_accepted_down() {
+async fn cloned_watch_cancels_and_cannot_retract_accepted_events() {
     let factory = RunnableActorFactory::new();
     let (peer_started_tx, mut peer_started) = mpsc::unbounded_channel();
     let (peer, peer_ref) = factory.actor("peer", move || Peer {
         started: peer_started_tx.clone(),
     });
     let gate = Arc::new(Notify::new());
-    let (monitor_tx, mut monitor_rx) = mpsc::unbounded_channel();
+    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel();
     let (observed_tx, mut observed) = mpsc::unbounded_channel();
     let (observer, observer_ref) = factory.actor("observer", {
         let peer_ref = peer_ref.clone();
@@ -533,7 +647,7 @@ async fn cloned_monitor_cancels_and_cannot_retract_accepted_down() {
         move || GatedObserver {
             peer: peer_ref.clone(),
             gate: gate.clone(),
-            monitor: monitor_tx.clone(),
+            watch: watch_tx.clone(),
             observed: observed_tx.clone(),
         }
     });
@@ -545,25 +659,29 @@ async fn cloned_monitor_cancels_and_cannot_retract_accepted_down() {
             .await
     });
     started(&mut peer_started).await;
-    let monitor = monitor_rx.recv().await.expect("monitor created");
-    let clone = monitor.clone();
-    assert!(!monitor.is_cancelled());
+    let watch = watch_rx.recv().await.expect("watch created");
+    let clone = watch.clone();
+    assert!(!watch.is_cancelled());
 
     peer_ref
         .send(PeerMessage::Stop)
         .await
         .expect("stop command sent");
     timeout(Duration::from_secs(1), async {
-        while observer_ref.stats().messages_accepted == 0 {
+        while observer_ref.stats().messages_accepted < 2 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("down accepted by observer mailbox");
+    .expect("up and down accepted by observer mailbox");
     clone.cancel();
-    assert!(monitor.is_cancelled());
+    assert!(watch.is_cancelled());
     gate.notify_one();
-    assert_eq!(down(&mut observed).await.reason, DownReason::Normal);
+    assert_eq!(next_event(&mut observed).await, up("peer", 0));
+    assert_eq!(
+        expect_down(next_event(&mut observed).await).reason,
+        DownReason::Normal
+    );
 
     peer_task
         .await
@@ -592,25 +710,25 @@ impl RawActor for StubbornPeer {
 #[derive(Clone)]
 struct UnitObserver {
     peer: ActorRef<()>,
-    observed: mpsc::UnboundedSender<Down>,
+    observed: mpsc::UnboundedSender<MonitorEvent>,
     started: mpsc::UnboundedSender<()>,
 }
 
 impl RawActor for UnitObserver {
-    type Msg = Down;
+    type Msg = MonitorEvent;
 
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
-        ctx.monitor(&self.peer, |down| down);
+        ctx.watch(&self.peer, |event| event);
         self.started.send(()).expect("start receiver alive");
-        while let Some(down) = ctx.recv().await {
-            self.observed.send(down).expect("observer receiver alive");
+        while let Some(event) = ctx.recv().await {
+            self.observed.send(event).expect("observer receiver alive");
         }
         Ok(())
     }
 }
 
 #[tokio::test]
-async fn supervisor_abort_delivers_failure_down() {
+async fn supervisor_abort_delivers_failure_down_then_terminated() {
     let mut builder = GraphBuilder::new();
     let (peer_slot, peer_ref) = builder.slot("peer");
     let (peer_started_tx, mut peer_started) = mpsc::unbounded_channel();
@@ -635,14 +753,20 @@ async fn supervisor_abort_delivers_failure_down() {
     let handle = runtime.spawn();
     started(&mut peer_started).await;
     started(&mut observer_started).await;
+    assert_eq!(next_event(&mut observed).await, up("peer", 0));
 
     handle
         .remove_child("peer")
         .await
         .expect("peer removed by abort");
-    let notification = down(&mut observed).await;
+    let notification = expect_down(next_event(&mut observed).await);
     assert_eq!(notification.actor_id, "peer");
     assert_eq!(notification.reason, DownReason::Failure);
+    assert_eq!(
+        expect_terminated(next_event(&mut observed).await, "peer"),
+        Some(0),
+        "removing the child terminates the binding"
+    );
 
     handle
         .shutdown_and_wait()
@@ -662,7 +786,7 @@ impl RawActor for PanickingMapper {
 
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         let mapped = self.mapped.clone();
-        ctx.monitor(&self.peer, move |_down| {
+        ctx.watch(&self.peer, move |_event| {
             mapped.send(()).expect("mapping receiver alive");
             panic!("deliberate mapping panic")
         });
@@ -698,6 +822,10 @@ async fn mapping_panic_does_not_change_target_exit() {
     });
     started(&mut peer_started).await;
     started(&mut observer_started).await;
+    timeout(Duration::from_secs(1), mapped_rx.recv())
+        .await
+        .expect("mapping closure ran")
+        .expect("mapping sender alive");
 
     peer_ref
         .send(PeerMessage::Stop)
@@ -707,10 +835,6 @@ async fn mapping_panic_does_not_change_target_exit() {
         .await
         .expect("peer task joined")
         .expect("mapping panic did not affect clean peer exit");
-    timeout(Duration::from_secs(1), mapped_rx.recv())
-        .await
-        .expect("mapping closure ran")
-        .expect("mapping sender alive");
     observer_task.abort();
 }
 
@@ -726,7 +850,7 @@ async fn pending_target_can_be_dropped_from_non_runtime_thread() {
         peer: peer_ref.clone(),
         observed: observed_tx.clone(),
         started: observer_started_tx.clone(),
-        cancel_monitor: false,
+        cancel_watch: false,
     });
     let observer_task = tokio::spawn(async move {
         observer
@@ -738,6 +862,9 @@ async fn pending_target_can_be_dropped_from_non_runtime_thread() {
     std::thread::spawn(move || drop(peer))
         .join()
         .expect("dropping target outside Tokio does not panic");
-    assert_eq!(down(&mut observed).await.reason, DownReason::NoProcess);
+    assert_eq!(
+        expect_terminated(next_event(&mut observed).await, "peer"),
+        None
+    );
     observer_task.abort();
 }

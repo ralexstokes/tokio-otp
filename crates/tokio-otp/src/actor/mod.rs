@@ -24,5 +24,5 @@ pub use error::{CallError, GraphBuildError, SendError, TryRecvError};
 pub use factory::ActorFactory;
 pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};
 pub use handler::{Actor, DrainPolicy};
-pub use monitor::{Down, DownReason, MonitorRef};
+pub use monitor::{Down, DownReason, MonitorEvent, MonitorRef};
 pub use raw::{ActorResult, BoxError, RawActor};

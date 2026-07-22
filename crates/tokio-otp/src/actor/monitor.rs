@@ -1,21 +1,17 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Notification that an actor incarnation has exited.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Down {
-    /// Stable id of the actor that was monitored.
+    /// Stable id of the actor that was watched.
     pub actor_id: String,
     /// Incarnation counter, starting at zero and increasing on every restart.
-    /// This value is a placeholder when [`reason`](Self::reason) is
-    /// [`NoProcess`](DownReason::NoProcess) for an actor that never started.
     pub generation: u64,
-    /// How the monitored incarnation exited.
+    /// How the watched incarnation exited.
     pub reason: DownReason,
 }
 
@@ -27,14 +23,42 @@ pub enum DownReason {
     Normal,
     /// The actor failed, panicked, or was aborted.
     Failure,
-    /// No live incarnation existed when the monitor was registered.
-    NoProcess,
 }
 
-/// A cancellable actor monitor.
+/// Lifecycle transition of a watched logical actor.
 ///
-/// Clones refer to the same monitor. Dropping the handle does not cancel the
-/// monitor; call [`cancel`](Self::cancel) explicitly. Monitors are also
+/// Delivered by [`ActorContext::watch`](crate::ActorContext::watch). Events
+/// for one watch arrive in lifecycle order: every [`Up`](Self::Up) for a
+/// generation precedes its [`Down`](Self::Down), and
+/// [`Terminated`](Self::Terminated) is final.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MonitorEvent {
+    /// An incarnation of the watched actor is running.
+    Up {
+        /// Stable id of the watched actor.
+        actor_id: String,
+        /// Incarnation counter, starting at zero and increasing on every
+        /// restart.
+        generation: u64,
+    },
+    /// The current incarnation exited. If the supervisor restarts the actor,
+    /// a matching [`Up`](Self::Up) follows.
+    Down(Down),
+    /// The actor is permanently gone. No further events will be delivered.
+    Terminated {
+        /// Stable id of the watched actor.
+        actor_id: String,
+        /// The last incarnation that ran, or `None` if the actor never
+        /// started.
+        generation: Option<u64>,
+    },
+}
+
+/// A cancellable actor watch.
+///
+/// Clones refer to the same watch. Dropping the handle does not cancel the
+/// watch; call [`cancel`](Self::cancel) explicitly. Watches are also
 /// cancelled automatically when the observing actor stops or restarts.
 #[derive(Clone, Debug)]
 pub struct MonitorRef {
@@ -42,26 +66,33 @@ pub struct MonitorRef {
 }
 
 impl MonitorRef {
-    /// Cancels the monitor. Cancellation is idempotent.
+    /// Cancels the watch. Cancellation is idempotent.
     ///
-    /// A notification already accepted by the observer's mailbox cannot be
+    /// An event already accepted by the observer's mailbox cannot be
     /// retracted.
     pub fn cancel(&self) {
         self.cancellation.cancel();
     }
 
-    /// Returns whether this monitor has been cancelled.
+    /// Returns whether this watch has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
 }
 
-type MonitorCallback = Box<dyn FnOnce(Down) + Send + 'static>;
-
-struct Registration {
-    generation: u64,
+struct Watcher {
     cancellation: CancellationToken,
-    callback: MonitorCallback,
+    sender: mpsc::UnboundedSender<MonitorEvent>,
+}
+
+impl Watcher {
+    fn is_live(&self) -> bool {
+        !self.cancellation.is_cancelled() && !self.sender.is_closed()
+    }
+
+    fn notify(&self, event: &MonitorEvent) -> bool {
+        !self.cancellation.is_cancelled() && self.sender.send(event.clone()).is_ok()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -75,8 +106,7 @@ enum Lifecycle {
 struct MonitorState {
     next_generation: u64,
     lifecycle: Lifecycle,
-    next_registration: u64,
-    registrations: HashMap<u64, Registration>,
+    watchers: Vec<Watcher>,
 }
 
 pub(crate) struct MonitorHub {
@@ -91,109 +121,94 @@ impl MonitorHub {
             state: Mutex::new(MonitorState {
                 next_generation: 0,
                 lifecycle: Lifecycle::Pending,
-                next_registration: 0,
-                registrations: HashMap::new(),
+                watchers: Vec::new(),
             }),
         }
     }
 
-    pub(crate) fn register(&self, cancellation: CancellationToken, callback: MonitorCallback) {
+    /// Registers a persistent watch on this logical actor.
+    ///
+    /// A running target reports an immediate [`MonitorEvent::Up`] for the
+    /// current incarnation. A target between incarnations (or before its
+    /// first start) stays silent until the next start. A terminated target
+    /// reports an immediate final [`MonitorEvent::Terminated`] and is not
+    /// registered.
+    ///
+    /// Events are pushed while holding the hub lock, which totally orders
+    /// them per watch; the sends are non-blocking unbounded-channel pushes,
+    /// so no user code runs under the lock.
+    pub(crate) fn register_watch(
+        &self,
+        cancellation: CancellationToken,
+        sender: mpsc::UnboundedSender<MonitorEvent>,
+    ) {
         let mut state = self.state();
-        state
-            .registrations
-            .retain(|_, registration| !registration.cancellation.is_cancelled());
-        let generation = match state.lifecycle {
-            Lifecycle::Pending => state.next_generation,
-            Lifecycle::Running(generation) => generation,
-            Lifecycle::Exited(generation) | Lifecycle::Terminated(Some(generation)) => {
-                drop(state);
-                callback(self.down(generation, DownReason::NoProcess));
+        state.watchers.retain(Watcher::is_live);
+        match state.lifecycle {
+            Lifecycle::Terminated(generation) => {
+                let _ = sender.send(self.terminated_event(generation));
                 return;
             }
-            Lifecycle::Terminated(None) => {
-                drop(state);
-                callback(self.down(0, DownReason::NoProcess));
-                return;
+            Lifecycle::Running(generation) => {
+                let _ = sender.send(self.up(generation));
             }
-        };
-        let id = state.next_registration;
-        state.next_registration = state.next_registration.wrapping_add(1);
-        state.registrations.insert(
-            id,
-            Registration {
-                generation,
-                cancellation,
-                callback,
-            },
-        );
+            Lifecycle::Pending | Lifecycle::Exited(_) => {}
+        }
+        state.watchers.push(Watcher {
+            cancellation,
+            sender,
+        });
     }
 
     pub(crate) fn started(&self) {
         let mut state = self.state();
-        state
-            .registrations
-            .retain(|_, registration| !registration.cancellation.is_cancelled());
         let generation = state.next_generation;
         state.next_generation = state.next_generation.saturating_add(1);
         state.lifecycle = Lifecycle::Running(generation);
+        let up = self.up(generation);
+        state.watchers.retain(|watcher| watcher.notify(&up));
     }
 
     pub(crate) fn exited(&self, reason: DownReason) {
-        let callbacks = {
-            let mut state = self.state();
-            let Lifecycle::Running(generation) = state.lifecycle else {
-                return;
-            };
-            state.lifecycle = Lifecycle::Exited(generation);
-            let down = self.down(generation, reason);
-            state
-                .registrations
-                .extract_if(|_, registration| registration.generation == generation)
-                .map(|(_, registration)| (registration, down.clone()))
-                .collect::<Vec<_>>()
+        let mut state = self.state();
+        let Lifecycle::Running(generation) = state.lifecycle else {
+            return;
         };
-
-        for (registration, down) in callbacks {
-            if !registration.cancellation.is_cancelled() {
-                (registration.callback)(down);
-            }
-        }
+        state.lifecycle = Lifecycle::Exited(generation);
+        let down = MonitorEvent::Down(self.down(generation, reason));
+        state.watchers.retain(|watcher| watcher.notify(&down));
     }
 
     pub(crate) fn terminated(&self) {
-        let callbacks = {
-            let mut state = self.state();
-            match state.lifecycle {
-                Lifecycle::Pending => {
-                    state.lifecycle = Lifecycle::Terminated(None);
-                    let down = self.down(0, DownReason::NoProcess);
-                    state
-                        .registrations
-                        .drain()
-                        .map(|(_, registration)| (registration, down.clone()))
-                        .collect::<Vec<_>>()
-                }
-                Lifecycle::Running(generation) => {
-                    state.lifecycle = Lifecycle::Terminated(Some(generation));
-                    let down = self.down(generation, DownReason::Failure);
-                    state
-                        .registrations
-                        .extract_if(|_, registration| registration.generation == generation)
-                        .map(|(_, registration)| (registration, down.clone()))
-                        .collect::<Vec<_>>()
-                }
-                Lifecycle::Exited(generation) => {
-                    state.lifecycle = Lifecycle::Terminated(Some(generation));
-                    Vec::new()
-                }
-                Lifecycle::Terminated(_) => Vec::new(),
-            }
+        let mut state = self.state();
+        let (down, generation) = match state.lifecycle {
+            Lifecycle::Pending => (None, None),
+            Lifecycle::Running(generation) => (
+                Some(MonitorEvent::Down(
+                    self.down(generation, DownReason::Failure),
+                )),
+                Some(generation),
+            ),
+            Lifecycle::Exited(generation) => (None, Some(generation)),
+            Lifecycle::Terminated(_) => return,
         };
-
-        for (registration, down) in callbacks {
-            if !registration.cancellation.is_cancelled() {
-                (registration.callback)(down);
+        state.lifecycle = Lifecycle::Terminated(generation);
+        let terminated = self.terminated_event(generation);
+        for watcher in state.watchers.drain(..) {
+            if watcher.cancellation.is_cancelled() {
+                continue;
             }
+            if let Some(down) = &down {
+                let _ = watcher.sender.send(down.clone());
+            }
+            let _ = watcher.sender.send(terminated.clone());
+        }
+    }
+
+    fn up(&self, generation: u64) -> MonitorEvent {
+        MonitorEvent::Up {
+            actor_id: self.actor_id.clone(),
+            generation,
         }
     }
 
@@ -202,6 +217,13 @@ impl MonitorHub {
             actor_id: self.actor_id.clone(),
             generation,
             reason,
+        }
+    }
+
+    fn terminated_event(&self, generation: Option<u64>) -> MonitorEvent {
+        MonitorEvent::Terminated {
+            actor_id: self.actor_id.clone(),
+            generation,
         }
     }
 
