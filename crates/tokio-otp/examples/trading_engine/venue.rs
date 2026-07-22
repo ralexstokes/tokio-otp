@@ -174,6 +174,26 @@ pub struct VenueFeed {
     pub latency: LatencyRecorder,
 }
 
+pub struct VenueFeedSpec {
+    pub venue: VenueId,
+    pub exchange: ExchangeSim,
+    pub reconciler: ActorRef<ReconcilerMsg>,
+    pub latency: LatencyRecorder,
+}
+
+impl ActorFactory for VenueFeedSpec {
+    type Actor = VenueFeed;
+
+    fn build(&self) -> Self::Actor {
+        VenueFeed {
+            venue: self.venue,
+            exchange: self.exchange.clone(),
+            reconciler: self.reconciler.clone(),
+            latency: self.latency.clone(),
+        }
+    }
+}
+
 impl Actor for VenueFeed {
     type Msg = FeedMsg;
 
@@ -234,6 +254,26 @@ impl VenueGateway {
             .lock()
             .expect("stalled reply lock poisoned")
             .push(reply);
+    }
+}
+
+pub struct VenueGatewaySpec {
+    pub venue: VenueId,
+    pub exchange: ExchangeSim,
+    pub ledger: ActorRef<LedgerMsg>,
+    pub latency: LatencyRecorder,
+}
+
+impl ActorFactory for VenueGatewaySpec {
+    type Actor = VenueGateway;
+
+    fn build(&self) -> Self::Actor {
+        VenueGateway::new(
+            self.venue,
+            self.exchange.clone(),
+            self.ledger.clone(),
+            self.latency.clone(),
+        )
     }
 }
 

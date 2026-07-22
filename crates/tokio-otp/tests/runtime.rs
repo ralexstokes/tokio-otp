@@ -14,8 +14,8 @@ use tokio::{
     time::timeout,
 };
 use tokio_otp::{
-    Actor, ActorContext, ActorRef, ActorResult, BoxError, DynamicActorOptions, GraphBuilder,
-    RawActor, Reply, Runtime, SendError, SupervisedActors, SupervisorHandleExt,
+    Actor, ActorContext, ActorFactory, ActorRef, ActorResult, BoxError, DynamicActorOptions,
+    GraphBuilder, RawActor, Reply, Runtime, SendError, SupervisedActors, SupervisorHandleExt,
 };
 use tokio_supervisor::{
     ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, ShutdownPolicy, Strategy,
@@ -76,10 +76,9 @@ impl RawActor for ObserveOnce {
     }
 }
 
-fn build_runtime<A, F>(factory: F) -> (Runtime, ActorRef<A::Msg>)
+fn build_runtime<F>(factory: F) -> (Runtime, ActorRef<<F::Actor as RawActor>::Msg>)
 where
-    A: RawActor,
-    F: Fn() -> A + Send + Sync + 'static,
+    F: ActorFactory,
 {
     let mut builder = GraphBuilder::new();
     let actor_ref = builder.actor("worker", factory);

@@ -355,10 +355,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             ) -> ::core::result::Result<::tokio_otp::Graph, ::tokio_otp::GraphBuildError>
             where
                 #(
-                    #factory_params: ::core::ops::Fn() -> #field_types
-                        + ::core::marker::Send
-                        + ::core::marker::Sync
-                        + 'static,
+                    #factory_params: ::tokio_otp::ActorFactory<Actor = #field_types>,
                 )*
             {
                 Self::graph_with(::tokio_otp::GraphBuilder::new(), wire)
@@ -370,10 +367,7 @@ fn expand_topology(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             ) -> ::core::result::Result<::tokio_otp::Graph, ::tokio_otp::GraphBuildError>
             where
                 #(
-                    #factory_params: ::core::ops::Fn() -> #field_types
-                        + ::core::marker::Send
-                        + ::core::marker::Sync
-                        + 'static,
+                    #factory_params: ::tokio_otp::ActorFactory<Actor = #field_types>,
                 )*
             {
                 // The topology struct is never constructed; its fields only name actor types.

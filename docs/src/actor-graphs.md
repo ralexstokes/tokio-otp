@@ -127,11 +127,13 @@ for the common supervised runtime.
 
 ## Incarnation-local state
 
-Every registration method takes a reusable synchronous factory. The runtime
-calls it exactly once for the initial start and once for every supervised
-restart, so ordinary actor fields are fresh incarnation-local state. The actor
-type does not need `Clone`, and a synchronously constructible non-`Clone` guard
-or resource can live directly in the actor.
+Every registration method takes an `ActorFactory`. Its `build` method runs
+exactly once for the initial start and once for every supervised restart, so
+ordinary actor fields are fresh incarnation-local state. The actor type does
+not need `Clone`, and a synchronously constructible non-`Clone` guard or
+resource can live directly in the actor. Construction happens inside the
+supervised actor future, so a `build` panic follows the same supervision path
+as a startup or run panic.
 
 Constructor functions are the common case:
 
@@ -140,12 +142,35 @@ builder.actor("worker", Worker::new);
 builder.add(Worker::new);
 ```
 
-For a wired actor, capture only durable configuration or handles and clone
-those while constructing each incarnation:
+Closures automatically implement `ActorFactory`. For a small wired actor,
+capture only durable configuration or handles and clone those while
+constructing each incarnation:
 
 ```rust,ignore
 let ledger = ledger_ref.clone();
 builder.actor("gateway", move || Gateway::new(ledger.clone()));
+```
+
+Larger wiring can give that durable configuration a named spec type. Its
+`build` method becomes the single intentional clone-per-incarnation site:
+
+```rust,ignore
+use tokio_otp::ActorFactory;
+
+struct GatewaySpec {
+    ledger: ActorRef<LedgerMsg>,
+    exchange: Exchange,
+}
+
+impl ActorFactory for GatewaySpec {
+    type Actor = Gateway;
+
+    fn build(&self) -> Gateway {
+        Gateway::new(self.ledger.clone(), self.exchange.clone())
+    }
+}
+
+builder.actor("gateway", GatewaySpec { ledger, exchange });
 ```
 
 Fallible or asynchronous acquisition belongs in `Actor::on_start` or at the
@@ -168,7 +193,7 @@ The derive keeps topology shape in the type system:
 - wiring a ref with the wrong message type is a compile error
 - every factory field must be present exactly once in the generated
   `<Topology>Factories` struct literal
-- each factory must return its declared actor type
+- each factory's `ActorFactory::Actor` must be its declared actor type
 - a topology with no actors is a compile error
 
 Configure an individual actor's mailbox or message-size observation with a

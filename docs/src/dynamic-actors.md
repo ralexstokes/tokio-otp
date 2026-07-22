@@ -5,7 +5,9 @@ empty and idles until `RuntimeHandle::add_actor` adds a typed actor. Each
 added actor becomes a supervised child whose id is the actor's label, and
 `add_actor` returns the typed `ActorRef<M>` directly — there is no registry
 and no string lookup. Refs travel the way any other value does: cloned into an
-incarnation by its factory, or delivered by message.
+incarnation by its `ActorFactory`, or delivered by message. Closures and
+zero-argument constructor paths implement `ActorFactory` automatically; named
+spec structs are useful when durable configuration deserves its own type.
 
 ```rust,no_run
 use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, Runtime};
@@ -78,8 +80,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `DynamicActorOptions` carries the new child's restart policy, shutdown policy,
-and optional restart intensity. `add_actor` returns an `ActorRef<A::Msg>` for
-the new actor, and the same ref keeps working across restarts of that actor.
+and optional restart intensity. `add_actor` returns an actor ref matching the
+factory's actor message type, and the same ref keeps working across restarts of
+that actor.
 
 Removal is plain supervisor child removal: `remove_child(label)` shuts the
 actor down and terminates its mailbox binding, so senders holding stale refs
