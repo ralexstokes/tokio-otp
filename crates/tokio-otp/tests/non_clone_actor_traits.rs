@@ -10,8 +10,8 @@ use std::{
 
 use tokio::sync::mpsc;
 use tokio_otp::{
-    Actor, ActorContext, ActorResult, GraphBuilder, RawActor, RebindPolicy, Reply, RestartPolicy,
-    Runtime,
+    Actor, ActorContext, ActorFactory, ActorResult, GraphBuilder, RawActor, RebindPolicy, Reply,
+    RestartPolicy, Runtime,
 };
 
 struct HandlerWithNonCloneState {
@@ -74,18 +74,32 @@ impl Actor for NonCloneHandler {
     }
 }
 
+struct NonCloneHandlerFactory {
+    constructions: Arc<AtomicUsize>,
+}
+
+impl ActorFactory for NonCloneHandlerFactory {
+    type Actor = NonCloneHandler;
+
+    fn build(&self) -> Self::Actor {
+        NonCloneHandler {
+            _guard: Mutex::new(()),
+            incarnation: self.constructions.fetch_add(1, Ordering::SeqCst),
+            local: 0,
+        }
+    }
+}
+
 #[tokio::test]
 async fn non_clone_actor_factory_constructs_fresh_state_per_incarnation() {
     let constructions = Arc::new(AtomicUsize::new(0));
     let mut builder = GraphBuilder::new();
-    let actor_ref = builder.actor("handler", {
-        let constructions = constructions.clone();
-        move || NonCloneHandler {
-            _guard: Mutex::new(()),
-            incarnation: constructions.fetch_add(1, Ordering::SeqCst),
-            local: 0,
-        }
-    });
+    let actor_ref = builder.actor(
+        "handler",
+        NonCloneHandlerFactory {
+            constructions: constructions.clone(),
+        },
+    );
     let handle = Runtime::builder()
         .graph(builder.build().expect("graph builds"))
         .restart(RestartPolicy::OnFailure)
@@ -189,10 +203,18 @@ async fn non_clone_raw_actor_factory_is_reused_for_restart() {
 
 #[tokio::test]
 async fn constructor_panic_uses_the_actor_panic_path() {
+    struct PanickingFactory;
+
+    impl ActorFactory for PanickingFactory {
+        type Actor = RawWithNonCloneState;
+
+        fn build(&self) -> Self::Actor {
+            panic!("constructor panic")
+        }
+    }
+
     let mut builder = GraphBuilder::new();
-    builder.actor("panics", || -> RawWithNonCloneState {
-        panic!("constructor panic")
-    });
+    builder.actor("panics", PanickingFactory);
     let graph = builder.build().expect("registration does not construct");
     let actor = graph.actors()[0].clone();
 
@@ -200,4 +222,30 @@ async fn constructor_panic_uses_the_actor_panic_path() {
         tokio::spawn(async move { actor.run_until(pending::<()>(), RebindPolicy::Never).await })
             .await;
     assert!(joined.expect_err("constructor panic propagates").is_panic());
+}
+
+#[derive(Default)]
+struct DefaultActor;
+
+impl Actor for DefaultActor {
+    type Msg = ();
+
+    async fn handle(&mut self, (): (), _ctx: &ActorContext<()>) -> ActorResult {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn default_constructor_path_is_an_actor_factory() {
+    let mut builder = GraphBuilder::new();
+    let actor_ref = builder.add(DefaultActor::default);
+    let handle = Runtime::builder()
+        .graph(builder.build().expect("graph builds"))
+        .build()
+        .expect("runtime builds")
+        .spawn();
+
+    handle.wait_started().await.expect("actor starts");
+    actor_ref.send(()).await.expect("default actor is running");
+    handle.shutdown_and_wait().await.expect("clean shutdown");
 }

@@ -29,7 +29,7 @@ use messages::*;
 use reconciler::Reconciler;
 use router::OrderRouter;
 use telemetry::LatencyRecorder;
-use venue::{ExchangeSim, VenueFeed, VenueGateway};
+use venue::{ExchangeSim, VenueFeed, VenueFeedSpec, VenueGateway, VenueGatewaySpec};
 
 const VENUE_A: VenueId = "venue-a";
 const VENUE_B: VenueId = "venue-b";
@@ -99,27 +99,25 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     venues.mailbox_capacity(16);
     let venue_a_feed = venues.actor_with_options(
         "venue-a-feed",
-        {
-            let exchange = venue_a.clone();
-            let reconciler = reconciler.clone();
-            let latency = latency.clone();
-            move || VenueFeed {
-                venue: VENUE_A,
-                exchange: exchange.clone(),
-                reconciler: reconciler.clone(),
-                latency: latency.clone(),
-            }
+        VenueFeedSpec {
+            venue: VENUE_A,
+            exchange: venue_a.clone(),
+            reconciler: reconciler.clone(),
+            latency: latency.clone(),
         },
         ActorOptions::new()
             .mailbox(MailboxMode::Conflate)
             .message_size(),
     );
-    let venue_a_gateway = venues.actor("venue-a-gateway", {
-        let exchange = venue_a.clone();
-        let ledger = ledger.clone();
-        let latency = latency.clone();
-        move || VenueGateway::new(VENUE_A, exchange.clone(), ledger.clone(), latency.clone())
-    });
+    let venue_a_gateway = venues.actor(
+        "venue-a-gateway",
+        VenueGatewaySpec {
+            venue: VENUE_A,
+            exchange: venue_a.clone(),
+            ledger: ledger.clone(),
+            latency: latency.clone(),
+        },
+    );
     let venue_b_feed = venues.actor_with_options(
         "venue-b-feed",
         {

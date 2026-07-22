@@ -51,16 +51,10 @@ pub enum DrainPolicy {
 ///
 /// # Incarnation construction
 ///
-/// Registration takes a reusable synchronous `Fn() -> A` factory. It is
-/// invoked once for the initial start and once per supervised restart, so
-/// ordinary actor fields are fresh incarnation-local state and need not
-/// implement [`Clone`]. Factory captures should be durable configuration or
-/// shared handles that intentionally survive restarts, such as an `Arc`, a
-/// database handle, or another actor's [`ActorRef`](crate::ActorRef).
-///
+/// Registration takes a reusable [`ActorFactory`](crate::ActorFactory), whose
+/// output is fresh incarnation-local state and need not implement [`Clone`].
 /// Acquire fallible or asynchronous per-incarnation resources (connections,
-/// files, sessions) in [`on_start`](Self::on_start) — the OTP `init` idiom —
-/// where failure already participates in supervision and readiness.
+/// files, sessions) in [`on_start`](Self::on_start).
 pub trait Actor: Send + Sync + 'static {
     /// The message type this handler receives.
     type Msg: Send + 'static;

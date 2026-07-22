@@ -14,6 +14,7 @@ use crate::actor::{
     binding::{BindingCore, BindingLifecycle, MailboxMode},
     context::ActorRef,
     error::GraphBuildError,
+    factory::ActorFactory,
     graph::{ErasedRunner, Graph, RunnableActor, RunnableActorParts, TypedRunner},
     observability::{GraphObservability, anonymous_graph_name},
     raw::RawActor,
@@ -258,12 +259,11 @@ impl GraphBuilder {
     ///
     /// The slot token's message type must match the actor's message type, so a
     /// mismatched actor is rejected by the compiler. Consuming the token makes
-    /// double fills unrepresentable in ordinary Rust code. The factory is
-    /// invoked exactly once per initial start or supervised restart.
-    pub fn define<A, F>(&mut self, slot: ActorSlot<A::Msg>, factory: F)
+    /// double fills unrepresentable in ordinary Rust code. See [`ActorFactory`]
+    /// for the incarnation lifecycle contract.
+    pub fn define<F>(&mut self, slot: ActorSlot<<F::Actor as RawActor>::Msg>, factory: F)
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
         if slot.builder_id != self.builder_id {
             self.errors.push(GraphBuildError::InvalidConfig(
@@ -281,15 +281,22 @@ impl GraphBuilder {
             return;
         };
 
-        debug_assert_eq!(slot.message_type, TypeId::of::<A::Msg>());
-        let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
+        debug_assert_eq!(
+            slot.message_type,
+            TypeId::of::<<F::Actor as RawActor>::Msg>()
+        );
+        let Ok(binding) = slot
+            .binding
+            .clone()
+            .downcast::<BindingCore<<F::Actor as RawActor>::Msg>>()
+        else {
             unreachable!("message type enforced by ActorSlot")
         };
         let mailbox_mode = slot
             .mailbox_mode
             .take()
             .expect("unfilled slot retains mailbox mode")
-            .downcast::<MailboxMode<A::Msg>>()
+            .downcast::<MailboxMode<<F::Actor as RawActor>::Msg>>()
             .unwrap_or_else(|_| unreachable!("message type enforced by ActorSlot"));
         slot.runner = Some(Arc::new(TypedRunner {
             factory: Arc::new(factory),
@@ -300,27 +307,25 @@ impl GraphBuilder {
 
     /// Registers an incarnation factory and returns its typed, restart-stable ref.
     ///
-    /// The factory is invoked exactly once per initial start or supervised restart.
-    pub fn actor<A, F>(&mut self, actor_id: &str, factory: F) -> ActorRef<A::Msg>
+    /// See [`ActorFactory`] for the incarnation lifecycle contract.
+    pub fn actor<F>(&mut self, actor_id: &str, factory: F) -> ActorRef<<F::Actor as RawActor>::Msg>
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
         self.actor_with_options(actor_id, factory, ActorOptions::new())
     }
 
     /// Registers an incarnation factory with explicit per-actor options.
     ///
-    /// The factory is invoked exactly once per initial start or supervised restart.
-    pub fn actor_with_options<A, F>(
+    /// See [`ActorFactory`] for the incarnation lifecycle contract.
+    pub fn actor_with_options<F>(
         &mut self,
         actor_id: &str,
         factory: F,
-        options: ActorOptions<A::Msg>,
-    ) -> ActorRef<A::Msg>
+        options: ActorOptions<<F::Actor as RawActor>::Msg>,
+    ) -> ActorRef<<F::Actor as RawActor>::Msg>
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
         let size_hint = options.size_hint;
         let registration = self.push_slot_with_options(actor_id, options);
@@ -329,28 +334,31 @@ impl GraphBuilder {
         })
     }
 
-    fn finish_actor_registration<A, F>(
+    fn finish_actor_registration<F>(
         &mut self,
-        registration: Option<(usize, ActorRef<A::Msg>)>,
+        registration: Option<(usize, ActorRef<<F::Actor as RawActor>::Msg>)>,
         factory: F,
-        detached: impl FnOnce() -> ActorRef<A::Msg>,
-    ) -> ActorRef<A::Msg>
+        detached: impl FnOnce() -> ActorRef<<F::Actor as RawActor>::Msg>,
+    ) -> ActorRef<<F::Actor as RawActor>::Msg>
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
         let Some((index, actor_ref)) = registration else {
             return detached();
         };
         let slot = &mut self.slots[index];
-        let Ok(binding) = slot.binding.clone().downcast::<BindingCore<A::Msg>>() else {
+        let Ok(binding) = slot
+            .binding
+            .clone()
+            .downcast::<BindingCore<<F::Actor as RawActor>::Msg>>()
+        else {
             unreachable!("message type id already verified")
         };
         let mailbox_mode = slot
             .mailbox_mode
             .take()
             .expect("new actor retains mailbox mode")
-            .downcast::<MailboxMode<A::Msg>>()
+            .downcast::<MailboxMode<<F::Actor as RawActor>::Msg>>()
             .unwrap_or_else(|_| unreachable!("message type id already verified"));
         slot.runner = Some(Arc::new(TypedRunner {
             factory: Arc::new(factory),
@@ -366,11 +374,10 @@ impl GraphBuilder {
     /// `-2`, `-3`, and so on. Renaming the actor type therefore renames tracing
     /// fields; users who need stable observability names
     /// should use [`actor`](Self::actor) or `#[derive(Topology)]` field names.
-    /// The factory is invoked exactly once per initial start or supervised restart.
-    pub fn add<A, F>(&mut self, factory: F) -> ActorRef<A::Msg>
+    /// See [`ActorFactory`] for the incarnation lifecycle contract.
+    pub fn add<F>(&mut self, factory: F) -> ActorRef<<F::Actor as RawActor>::Msg>
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
         self.add_with_options(factory, ActorOptions::new())
     }
@@ -378,17 +385,16 @@ impl GraphBuilder {
     /// Registers an incarnation factory under its actor's unqualified type name
     /// with explicit per-actor options.
     ///
-    /// The factory is invoked exactly once per initial start or supervised restart.
-    pub fn add_with_options<A, F>(
+    /// See [`ActorFactory`] for the incarnation lifecycle contract.
+    pub fn add_with_options<F>(
         &mut self,
         factory: F,
-        options: ActorOptions<A::Msg>,
-    ) -> ActorRef<A::Msg>
+        options: ActorOptions<<F::Actor as RawActor>::Msg>,
+    ) -> ActorRef<<F::Actor as RawActor>::Msg>
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
-        let base = short_type_name(type_name::<A>());
+        let base = short_type_name(type_name::<F::Actor>());
         let mut actor_id = base.to_owned();
         let mut suffix = 2;
         while self.index.contains_key(actor_id.as_str()) {

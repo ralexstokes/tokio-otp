@@ -245,10 +245,10 @@ pub mod prelude {
     #[cfg(feature = "derive")]
     pub use crate::Topology;
     pub use crate::{
-        Actor, ActorContext, ActorOptions, ActorRef, ActorResult, BoxError, CallError,
-        CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder, MailboxMode,
-        MessageSize, MonitorRef, RawActor, Reply, Runtime, RuntimeBuilder, RuntimeHandle,
-        SendError, TimerRef,
+        Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, BoxError,
+        CallError, CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder,
+        MailboxMode, MessageSize, MonitorRef, RawActor, Reply, Runtime, RuntimeBuilder,
+        RuntimeHandle, SendError, TimerRef,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
@@ -262,10 +262,10 @@ pub mod prelude {
 pub use tokio_otp_derive::Topology;
 
 pub use actor::{
-    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, ActorSlot, ActorStats,
-    BoxError, CallError, Down, DownReason, DrainPolicy, Graph, GraphBuildError, GraphBuilder,
-    MailboxMode, MessageSize, MonitorRef, RawActor, RebindPolicy, Reply, RunnableActor,
-    RunnableActorFactory, SendError, TimerRef, TryRecvError,
+    Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, ActorRunError,
+    ActorSlot, ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, Graph,
+    GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorRef, RawActor, RebindPolicy,
+    Reply, RunnableActor, RunnableActorFactory, SendError, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};

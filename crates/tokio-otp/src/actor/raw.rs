@@ -19,13 +19,11 @@ pub type ActorResult = Result<(), BoxError>;
 ///
 /// Implementors can use
 /// `async fn run(&mut self, ctx: ActorContext<Self::Msg>) -> ActorResult` in
-/// their trait impls. Registration takes a reusable synchronous `Fn() -> A`
-/// factory and invokes it once per initial start or supervised restart. Each
-/// run therefore owns fresh incarnation-local state, including non-[`Clone`]
-/// fields. Capture only durable configuration and shared handles that should
-/// survive restarts in the factory; acquire fallible or asynchronous resources
-/// at the start of [`run`](Self::run), where failure participates in
-/// supervision and readiness.
+/// their trait impls. Registration takes a reusable
+/// [`ActorFactory`](crate::ActorFactory), so each run owns fresh
+/// incarnation-local state, including non-[`Clone`] fields. Custom raw actors
+/// can acquire fallible or asynchronous resources at the start of
+/// [`run`](Self::run), where failure participates in supervision and readiness.
 ///
 /// This trait is deliberately not implemented for plain closures: an actor is
 /// a named type that implements `RawActor`, which keeps the message type visible

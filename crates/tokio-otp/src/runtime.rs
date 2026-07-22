@@ -7,7 +7,8 @@ use std::{
 };
 
 use crate::{
-    ActorOptions, ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor, RunnableActorFactory,
+    ActorFactory, ActorOptions, ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor,
+    RunnableActorFactory,
 };
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{
@@ -285,17 +286,16 @@ impl RuntimeHandle {
     /// its stable typed ref.
     ///
     /// The actor's label is also its direct supervisor child id, so it can be
-    /// removed later with [`remove_child`](Self::remove_child). The factory is
-    /// invoked exactly once per initial start or supervised restart.
-    pub async fn add_actor<A, F>(
+    /// removed later with [`remove_child`](Self::remove_child). See
+    /// [`ActorFactory`] for the incarnation lifecycle contract.
+    pub async fn add_actor<F>(
         &self,
         label: impl Into<String>,
         factory: F,
         options: DynamicActorOptions,
-    ) -> Result<ActorRef<A::Msg>, ControlError>
+    ) -> Result<ActorRef<<F::Actor as RawActor>::Msg>, ControlError>
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
         let actor = self.actors.actor_factory.actor(label, factory);
         self.add_constructed_actor(actor, options).await
@@ -304,17 +304,16 @@ impl RuntimeHandle {
     /// Adds a supervised runtime actor from an incarnation factory with explicit
     /// per-actor registration options and returns its stable typed ref.
     ///
-    /// The factory is invoked exactly once per initial start or supervised restart.
-    pub async fn add_actor_with_options<A, F>(
+    /// See [`ActorFactory`] for the incarnation lifecycle contract.
+    pub async fn add_actor_with_options<F>(
         &self,
         label: impl Into<String>,
         factory: F,
-        actor_options: ActorOptions<A::Msg>,
+        actor_options: ActorOptions<<F::Actor as RawActor>::Msg>,
         dynamic_options: DynamicActorOptions,
-    ) -> Result<ActorRef<A::Msg>, ControlError>
+    ) -> Result<ActorRef<<F::Actor as RawActor>::Msg>, ControlError>
     where
-        A: RawActor,
-        F: Fn() -> A + Send + Sync + 'static,
+        F: ActorFactory,
     {
         let actor = self
             .actors

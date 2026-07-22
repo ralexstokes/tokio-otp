@@ -5,6 +5,11 @@ supervised child. Existing `ActorRef<M>` handles keep following the same
 long-lived mailbox bindings, so a sender can wait while a failed actor is
 restarted and then deliver to the new generation.
 
+Each child is rebuilt by its `ActorFactory` for the initial run and every
+restart. Closures in the example below implement that trait automatically;
+named spec structs can hold the same durable configuration when the wiring is
+large enough to benefit from an explicit type.
+
 ```rust,no_run
 use std::{io, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
 
