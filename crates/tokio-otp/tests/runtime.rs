@@ -148,6 +148,78 @@ async fn runtime_handle_enumerates_actor_stats() {
         .expect("supervisor shut down cleanly");
 }
 
+#[tokio::test]
+async fn runtime_builder_composes_subtrees_with_recursive_actor_stats() {
+    let mut root_graph = GraphBuilder::new();
+    let root_ref = root_graph.actor("root-worker", Drain::<()>::new);
+    let mut nested_graph = GraphBuilder::new();
+    let nested_ref = nested_graph.actor("nested-worker", Drain::<()>::new);
+
+    let runtime = Runtime::builder()
+        .graph(root_graph.build().expect("valid root graph"))
+        .subtree(
+            "workers",
+            Runtime::builder().graph(nested_graph.build().expect("valid nested graph")),
+        )
+        .build()
+        .expect("nested runtime builds");
+    let handle = runtime.spawn();
+    handle.wait_started().await.expect("runtime started");
+
+    root_ref.send(()).await.expect("root message sent");
+    nested_ref.send(()).await.expect("nested message sent");
+
+    let actor_ids = handle
+        .actor_stats()
+        .into_iter()
+        .map(|stats| stats.actor_id)
+        .collect::<Vec<_>>();
+    assert_eq!(actor_ids, ["root-worker", "nested-worker"]);
+
+    let subtree = handle.subtree("workers").expect("actor-aware subtree");
+    assert_eq!(subtree.actor_stats(), vec![nested_ref.stats()]);
+
+    let dynamic = subtree
+        .add_actor(
+            "dynamic-worker",
+            Drain::<()>::new,
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("nested actor added");
+    dynamic.send(()).await.expect("dynamic message sent");
+    assert!(
+        handle
+            .actor_stats()
+            .iter()
+            .any(|stats| stats.actor_id == "dynamic-worker"),
+        "parent stats recursively include actors added through a subtree handle"
+    );
+
+    subtree
+        .remove_child("dynamic-worker")
+        .await
+        .expect("nested actor removed");
+    assert!(
+        handle
+            .actor_stats()
+            .iter()
+            .all(|stats| stats.actor_id != "dynamic-worker")
+    );
+
+    handle
+        .remove_child("workers")
+        .await
+        .expect("subtree removed");
+    assert_eq!(handle.actor_stats(), vec![root_ref.stats()]);
+    assert!(handle.subtree("workers").is_none());
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("supervisor shut down cleanly");
+}
+
 #[derive(Clone)]
 struct FailAfterObserve {
     observed: mpsc::UnboundedSender<String>,

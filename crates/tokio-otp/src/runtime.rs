@@ -17,27 +17,47 @@ use tokio_supervisor::{
     SupervisorSnapshot, SupervisorSpec,
 };
 
+pub(crate) type ActorSubtrees = Vec<(String, Arc<ActorRuntimeState>)>;
+
 #[derive(Clone, Debug)]
-struct ActorRuntimeState {
+pub(crate) struct ActorRuntimeState {
     actor_factory: RunnableActorFactory,
     actors: Arc<Mutex<Vec<RunnableActor>>>,
+    subtrees: Arc<Mutex<ActorSubtrees>>,
 }
 
 impl ActorRuntimeState {
-    fn new(actor_factory: RunnableActorFactory, actors: Vec<RunnableActor>) -> Self {
+    fn new(
+        actor_factory: RunnableActorFactory,
+        actors: Vec<RunnableActor>,
+        subtrees: ActorSubtrees,
+    ) -> Self {
         Self {
             actor_factory,
             actors: Arc::new(Mutex::new(actors)),
+            subtrees: Arc::new(Mutex::new(subtrees)),
         }
     }
 
     fn actor_stats(&self) -> Vec<ActorStats> {
-        self.actors
+        let mut stats = self
+            .actors
             .lock()
             .expect("actor stats lock poisoned")
             .iter()
             .map(RunnableActor::stats)
-            .collect()
+            .collect::<Vec<_>>();
+        let subtrees = self
+            .subtrees
+            .lock()
+            .expect("actor subtree lock poisoned")
+            .iter()
+            .map(|(_, subtree)| Arc::clone(subtree))
+            .collect::<Vec<_>>();
+        for subtree in subtrees {
+            stats.extend(subtree.actor_stats());
+        }
+        stats
     }
 
     fn record_actor(&self, actor: RunnableActor) {
@@ -51,6 +71,22 @@ impl ActorRuntimeState {
             .lock()
             .expect("actor stats lock poisoned")
             .retain(|actor| actor.label() != label);
+    }
+
+    fn subtree(&self, id: &str) -> Option<Arc<ActorRuntimeState>> {
+        self.subtrees
+            .lock()
+            .expect("actor subtree lock poisoned")
+            .iter()
+            .find(|(subtree_id, _)| subtree_id == id)
+            .map(|(_, subtree)| Arc::clone(subtree))
+    }
+
+    fn forget_subtree(&self, id: &str) {
+        self.subtrees
+            .lock()
+            .expect("actor subtree lock poisoned")
+            .retain(|(subtree_id, _)| subtree_id != id);
     }
 }
 
@@ -181,7 +217,9 @@ impl Runtime {
     /// Starts building a supervised actor runtime.
     ///
     /// Provide a graph to run every graph actor as its own supervised child,
-    /// or build without one and add actors at runtime.
+    /// compose nested graphs with
+    /// [`RuntimeBuilder::subtree`](crate::RuntimeBuilder::subtree), or build
+    /// without one and add actors at runtime.
     ///
     /// See [`RuntimeBuilder`](crate::RuntimeBuilder) for an example.
     pub fn builder() -> crate::RuntimeBuilder {
@@ -195,6 +233,7 @@ impl Runtime {
             actors: Arc::new(ActorRuntimeState::new(
                 RunnableActorFactory::new(),
                 Vec::new(),
+                Vec::new(),
             )),
         }
     }
@@ -204,17 +243,31 @@ impl Runtime {
         actor_factory: RunnableActorFactory,
         actors: Vec<RunnableActor>,
     ) -> Self {
+        Self::with_actor_tree(supervisor, actor_factory, actors, Vec::new())
+    }
+
+    pub(crate) fn with_actor_tree(
+        supervisor: Supervisor,
+        actor_factory: RunnableActorFactory,
+        actors: Vec<RunnableActor>,
+        subtrees: ActorSubtrees,
+    ) -> Self {
         Self {
             supervisor,
-            actors: Arc::new(ActorRuntimeState::new(actor_factory, actors)),
+            actors: Arc::new(ActorRuntimeState::new(actor_factory, actors, subtrees)),
         }
+    }
+
+    pub(crate) fn into_parts(self) -> (Supervisor, Arc<ActorRuntimeState>) {
+        (self.supervisor, self.actors)
     }
 
     /// Returns the underlying [`Supervisor`] for first-class nesting.
     ///
-    /// This discards the actor factory, so [`RuntimeHandle::add_actor`] is not
-    /// available after converting to a raw supervisor. Keep the full runtime
-    /// and use [`spawn`](Self::spawn) if you need runtime actor creation.
+    /// This discards the actor factories and recursive actor metadata, so
+    /// [`RuntimeHandle::add_actor`] and recursive actor stats are not available
+    /// after converting to a raw supervisor. Keep the full runtime and use
+    /// [`spawn`](Self::spawn) if you need actor-aware runtime behavior.
     ///
     pub fn into_supervisor(self) -> Supervisor {
         self.supervisor
@@ -282,6 +335,17 @@ impl RuntimeHandle {
         self.supervisor.supervisor(id)
     }
 
+    /// Returns the actor-aware handle for a direct runtime subtree.
+    ///
+    /// Unlike [`supervisor`](Self::supervisor), this preserves the subtree's
+    /// actor factory and recursive stats. It returns `None` for supervisors
+    /// that were added through the raw supervisor APIs.
+    pub fn subtree(&self, id: &str) -> Option<RuntimeHandle> {
+        let supervisor = self.supervisor.supervisor(id)?;
+        let actors = self.actors.subtree(id)?;
+        Some(Self::new(supervisor, actors))
+    }
+
     /// Adds a supervised runtime actor from an incarnation factory and returns
     /// its stable typed ref.
     ///
@@ -347,6 +411,7 @@ impl RuntimeHandle {
             || matches!(&result, Err(ControlError::ShutdownTimedOut(actor_id)) if actor_id == &id)
         {
             self.actors.forget_actor(&id);
+            self.actors.forget_subtree(&id);
         }
         result
     }
@@ -379,7 +444,8 @@ impl RuntimeHandle {
         self.supervisor.snapshot()
     }
 
-    /// Returns point-in-time stats for actors created with this runtime.
+    /// Returns point-in-time stats for this runtime and all nested runtime
+    /// subtrees, in depth-first declaration order.
     pub fn actor_stats(&self) -> Vec<ActorStats> {
         self.actors.actor_stats()
     }

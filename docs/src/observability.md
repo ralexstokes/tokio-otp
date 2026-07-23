@@ -67,6 +67,10 @@ and `RuntimeHandle::add_actor_with_options`. Mailbox and size settings can be
 combined, for example with
 `ActorOptions::new().mailbox(MailboxMode::Conflate).message_size()`.
 
+`RuntimeHandle::actor_stats()` walks runtime subtrees recursively. A handle
+returned by `RuntimeHandle::subtree` provides the same view scoped to that
+subtree, including actors added dynamically through the scoped handle.
+
 `ActorStats::message_bytes_accepted` is then `Some(total)`; ordinary actors
 report `None` and do not sample message sizes. With the `metrics` feature,
 each accepted sized message also updates the `actor.message.size` histogram

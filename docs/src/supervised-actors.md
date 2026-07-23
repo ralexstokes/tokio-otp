@@ -85,6 +85,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 graph actor into its own supervised child with uniform policies and packages
 the result into a `Runtime` with a supervisor and dynamic actor support.
 
+Nested actor graphs stay on that path too. Build each graph independently so
+typed refs can cross graph boundaries, then attach a configured nested runtime
+builder with `subtree`:
+
+```rust,ignore
+let runtime = Runtime::builder()
+    .graph(core_graph)
+    .strategy(Strategy::OneForOne)
+    .subtree(
+        "venues",
+        Runtime::builder()
+            .graph(venue_graph)
+            .strategy(Strategy::OneForOne)
+            .start_mode(StartMode::Sequential),
+    )
+    .build()?;
+```
+
+Subtrees are added before the containing graph's actors, so sequential startup
+waits for nested readiness first. `RuntimeHandle::actor_stats()` recursively
+includes both graphs. `handle.subtree("venues")` returns a scoped runtime handle
+that retains the venue graph's dynamic actor factory and stats; the lower-level
+`handle.supervisor("venues")` remains available when only supervisor control is
+needed.
+
 Actor children use `on_start` as their readiness boundary. Even with the
 default concurrent start mode, snapshots remain `Starting`, `ChildStarted`
 events are delayed, and restart monitors remain pending until `on_start`
@@ -125,4 +150,5 @@ minted at wiring time (or returned by `add_actor` for runtime-added actors)
 and travels by clone or by message.
 
 Use `Strategy::OneForAll` when a group of actor children should share fate,
-or place them in a nested supervisor for a scoped restart boundary.
+or configure them as a runtime subtree for a scoped restart boundary. Use a raw
+nested supervisor when the subtree contains arbitrary non-actor children.

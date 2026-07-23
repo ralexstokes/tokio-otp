@@ -91,30 +91,31 @@ actors and keeps running until `shutdown()` is requested.
 
 ## Adding to a nested supervisor
 
-`RuntimeHandle::add_actor` always targets the root supervisor. To add an actor
-to an already-running nested supervisor, mint the runnable actor and its typed
-ref with `Graph::dynamic_factory`, locate the nested handle, and import
-`SupervisorHandleExt` to add it there:
+`RuntimeHandle::add_actor` targets the handle's own supervisor. For subtrees
+configured with `RuntimeBuilder::subtree`, obtain the actor-aware nested handle
+and add the actor normally:
 
 ```rust,ignore
-use tokio_otp::{DynamicActorOptions, SupervisorHandleExt};
-
-let (actor, subscription) = graph
-    .dynamic_factory()
-    .actor("btc-usd", Subscription::new);
-let venue = handle.supervisor("coinbase").expect("venue is running");
-
-venue
-    .add_actor(actor, DynamicActorOptions::default())
+let venue = handle.subtree("coinbase").expect("venue is running");
+let subscription = venue
+    .add_actor(
+        "btc-usd",
+        Subscription::new,
+        DynamicActorOptions::default(),
+    )
     .await?;
 ```
 
 The actor's label (`"btc-usd"` above) is its child id within the nested
 supervisor, so remove it through the same handle with
-`venue.remove_child("btc-usd")`. Actors added this way are supervised and
-restart normally, but they do not appear in `RuntimeHandle::actor_stats()` or
-external observers such as `tokio-otp-console`; use `RuntimeHandle::add_actor`
-when that visibility matters.
+`venue.remove_child("btc-usd")`. Actors added this way are supervised, restart
+normally, and appear in both `venue.actor_stats()` and the parent handle's
+recursive `actor_stats()` result.
+
+For a raw nested `Supervisor` that was not built as a runtime subtree, use
+`Graph::dynamic_factory`, `RuntimeHandle::supervisor`, and
+`SupervisorHandleExt` as the lower-level escape hatch. Actors added through
+that raw path are not part of runtime actor stats.
 
 ## Name-based discovery, when you want it
 

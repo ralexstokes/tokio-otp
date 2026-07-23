@@ -5,7 +5,7 @@ use std::{
 };
 
 use metrics_util::debugging::{DebuggingRecorder, Snapshotter};
-use tokio_otp::{CancellationToken, Graph, RuntimeHandle};
+use tokio_otp::{CancellationToken, RuntimeHandle};
 
 #[derive(Clone, Debug, Default)]
 pub struct LatencyRecorder(Arc<Mutex<HashMap<&'static str, LatencySeries>>>);
@@ -40,7 +40,7 @@ pub fn install_metrics() -> Result<Snapshotter, metrics::SetRecorderError<Debugg
     Ok(snapshotter)
 }
 
-pub async fn sample(runtime: RuntimeHandle, venue_graph: Graph, stop: CancellationToken) {
+pub async fn sample(runtime: RuntimeHandle, stop: CancellationToken) {
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -50,8 +50,7 @@ pub async fn sample(runtime: RuntimeHandle, venue_graph: Graph, stop: Cancellati
                 // WARN filter; emit one visible sample as acceptance evidence.
                 tracing::warn!(
                     snapshot = ?runtime.snapshot(),
-                    core_stats = ?runtime.actor_stats(),
-                    venue_stats = ?venue_graph.stats(),
+                    actor_stats = ?runtime.actor_stats(),
                     "final trading engine telemetry sample"
                 );
                 break;
@@ -59,8 +58,7 @@ pub async fn sample(runtime: RuntimeHandle, venue_graph: Graph, stop: Cancellati
             _ = interval.tick() => {
                 tracing::info!(
                     snapshot = ?runtime.snapshot(),
-                    core_stats = ?runtime.actor_stats(),
-                    venue_stats = ?venue_graph.stats(),
+                    actor_stats = ?runtime.actor_stats(),
                     "trading engine telemetry sample"
                 );
             }
