@@ -287,10 +287,11 @@ impl SupervisorRuntime {
         for channels in orphaned.into_iter().chain(displaced) {
             channels.terminal();
         }
-        // Nested incarnations reuse the stable snapshot channel, so resume the
-        // cumulative restart counter from the previous incarnation's final
-        // snapshot; a fresh root channel holds the initial snapshot (zero).
-        // This keeps `total_restarts` monotonic across incarnations.
+        // Nested incarnations reuse the stable snapshot channel. Binding the
+        // new incarnation reset its child state while preserving the previous
+        // incarnation's cumulative restart counter in that snapshot; a fresh
+        // root channel holds the initial snapshot (zero). Resume from that
+        // preserved value to keep `total_restarts` monotonic.
         let total_restarts = snapshots.borrow().total_restarts;
         let nested_snapshot_capacity = config
             .control_channel_capacity

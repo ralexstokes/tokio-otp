@@ -131,6 +131,12 @@ impl StableSupervisorChannels {
         }
     }
 
+    /// Binds a new incarnation and resets its incarnation-local snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if these stable channels have already been marked terminal;
+    /// rebinding a terminal supervisor identity is an internal lifecycle bug.
     pub(crate) fn bind(
         self: &Arc<Self>,
         generation: u64,
