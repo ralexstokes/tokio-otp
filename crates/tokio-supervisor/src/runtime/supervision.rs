@@ -178,6 +178,10 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) task_map: HashMap<Id, TaskMeta>,
     pub(crate) pending_exit: Option<Result<(), SupervisorError>>,
     pub(crate) restart_epoch: u64,
+    /// Cumulative failure-triggered restarts recorded across all direct
+    /// children (including since-removed ones); exposed on snapshots as
+    /// [`SupervisorSnapshot::total_restarts`].
+    pub(crate) total_restarts: u64,
 }
 
 impl SupervisorRuntime {
@@ -263,6 +267,7 @@ impl SupervisorRuntime {
             task_map: HashMap::new(),
             pending_exit: None,
             restart_epoch: 0,
+            total_restarts: 0,
         }
     }
 
@@ -1248,6 +1253,7 @@ impl SupervisorRuntime {
     }
 
     fn schedule_restart(&mut self, key: ChildKey) -> Result<Duration, SupervisorError> {
+        self.total_restarts = self.total_restarts.saturating_add(1);
         let delay = {
             let now = Instant::now();
             let child = &mut self.children[key].runtime;
@@ -1413,6 +1419,7 @@ impl SupervisorRuntime {
                 SupervisorState::Stopped => SupervisorStateView::Stopped,
             },
             strategy: self.meta.strategy,
+            total_restarts: self.total_restarts,
             children,
         }
     }

@@ -25,6 +25,28 @@ pub struct SupervisorSnapshot {
     pub state: SupervisorStateView,
     /// The restart strategy in use.
     pub strategy: Strategy,
+    /// Cumulative number of restarts recorded by this supervisor over its
+    /// lifetime, counting one restart per failure-triggered child restart —
+    /// the same occurrences the restart-intensity window tracks.
+    ///
+    /// Unlike the per-child [`ChildSnapshot::restart_count`], this counter is
+    /// monotonic for the life of the supervisor: it keeps the restarts of
+    /// children that have since been removed. Under group strategies such as
+    /// [`Strategy::OneForAll`], sibling respawns caused by another child's
+    /// failure do not increment it — only the failing child's restart counts.
+    ///
+    /// Because snapshots are delivered over a `watch` channel (which conflates
+    /// intermediate values but never lags), deltas of this counter are a
+    /// reliable way to observe restart activity — unlike counting
+    /// [`SupervisorEvent`](crate::SupervisorEvent)s from the lossy broadcast
+    /// channel. See [`SupervisorHandle::watch_restarts`](crate::SupervisorHandle::watch_restarts).
+    ///
+    /// The counter only covers direct children. Restarts inside a nested
+    /// supervisor are visible on that nested snapshot's own `total_restarts`
+    /// (and reset when the parent restarts the nested supervisor itself, which
+    /// increments the parent's counter instead).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub total_restarts: u64,
     /// Ordered list of child snapshots, matching the supervisor's child order.
     pub children: Vec<ChildSnapshot>,
 }
@@ -73,8 +95,16 @@ impl SupervisorSnapshot {
         Self {
             state,
             strategy,
+            total_restarts: 0,
             children,
         }
+    }
+
+    /// Sets the cumulative restart count recorded by this supervisor.
+    #[must_use]
+    pub fn total_restarts(mut self, total_restarts: u64) -> Self {
+        self.total_restarts = total_restarts;
+        self
     }
 
     /// Looks up a direct child by id.

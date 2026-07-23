@@ -211,7 +211,7 @@ pub use context::{ChildContext, SupervisorToken};
 pub use error::{ControlError, RestartMonitorError, SupervisorBuildError, SupervisorError};
 pub use event::{EventPathSegment, ExitStatusView, SupervisorEvent};
 pub use handle::SupervisorHandle;
-pub use monitor::RestartMonitor;
+pub use monitor::{RestartMonitor, RestartWatch};
 pub use restart::{BackoffPolicy, RestartIntensity, RestartPolicy};
 pub use shutdown::{AutoShutdown, ShutdownMode, ShutdownPolicy};
 pub use snapshot::{

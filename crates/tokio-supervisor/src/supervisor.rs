@@ -253,6 +253,7 @@ pub(crate) fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot 
     SupervisorSnapshot {
         state: SupervisorStateView::Running,
         strategy: config.strategy,
+        total_restarts: 0,
         children: config
             .children
             .iter()

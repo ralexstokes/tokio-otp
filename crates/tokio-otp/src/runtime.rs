@@ -14,7 +14,7 @@ use crate::{
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{
     ChildSpec, ControlError, RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy,
-    ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,
+    RestartWatch, ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,
     SupervisorSnapshot, SupervisorSpec,
 };
 
@@ -446,8 +446,21 @@ impl RuntimeHandle {
     }
 
     /// Returns a new receiver for supervisor lifecycle events.
+    ///
+    /// Events are lossy observability, not durable control: see
+    /// [`SupervisorHandle::subscribe`] for the full contract. Control logic
+    /// such as restart breakers should use
+    /// [`watch_restarts`](Self::watch_restarts) or
+    /// [`subscribe_snapshots`](Self::subscribe_snapshots) instead.
     pub fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.supervisor.subscribe()
+    }
+
+    /// Delegates to [`SupervisorHandle::watch_restarts`]: reliable,
+    /// snapshot-backed observation of restart activity, suitable for control
+    /// logic such as aggregate restart breakers.
+    pub fn watch_restarts(&self) -> RestartWatch {
+        self.supervisor.watch_restarts()
     }
 
     /// Returns a clone of the latest supervisor snapshot.

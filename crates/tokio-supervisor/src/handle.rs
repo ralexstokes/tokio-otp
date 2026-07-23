@@ -12,7 +12,7 @@ use crate::{
     child::{ChildSpec, SupervisorSpec},
     error::{ControlError, RestartMonitorError, SupervisorError},
     event::SupervisorEvent,
-    monitor::RestartMonitor,
+    monitor::{RestartMonitor, RestartWatch},
     snapshot::{ChildMembershipView, SupervisorSnapshot, SupervisorStateView},
 };
 
@@ -239,9 +239,10 @@ pub(crate) struct SupervisorHandleInit {
 /// - **Dynamic children**: [`add_child`](Self::add_child) /
 ///   [`remove_child`](Self::remove_child) (and `_at` variants for nested
 ///   supervisors).
-/// - **Observability**: [`subscribe`](Self::subscribe) for events,
+/// - **Observability**: [`subscribe`](Self::subscribe) for (lossy) events,
 ///   [`snapshot`](Self::snapshot) / [`subscribe_snapshots`](Self::subscribe_snapshots)
-///   for state.
+///   for state, [`watch_restarts`](Self::watch_restarts) for reliable restart
+///   counting.
 /// - **Completion**: [`wait`](Self::wait) to await the supervisor's exit.
 ///
 /// Dropping the last handle clone requests graceful shutdown, equivalent to
@@ -471,12 +472,57 @@ impl SupervisorHandle {
 
     /// Returns a new receiver for supervisor lifecycle events.
     ///
+    /// # Events are lossy observability, not durable control
+    ///
     /// The receiver is backed by a bounded broadcast channel. If the receiver
     /// falls behind by more than the configured
     /// [`event_channel_capacity`](crate::SupervisorBuilder::event_channel_capacity),
-    /// it will receive a `Lagged` error and skip missed events.
+    /// it receives a `Lagged` error and skips the missed events. Events
+    /// forwarded from nested supervisors cross an additional bounded internal
+    /// channel and can be dropped there without a `Lagged` marker on this
+    /// receiver.
+    ///
+    /// This contract makes the event stream suitable for logging, tracing,
+    /// and dashboards, but **not** for driving safety or control logic: a
+    /// consumer that counts events can silently under-count. Consumers that
+    /// nevertheless gate decisions on events must fail closed on `Lagged`
+    /// (treat the gap as if the guarded condition occurred), or better, use a
+    /// cumulative source that cannot miss occurrences:
+    ///
+    /// - [`watch_restarts`](Self::watch_restarts) for restart activity, or
+    /// - [`subscribe_snapshots`](Self::subscribe_snapshots) with the
+    ///   monotonic [`SupervisorSnapshot::total_restarts`] and per-child
+    ///   [`ChildSnapshot::restart_count`](crate::ChildSnapshot::restart_count)
+    ///   counters. Snapshots are delivered over a `watch` channel, which
+    ///   conflates intermediate values but never lags, so counter deltas
+    ///   account for every restart.
     pub fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.events_tx().subscribe()
+    }
+
+    /// Returns a [`RestartWatch`] that reliably reports this supervisor's
+    /// restart activity as it happens.
+    ///
+    /// The watch observes the monotonic
+    /// [`SupervisorSnapshot::total_restarts`] counter over the lossless
+    /// snapshot `watch` channel, so unlike counting [`subscribe`](Self::subscribe)
+    /// events it can never silently miss a restart — conflated updates are
+    /// reported as one delta covering every restart in the batch. Use it for
+    /// control logic such as aggregate restart breakers.
+    ///
+    /// The baseline is captured here, synchronously: only restarts recorded
+    /// after this call are reported.
+    ///
+    /// ```no_run
+    /// # async fn example(handle: tokio_supervisor::SupervisorHandle) {
+    /// let mut restarts = handle.watch_restarts();
+    /// while let Some(newly_recorded) = restarts.next().await {
+    ///     // Feed `newly_recorded` into a sliding-window breaker.
+    /// }
+    /// # }
+    /// ```
+    pub fn watch_restarts(&self) -> RestartWatch {
+        RestartWatch::new(self.snapshots_rx())
     }
 
     /// Returns a clone of the latest [`SupervisorSnapshot`].
