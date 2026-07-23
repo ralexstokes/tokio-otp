@@ -647,10 +647,14 @@
   // --- Rendering: Overview ---
   function countChildren(sup) {
     const counts = { total: 0, restarts: 0, Running: 0, Starting: 0, Stopping: 0, Stopped: 0 };
-    if (!sup || !sup.children) return counts;
+    if (!sup) return counts;
+    // Sum supervisor-level total_restarts, not per-child restart_count: a
+    // removed child's restart_count vanishes from the snapshot, while
+    // total_restarts keeps counting for the supervisor's stable identity.
+    counts.restarts = sup.total_restarts || 0;
+    if (!sup.children) return counts;
     sup.children.forEach(function (c) {
       counts.total++;
-      counts.restarts += c.restart_count || 0;
       if (counts[c.state] !== undefined) counts[c.state]++;
       if (c.supervisor) {
         const nested = countChildren(c.supervisor);
