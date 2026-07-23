@@ -131,13 +131,31 @@ impl StableSupervisorChannels {
         }
     }
 
+    /// Binds a new incarnation and resets its incarnation-local snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if these stable channels have already been marked terminal;
+    /// rebinding a terminal supervisor identity is an internal lifecycle bug.
     pub(crate) fn bind(
         self: &Arc<Self>,
         generation: u64,
         shutdown_tx: watch::Sender<bool>,
         command_tx: mpsc::Sender<SupervisorCommand>,
         done_rx: DoneReceiver,
+        mut initial_snapshot: SupervisorSnapshot,
     ) -> StableBindingGuard {
+        let snapshots = self.snapshots();
+        // The children belong to the new incarnation, but the aggregate
+        // restart counter belongs to the stable supervisor identity.
+        initial_snapshot.total_restarts = snapshots.borrow().total_restarts;
+        snapshots.send_if_modified(|current| {
+            if *current == initial_snapshot {
+                return false;
+            }
+            *current = initial_snapshot;
+            true
+        });
         *self.binding.lock().expect("stable control slot poisoned") = Some(IncarnationBinding {
             generation,
             shutdown_tx,
@@ -220,6 +238,87 @@ impl StableSupervisorChannels {
 
     pub(crate) fn nested_channels(&self) -> NestedChannels {
         Arc::clone(&self.nested_channels)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        snapshot::{ChildSnapshot, ChildStateView},
+        strategy::Strategy,
+    };
+
+    #[test]
+    fn binding_a_new_incarnation_resets_the_stable_snapshot() {
+        let stale_snapshot = SupervisorSnapshot::new(
+            SupervisorStateView::Running,
+            Strategy::OneForOne,
+            vec![ChildSnapshot::new(
+                "dynamic-worker",
+                0,
+                ChildStateView::Running,
+            )],
+        )
+        .total_restarts(7);
+        let initial_snapshot = SupervisorSnapshot::new(
+            SupervisorStateView::Running,
+            Strategy::OneForOne,
+            vec![ChildSnapshot::new(
+                "static-worker",
+                0,
+                ChildStateView::Starting,
+            )],
+        );
+        let expected_snapshot = initial_snapshot.clone().total_restarts(7);
+        let channels = StableSupervisorChannels::new(
+            stale_snapshot,
+            8,
+            empty_nested_handles(),
+            empty_nested_channels(),
+            true,
+        );
+        let handle = channels.handle();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (_done_tx, done_rx) = watch::channel(None);
+
+        let _binding = channels.bind(2, shutdown_tx, command_tx, done_rx, initial_snapshot);
+
+        assert_eq!(handle.snapshot(), expected_snapshot);
+    }
+
+    #[test]
+    fn first_binding_does_not_publish_an_unchanged_snapshot() {
+        let initial_snapshot = SupervisorSnapshot::new(
+            SupervisorStateView::Running,
+            Strategy::OneForOne,
+            vec![ChildSnapshot::new(
+                "static-worker",
+                0,
+                ChildStateView::Starting,
+            )],
+        );
+        let channels = StableSupervisorChannels::new(
+            initial_snapshot.clone(),
+            8,
+            empty_nested_handles(),
+            empty_nested_channels(),
+            true,
+        );
+        let snapshots = channels.snapshots_rx();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (_done_tx, done_rx) = watch::channel(None);
+
+        let _binding = channels.bind(0, shutdown_tx, command_tx, done_rx, initial_snapshot);
+
+        assert!(
+            !snapshots
+                .has_changed()
+                .expect("stable snapshot channel remains open"),
+            "an unchanged first binding must not wake snapshot subscribers"
+        );
     }
 }
 

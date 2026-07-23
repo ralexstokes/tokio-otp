@@ -133,6 +133,17 @@ impl Supervisor {
         let generation = ctx.generation();
         let startup_ctx = ctx.clone();
         let task_done_tx = done_tx.clone();
+        let initial_snapshot = initial_snapshot(&self.config);
+
+        // Rebind before the runtime task can publish so observers never see
+        // the previous incarnation's final snapshot through the new binding.
+        let binding = channels.bind(
+            generation,
+            shutdown_tx.clone(),
+            command_tx,
+            done_rx,
+            initial_snapshot,
+        );
 
         let join_handle = tokio::spawn(async move {
             let result = self
@@ -153,7 +164,6 @@ impl Supervisor {
             result
         });
 
-        let binding = channels.bind(generation, shutdown_tx.clone(), command_tx, done_rx);
         tokio::pin!(join_handle);
         let mut shutdown_requested = false;
 

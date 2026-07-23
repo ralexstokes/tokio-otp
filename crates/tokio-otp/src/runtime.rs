@@ -107,6 +107,11 @@ impl ActorRuntimeState {
             .expect("actor subtree lock poisoned")
             .retain(|(subtree_id, _)| subtree_id != id);
     }
+
+    fn forget_child(&self, id: &str) {
+        self.forget_actor(id);
+        self.forget_subtree(id);
+    }
 }
 
 /// Options applied when adding a runtime actor to a supervised runtime.
@@ -421,8 +426,12 @@ impl RuntimeHandle {
         if result.is_ok()
             || matches!(&result, Err(ControlError::ShutdownTimedOut(actor_id)) if actor_id == &id)
         {
-            self.actors.forget_actor(&id);
-            self.actors.forget_subtree(&id);
+            // Keep this eager cleanup even though `actor_stats` also
+            // reconciles against snapshots. It gives the caller immediate
+            // read-your-writes consistency, including timed-out removals
+            // whose child may still be visible as `Removing` while winding
+            // down.
+            self.actors.forget_child(&id);
         }
         result
     }
