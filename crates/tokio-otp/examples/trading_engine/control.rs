@@ -45,7 +45,8 @@ impl Actor for Control {
         match message {
             ControlMsg::KillSwitch { reply } => {
                 self.intake_gate.store(false, Ordering::Release);
-                self.cancel_all().await;
+                let cancelled_orders = self.cancel_all().await;
+                tracing::warn!(cancelled_orders, "kill switch cancelled open orders");
                 reply.send(());
             }
             ControlMsg::EmergencyCancelAll { reply } => reply.send(self.cancel_all().await),

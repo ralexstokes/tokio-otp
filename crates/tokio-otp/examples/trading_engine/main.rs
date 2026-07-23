@@ -12,8 +12,9 @@
 //!   outcome types, and `CALL_DEADLINE` for bounded calls.
 //! * `venue` — the exchange side: `ExchangeSim`, a shared fake exchange
 //!   holding order state and scripted misbehavior; `VenueFeed`, which turns
-//!   injected ticks into market snapshots for the reconciler (conflating
-//!   mailbox, simulated parse delay, scripted crash); and `VenueGateway`,
+//!   injected ticks into market snapshots for the reconciler (keyed conflating
+//!   mailbox, so market data cannot replace control traffic; simulated parse
+//!   delay; scripted crash); and `VenueGateway`,
 //!   which handles place/cancel/query/cancel-all and schedules delayed fill
 //!   delivery.
 //! * `router` — `OrderRouter`, the order front door: assigns order keys,
