@@ -166,12 +166,10 @@ impl StableSupervisorChannels {
             .snapshots
             .lock()
             .expect("stable snapshot slot poisoned");
-        match &slot.tx {
-            Some(tx) => tx.clone(),
-            // Terminal: no incarnation can run, so no publisher should exist.
-            // Hand out a detached sender so a stray publish goes nowhere.
-            None => watch::channel(slot.rx.borrow().clone()).0,
-        }
+        slot.tx
+            .as_ref()
+            .expect("snapshot sender requested after stable channels became terminal")
+            .clone()
     }
 
     pub(crate) fn snapshots_rx(&self) -> watch::Receiver<SupervisorSnapshot> {

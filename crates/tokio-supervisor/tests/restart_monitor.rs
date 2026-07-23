@@ -7,17 +7,15 @@ use std::{
     time::Duration,
 };
 
-use tokio::{
-    sync::{Notify, watch},
-    time::timeout,
-};
+use tokio::{sync::Notify, time::timeout};
 use tokio_supervisor::{
-    ChildMembershipView, ChildSnapshot, ChildSpec, ChildStateView, RestartIntensity,
-    RestartMonitorError, RestartPolicy, ShutdownMode, ShutdownPolicy, SupervisorBuilder,
-    SupervisorError, SupervisorSnapshot,
+    ChildMembershipView, ChildSpec, RestartIntensity, RestartMonitorError, RestartPolicy,
+    ShutdownMode, ShutdownPolicy, SupervisorBuilder, SupervisorError,
 };
 
 mod common;
+
+use common::{fail_on_generations, shutdown, wait_for_child_running, wait_for_snapshot};
 
 #[tokio::test]
 async fn monitor_restart_resolves_after_child_returns_running() {
@@ -257,66 +255,4 @@ async fn monitor_restart_unknown_child_errors_immediately() {
     assert_eq!(error, RestartMonitorError::UnknownChild("nope".to_owned()));
 
     shutdown(handle).await;
-}
-
-fn fail_on_generations(
-    id: &'static str,
-    trigger_failure: Arc<Notify>,
-    generations_to_fail: u64,
-) -> ChildSpec {
-    ChildSpec::new(id, move |ctx| {
-        let trigger_failure = trigger_failure.clone();
-        async move {
-            if ctx.generation() < generations_to_fail {
-                trigger_failure.notified().await;
-                return Err(common::test_error("boom"));
-            }
-
-            ctx.shutdown_token().cancelled().await;
-            Ok(())
-        }
-    })
-    .restart(RestartPolicy::OnFailure)
-}
-
-async fn wait_for_child_running(
-    snapshots: &mut watch::Receiver<SupervisorSnapshot>,
-    id: &str,
-    generation: u64,
-) -> ChildSnapshot {
-    wait_for_snapshot(snapshots, |snapshot| {
-        snapshot.child(id).is_some_and(|child| {
-            child.generation == generation && child.state == ChildStateView::Running
-        })
-    })
-    .await
-    .child(id)
-    .expect("child should exist in matching snapshot")
-    .clone()
-}
-
-async fn wait_for_snapshot(
-    snapshots: &mut watch::Receiver<SupervisorSnapshot>,
-    predicate: impl Fn(&SupervisorSnapshot) -> bool,
-) -> SupervisorSnapshot {
-    if predicate(&snapshots.borrow()) {
-        return snapshots.borrow().clone();
-    }
-
-    loop {
-        timeout(common::EVENT_TIMEOUT, snapshots.changed())
-            .await
-            .expect("timed out waiting for snapshot update")
-            .expect("snapshot stream closed unexpectedly");
-
-        let snapshot = snapshots.borrow().clone();
-        if predicate(&snapshot) {
-            return snapshot;
-        }
-    }
-}
-
-async fn shutdown(handle: tokio_supervisor::SupervisorHandle) {
-    handle.shutdown();
-    handle.wait().await.expect("shutdown should succeed");
 }

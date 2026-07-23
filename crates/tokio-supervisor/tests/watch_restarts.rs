@@ -1,15 +1,16 @@
 use std::{sync::Arc, time::Duration};
 
-use tokio::{
-    sync::{Notify, watch},
-    time::timeout,
-};
+use tokio::{sync::Notify, time::timeout};
 use tokio_supervisor::{
     ChildSpec, ChildStateView, RestartIntensity, RestartPolicy, Strategy, SupervisorBuilder,
-    SupervisorSnapshot, SupervisorSpec,
+    SupervisorSpec,
 };
 
 mod common;
+
+use common::{
+    fail_on_generations, failing_child, shutdown, wait_for_child_running, wait_for_snapshot,
+};
 
 #[tokio::test]
 async fn watch_restarts_reports_each_restart_as_a_delta() {
@@ -994,41 +995,19 @@ fn middle_supervisor(
         .build()
         .expect("valid leaf supervisor");
 
-    let crash_middle = crash_middle.clone();
     SupervisorBuilder::new()
         .supervisor(
             "leaf",
             SupervisorSpec::new(leaf).restart(RestartPolicy::Never),
         )
-        .child(
-            ChildSpec::new("bomb", move |_ctx| {
-                let crash_middle = crash_middle.clone();
-                async move {
-                    crash_middle.notified().await;
-                    Err(common::test_error("middle boom"))
-                }
-            })
-            .restart(RestartPolicy::OnFailure)
-            .restart_intensity(RestartIntensity::new(0, Duration::from_secs(60))),
-        )
+        .child(failing_child("bomb", crash_middle, "middle boom"))
         .build()
         .expect("valid middle supervisor")
 }
 
 fn bomb_supervisor(crash_middle: &Arc<Notify>) -> tokio_supervisor::Supervisor {
-    let crash_middle = crash_middle.clone();
     SupervisorBuilder::new()
-        .child(
-            ChildSpec::new("bomb", move |_ctx| {
-                let crash_middle = crash_middle.clone();
-                async move {
-                    crash_middle.notified().await;
-                    Err(common::test_error("middle boom"))
-                }
-            })
-            .restart(RestartPolicy::OnFailure)
-            .restart_intensity(RestartIntensity::new(0, Duration::from_secs(60))),
-        )
+        .child(failing_child("bomb", crash_middle, "middle boom"))
         .build()
         .expect("valid bomb supervisor")
 }
@@ -1041,63 +1020,4 @@ fn idle_supervisor() -> tokio_supervisor::Supervisor {
         }))
         .build()
         .expect("valid nested supervisor")
-}
-
-fn fail_on_generations(
-    id: &'static str,
-    trigger_failure: Arc<Notify>,
-    generations_to_fail: u64,
-) -> ChildSpec {
-    ChildSpec::new(id, move |ctx| {
-        let trigger_failure = trigger_failure.clone();
-        async move {
-            if ctx.generation() < generations_to_fail {
-                trigger_failure.notified().await;
-                return Err(common::test_error("boom"));
-            }
-
-            ctx.shutdown_token().cancelled().await;
-            Ok(())
-        }
-    })
-    .restart(RestartPolicy::OnFailure)
-}
-
-async fn wait_for_child_running(
-    snapshots: &mut watch::Receiver<SupervisorSnapshot>,
-    id: &str,
-    generation: u64,
-) {
-    wait_for_snapshot(snapshots, |snapshot| {
-        snapshot.child(id).is_some_and(|child| {
-            child.generation == generation && child.state == ChildStateView::Running
-        })
-    })
-    .await;
-}
-
-async fn wait_for_snapshot(
-    snapshots: &mut watch::Receiver<SupervisorSnapshot>,
-    predicate: impl Fn(&SupervisorSnapshot) -> bool,
-) -> SupervisorSnapshot {
-    if predicate(&snapshots.borrow()) {
-        return snapshots.borrow().clone();
-    }
-
-    loop {
-        timeout(common::EVENT_TIMEOUT, snapshots.changed())
-            .await
-            .expect("timed out waiting for snapshot update")
-            .expect("snapshot stream closed unexpectedly");
-
-        let snapshot = snapshots.borrow().clone();
-        if predicate(&snapshot) {
-            return snapshot;
-        }
-    }
-}
-
-async fn shutdown(handle: tokio_supervisor::SupervisorHandle) {
-    handle.shutdown();
-    handle.wait().await.expect("shutdown should succeed");
 }
