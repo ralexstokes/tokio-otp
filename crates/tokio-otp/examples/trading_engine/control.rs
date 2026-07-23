@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use futures_util::future::join_all;
 use tokio_otp::prelude::*;
 
 use crate::messages::{CALL_DEADLINE, ControlMsg, GatewayMsg};
@@ -26,12 +27,10 @@ impl Control {
     }
 
     async fn cancel_all(&self) -> usize {
-        assert_eq!(self.gateways.len(), 2, "the example has exactly two venues");
-        let (venue_a, venue_b) = tokio::join!(
-            Self::cancel_gateway(self.gateways[0].clone()),
-            Self::cancel_gateway(self.gateways[1].clone())
-        );
-        venue_a + venue_b
+        join_all(self.gateways.iter().cloned().map(Self::cancel_gateway))
+            .await
+            .into_iter()
+            .sum()
     }
 }
 
