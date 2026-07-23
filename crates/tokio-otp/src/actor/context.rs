@@ -387,7 +387,7 @@ impl<T> fmt::Debug for Reply<T> {
 
 /// Runtime context passed to a graph actor each time the graph is run.
 ///
-/// Provides the actor's incoming [`mailbox`](Self::recv), self-message
+/// Provides the actor's incoming [`mailbox`](Self::recv), message
 /// [`timers`](Self::send_after), a
 /// [`shutdown_token`](Self::shutdown_token) for cooperative shutdown, and
 /// [`run_blocking`](Self::run_blocking) for blocking work.
@@ -536,33 +536,36 @@ impl<M: Send + 'static> ActorContext<M> {
     /// Delivery uses the actor's ordinary mailbox policy: FIFO queues wait for
     /// capacity, while conflating mailboxes replace stale unread state. The
     /// timer is cancelled automatically if this actor incarnation stops or
-    /// restarts.
+    /// restarts. To schedule delayed delivery to another actor, use
+    /// [`send_after_to`](Self::send_after_to).
     pub fn send_after(&self, message: M, delay: Duration) -> TimerRef {
+        self.send_after_to(&self.myself, message, delay)
+    }
+
+    /// Sends `message` to `target` after `delay` has elapsed.
+    ///
+    /// The timer is bound to the lifecycle of the *scheduling* actor, exactly
+    /// like [`send_after`](Self::send_after): it is cancelled automatically
+    /// when this actor incarnation stops or restarts. It is not bound to the
+    /// target's lifecycle — if the target restarts before the timer fires,
+    /// the message is delivered to whichever target incarnation is running at
+    /// fire time, so messages should carry enough context (a key or
+    /// generation) for the handler to reject ones it no longer expects.
+    /// Delivery uses the target's ordinary mailbox policy: FIFO queues wait
+    /// for capacity, while conflating mailboxes replace stale unread state.
+    pub fn send_after_to<T: Send + 'static>(
+        &self,
+        target: &ActorRef<T>,
+        message: T,
+        delay: Duration,
+    ) -> TimerRef {
         let cancellation = self.timers.child_token();
         let timer = TimerRef {
             cancellation: cancellation.clone(),
         };
-        self.spawn_send_after(message, delay, cancellation);
+        spawn_delayed_send(target.clone(), message, delay, cancellation);
 
         timer
-    }
-
-    fn spawn_send_after(&self, message: M, delay: Duration, cancellation: CancellationToken) {
-        let myself = self.myself();
-
-        tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => {}
-                () = tokio::time::sleep(delay) => {
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => {}
-                        _ = myself.send(message) => {}
-                    }
-                }
-            }
-        });
     }
 
     /// Sends `message` after `delay`, replacing the current state timeout.
@@ -590,7 +593,7 @@ impl<M: Send + 'static> ActorContext<M> {
         if let Some(previous) = previous {
             previous.cancel();
         }
-        self.spawn_send_after(message, delay, cancellation);
+        spawn_delayed_send(self.myself(), message, delay, cancellation);
 
         timer
     }
@@ -616,7 +619,8 @@ impl<M: Send + 'static> ActorContext<M> {
     /// for mailbox capacity; conflating delivery replaces stale unread state.
     /// Missed ticks are skipped rather than accumulated. The timer stops on
     /// cancellation, delivery failure, or when this actor incarnation stops or
-    /// restarts.
+    /// restarts. To schedule periodic delivery to another actor, use
+    /// [`interval_to`](Self::interval_to).
     ///
     /// # Panics
     ///
@@ -625,13 +629,36 @@ impl<M: Send + 'static> ActorContext<M> {
     where
         M: Clone,
     {
+        self.interval_to(&self.myself, message, period)
+    }
+
+    /// Sends a clone of `message` to `target` after every `period`.
+    ///
+    /// The first message is sent after one full period. Delivery uses the
+    /// target's ordinary mailbox policy — FIFO queues wait for capacity,
+    /// conflating mailboxes replace stale unread state — and missed ticks are
+    /// skipped rather than accumulated. Like
+    /// [`send_after_to`](Self::send_after_to), the timer is bound to the
+    /// lifecycle of the *scheduling* actor, not the target's: it stops on
+    /// cancellation, when this actor incarnation stops or restarts, or on
+    /// delivery failure (the target has permanently terminated). A target
+    /// that merely restarts does not stop the timer; later ticks are
+    /// delivered to its next incarnation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `period` is zero.
+    pub fn interval_to<T>(&self, target: &ActorRef<T>, message: T, period: Duration) -> TimerRef
+    where
+        T: Clone + Send + 'static,
+    {
         assert!(!period.is_zero(), "timer period must be non-zero");
 
         let cancellation = self.timers.child_token();
         let timer = TimerRef {
             cancellation: cancellation.clone(),
         };
-        let myself = self.myself();
+        let target = target.clone();
 
         tokio::spawn(async move {
             let start = Instant::now() + period;
@@ -646,7 +673,7 @@ impl<M: Send + 'static> ActorContext<M> {
                         let sent = tokio::select! {
                             biased;
                             () = cancellation.cancelled() => break,
-                            sent = myself.send(message.clone()) => sent,
+                            sent = target.send(message.clone()) => sent,
                         };
                         if sent.is_err() {
                             cancellation.cancel();
@@ -755,6 +782,27 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.cancel();
     }
+}
+
+fn spawn_delayed_send<T: Send + 'static>(
+    target: ActorRef<T>,
+    message: T,
+    delay: Duration,
+    cancellation: CancellationToken,
+) {
+    tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {}
+            () = tokio::time::sleep(delay) => {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {}
+                    _ = target.send(message) => {}
+                }
+            }
+        }
+    });
 }
 
 pub(crate) struct ActorTimers(CancellationToken);
