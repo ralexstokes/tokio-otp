@@ -129,10 +129,12 @@ pub(crate) struct RuntimeMeta {
     pub(crate) observability: SupervisorObservability,
     pub(crate) parent_link: Option<ParentLink>,
     /// Whether this supervisor incarnation could ever be replaced by another
-    /// one: it is restartable by its parent, or some ancestor is. A root
-    /// supervisor is never revivable. Terminality judgments about children
-    /// are final only when this is `false` — a revivable supervisor's
-    /// replacement incarnation recreates its static children.
+    /// one: it is restartable by its parent, or some ancestor is revivable
+    /// *along a statically configured chain* (reincarnation respawns static
+    /// children only; dynamically added children are orphaned). A root
+    /// supervisor is never revivable. Terminality judgments about statically
+    /// configured children are final only when this is `false` — a revivable
+    /// supervisor's replacement incarnation recreates them.
     pub(crate) revivable: bool,
 }
 
@@ -716,15 +718,16 @@ impl SupervisorRuntime {
     /// Called once the runtime loop has exited (graceful stop or fatal
     /// error). A non-revivable supervisor can never run again, so every
     /// nested child is terminal: close their stable channels. A revivable
-    /// supervisor skips this — its stop may be a restart cycle, and its
-    /// parent marks it (and, recursively, its descendants) terminal only
-    /// when it will never be respawned.
+    /// supervisor's stop may be a restart cycle, so its statically
+    /// configured children stay open (its parent cascades terminality when
+    /// it will never be respawned) — but its dynamically added children are
+    /// closed either way: a replacement incarnation orphans them rather
+    /// than respawning them.
     pub(crate) fn finalize_stable_channels(&self) {
-        if self.meta.revivable {
-            return;
-        }
         for (_, entry) in self.children.iter() {
-            if let Some(channels) = entry.nested_channels.as_ref() {
+            if let Some(channels) = entry.nested_channels.as_ref()
+                && (!self.meta.revivable || !channels.statically_configured())
+            {
                 channels.terminal();
             }
         }
@@ -1090,19 +1093,22 @@ impl SupervisorRuntime {
     /// Marks a permanently stopped nested-supervisor child's stable channels
     /// as terminal. No-op for task children.
     ///
-    /// Only a non-revivable supervisor's judgment is final: a revivable
-    /// supervisor may itself be reincarnated by an ancestor later, which
-    /// recreates this child from the static configuration with the same
-    /// stable channels, so it must leave them open.
+    /// A revivable supervisor's judgment is provisional only for its
+    /// statically configured children: an ancestor reincarnation recreates
+    /// those from the static configuration with the same stable channels, so
+    /// they must stay open. A dynamically added child is orphaned by
+    /// reincarnation instead, so its stop is final either way.
     fn mark_child_terminal(&self, key: ChildKey) {
-        if self.meta.revivable {
+        let Some(entry) = self.children.get(key) else {
+            return;
+        };
+        let Some(channels) = entry.nested_channels.as_ref() else {
+            return;
+        };
+        if self.meta.revivable && channels.statically_configured() {
             return;
         }
-        if let Some(entry) = self.children.get(key)
-            && let Some(channels) = entry.nested_channels.as_ref()
-        {
-            channels.terminal();
-        }
+        channels.terminal();
     }
 
     fn auto_shutdown_triggered(&self, exited_key: ChildKey, status: &ExitStatus) -> bool {

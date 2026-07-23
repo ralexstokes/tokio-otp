@@ -803,11 +803,19 @@ async fn dynamic_supervisor_under_static_supervisor_id_is_displaced_on_reincarna
         .expect("displaced watch should resolve after the reincarnation");
     assert_eq!(observed, None);
 
+    // Wait for evidence of the *replacement* incarnation: only it carries
+    // the seeded restart counter alongside a running bomb and slot worker
+    // (the pre-crash snapshot also showed a running "slot"/"worker" — the
+    // dynamic occupant's — so those alone cannot discriminate).
     let mut middle_snapshots = middle_handle.subscribe_snapshots();
     wait_for_snapshot(&mut middle_snapshots, |snapshot| {
-        snapshot
-            .descendant(["slot", "worker"])
-            .is_some_and(|worker| worker.state == ChildStateView::Running)
+        snapshot.total_restarts == 1
+            && snapshot
+                .child("bomb")
+                .is_some_and(|bomb| bomb.state == ChildStateView::Running)
+            && snapshot
+                .descendant(["slot", "worker"])
+                .is_some_and(|worker| worker.state == ChildStateView::Running)
     })
     .await;
     let fresh_handle = middle_handle.supervisor("slot").expect("fresh identity");
@@ -815,6 +823,79 @@ async fn dynamic_supervisor_under_static_supervisor_id_is_displaced_on_reincarna
     timeout(common::QUIET_TIMEOUT, fresh_restarts.next())
         .await
         .expect_err("fresh identity should be alive with no restarts yet");
+
+    shutdown(handle).await;
+}
+
+#[tokio::test]
+async fn dynamic_never_supervisor_breaks_the_revival_chain() {
+    let crash_leaf = Arc::new(Notify::new());
+    let crash_for_leaf = crash_leaf.clone();
+    let leaf = SupervisorBuilder::new()
+        .child(
+            ChildSpec::new("worker", move |_ctx| {
+                let crash_leaf = crash_for_leaf.clone();
+                async move {
+                    crash_leaf.notified().await;
+                    Err(common::test_error("leaf boom"))
+                }
+            })
+            .restart(RestartPolicy::OnFailure)
+            .restart_intensity(RestartIntensity::new(0, Duration::from_secs(60))),
+        )
+        .build()
+        .expect("valid leaf supervisor");
+    let dynamic = SupervisorBuilder::new()
+        .supervisor(
+            "leaf",
+            SupervisorSpec::new(leaf).restart(RestartPolicy::Never),
+        )
+        .build()
+        .expect("valid dynamic supervisor");
+    let handle = SupervisorBuilder::new()
+        .supervisor(
+            "middle",
+            SupervisorSpec::new(idle_supervisor()).restart(RestartPolicy::OnFailure),
+        )
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+
+    timeout(common::EVENT_TIMEOUT, handle.wait_started())
+        .await
+        .expect("startup should not time out")
+        .expect("startup should succeed");
+    let middle_handle = handle.supervisor("middle").expect("middle supervisor");
+    middle_handle
+        .add_supervisor(
+            "dyn",
+            SupervisorSpec::new(dynamic).restart(RestartPolicy::Never),
+        )
+        .await
+        .expect("dynamic add should succeed");
+
+    let dyn_handle = middle_handle.supervisor("dyn").expect("dynamic supervisor");
+    let leaf_handle = dyn_handle.supervisor("leaf").expect("leaf supervisor");
+    let mut restarts = leaf_handle.watch_restarts();
+
+    // The middle supervisor is revivable, but a reincarnation of it would
+    // orphan the dynamically added `Never` supervisor rather than recreate
+    // it — the revival chain is broken at the dynamic edge, so the leaf's
+    // stop is final and its watch must terminate while every supervisor
+    // above it keeps running.
+    crash_leaf.notify_one();
+    let observed = timeout(common::EVENT_TIMEOUT, restarts.next())
+        .await
+        .expect("restart watch should report the recorded restart");
+    assert_eq!(observed, Some(1));
+    let observed = timeout(common::EVENT_TIMEOUT, restarts.next())
+        .await
+        .expect("restart watch should resolve across the dynamic Never edge");
+    assert_eq!(observed, None);
+    assert_eq!(
+        dyn_handle.snapshot().state,
+        tokio_supervisor::SupervisorStateView::Running
+    );
 
     shutdown(handle).await;
 }
