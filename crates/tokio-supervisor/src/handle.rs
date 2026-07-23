@@ -90,6 +90,12 @@ pub(crate) struct StableSupervisorChannels {
     snapshots: Mutex<SnapshotSlot>,
     nested_handles: NestedHandles,
     nested_channels: NestedChannels,
+    /// Whether these channels belong to a statically configured child (part
+    /// of the parent's `SupervisorConfig`) as opposed to a dynamically added
+    /// one. A replacement parent incarnation respawns exactly the static
+    /// children, so reconciliation uses this to tell a reusable identity from
+    /// an orphaned or colliding one.
+    statically_configured: bool,
 }
 
 impl StableSupervisorChannels {
@@ -98,6 +104,7 @@ impl StableSupervisorChannels {
         event_capacity: usize,
         nested_handles: NestedHandles,
         nested_channels: NestedChannels,
+        statically_configured: bool,
     ) -> Arc<Self> {
         let (events_tx, _) = broadcast::channel(event_capacity);
         let (snapshots_tx, snapshots_rx) = watch::channel(initial_snapshot);
@@ -110,7 +117,12 @@ impl StableSupervisorChannels {
             }),
             nested_handles,
             nested_channels,
+            statically_configured,
         })
+    }
+
+    pub(crate) fn statically_configured(&self) -> bool {
+        self.statically_configured
     }
 
     pub(crate) fn handle(self: &Arc<Self>) -> SupervisorHandle {
