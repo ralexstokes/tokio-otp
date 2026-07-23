@@ -149,7 +149,13 @@ impl StableSupervisorChannels {
         // The children belong to the new incarnation, but the aggregate
         // restart counter belongs to the stable supervisor identity.
         initial_snapshot.total_restarts = snapshots.borrow().total_restarts;
-        snapshots.send_replace(initial_snapshot);
+        snapshots.send_if_modified(|current| {
+            if *current == initial_snapshot {
+                return false;
+            }
+            *current = initial_snapshot;
+            true
+        });
         *self.binding.lock().expect("stable control slot poisoned") = Some(IncarnationBinding {
             generation,
             shutdown_tx,
@@ -280,6 +286,39 @@ mod tests {
         let _binding = channels.bind(2, shutdown_tx, command_tx, done_rx, initial_snapshot);
 
         assert_eq!(handle.snapshot(), expected_snapshot);
+    }
+
+    #[test]
+    fn first_binding_does_not_publish_an_unchanged_snapshot() {
+        let initial_snapshot = SupervisorSnapshot::new(
+            SupervisorStateView::Running,
+            Strategy::OneForOne,
+            vec![ChildSnapshot::new(
+                "static-worker",
+                0,
+                ChildStateView::Starting,
+            )],
+        );
+        let channels = StableSupervisorChannels::new(
+            initial_snapshot.clone(),
+            8,
+            empty_nested_handles(),
+            empty_nested_channels(),
+            true,
+        );
+        let snapshots = channels.snapshots_rx();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (_done_tx, done_rx) = watch::channel(None);
+
+        let _binding = channels.bind(0, shutdown_tx, command_tx, done_rx, initial_snapshot);
+
+        assert!(
+            !snapshots
+                .has_changed()
+                .expect("stable snapshot channel remains open"),
+            "an unchanged first binding must not wake snapshot subscribers"
+        );
     }
 }
 
