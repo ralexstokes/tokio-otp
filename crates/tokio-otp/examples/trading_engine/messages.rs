@@ -113,6 +113,12 @@ pub enum RouterMsg {
         venue: VenueId,
         reply: Reply<SubmitResult>,
     },
+    /// Internal: the outcome of a pipelined gateway `Place` call, sent back
+    /// to the router by the task it spawned for the call (see `router.rs`).
+    SubmitResolved {
+        key: OrderKey,
+        disposition: SubmitDisposition,
+    },
     Cancel {
         key: OrderKey,
         reply: Reply<CancelOutcome>,
@@ -130,6 +136,13 @@ pub enum SubmitResult {
     Placed(OrderKey),
     Unknown(OrderKey),
     IntakeClosed,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmitDisposition {
+    Confirmed,
+    Unknown,
     Rejected,
 }
 

@@ -16,9 +16,11 @@
 //!   mailbox, simulated parse delay, scripted crash); and `VenueGateway`,
 //!   which handles place/cancel/query/cancel-all and schedules delayed fill
 //!   delivery.
-//! * `router` — `OrderRouter`, the order front door: assigns order keys,
-//!   makes deadline-bounded calls to gateways, and tracks intents whose
-//!   outcome timed out as unknown until `ReconcileAll` re-queries and
+//! * `router` — `OrderRouter`, the order front door: assigns order keys and
+//!   pipelines deadline-bounded gateway calls off its handle loop (spawned
+//!   tasks complete the caller's reply and report back via `SubmitResolved`)
+//!   so one stalled venue cannot head-of-line block the others. Intents
+//!   whose call timed out stay unknown until `ReconcileAll` re-queries and
 //!   re-places them under the same idempotency key.
 //! * `ledger` — the record of effects: counts acks/fills/cancellations per
 //!   order key and serves a report for assertions. Drains its mailbox at
@@ -82,11 +84,13 @@
 //! 1. Market data: injected `FeedMsg::Tick`s flow through `VenueFeed` to the
 //!    reconciler, which marks the venue Fresh and re-arms its stale sweep.
 //!    Feed crashes reach the reconciler as watch events instead.
-//! 2. Orders: `RouterMsg::Submit` leads to a deadline-bounded `Place` call
-//!    on a gateway, which acks to the ledger and schedules a delayed fill
-//!    that reports `LedgerMsg::Fill` if the order was not cancelled in the
-//!    interim. A timed-out call marks the intent unknown until
-//!    `ReconcileAll` resolves it against the exchange.
+//! 2. Orders: `RouterMsg::Submit` records a pending intent and spawns a
+//!    deadline-bounded `Place` call to a gateway, which acks to the ledger
+//!    and schedules a delayed fill that reports `LedgerMsg::Fill` if the
+//!    order was not cancelled in the interim. The spawned task answers the
+//!    submitter and sends `SubmitResolved` back to the router; a timed-out
+//!    call marks the intent unknown until `ReconcileAll` resolves it
+//!    against the exchange.
 //! 3. Safety: venue restarts flow from the supervisor's lossless restart
 //!    counter (deliberately not the lossy event broadcast) through an event
 //!    pump into `Health`, whose breaker trips `Control`'s kill switch:
@@ -115,7 +119,7 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -271,7 +275,18 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     core.define(router_slot, {
         let ledger = ledger.clone();
         let intake_gate = intake_gate.clone();
-        move || OrderRouter::new(gateways.clone(), ledger.clone(), intake_gate.clone())
+        // Order keys correlate the router's pipelined gateway calls, so the
+        // sequence lives outside the per-incarnation state: keys must stay
+        // unique across router restarts (see router.rs).
+        let sequence = Arc::new(AtomicU64::new(0));
+        move || {
+            OrderRouter::new(
+                gateways.clone(),
+                ledger.clone(),
+                intake_gate.clone(),
+                sequence.clone(),
+            )
+        }
     });
     core.define(control_slot, {
         let intake_gate = intake_gate.clone();
@@ -507,8 +522,38 @@ async fn phase_3(app: &App) -> Result<(), AnyError> {
 
 async fn phase_4(app: &App) -> Result<OrderKey, AnyError> {
     let started = Instant::now();
-    let key = expect_unknown(submit(&app.router, "STALL-NOACCEPT", 3, VENUE_A).await?)?;
+    let stalled = tokio::spawn({
+        let router = app.router.clone();
+        async move { submit(&router, "STALL-NOACCEPT", 3, VENUE_A).await }
+    });
+    // The router pipelines gateway calls off its handle loop (see router.rs),
+    // so a venue-a Place that stalls for the full CALL_DEADLINE must not
+    // head-of-line block unrelated traffic. Prove it while the stall is in
+    // flight: wait for the router to register the pending intent, then place
+    // an order on healthy venue-b and require both to finish inside the
+    // stalled call's deadline.
+    await_until(|| async {
+        bounded_call(&app.router, |reply| RouterMsg::InFlight { reply })
+            .await
+            .is_ok_and(|count| count >= 1)
+    })
+    .await?;
+    let healthy = expect_placed(submit(&app.router, "OK", 1, VENUE_B).await?)?;
+    assert!(
+        started.elapsed() < CALL_DEADLINE,
+        "healthy-venue order must not queue behind the stalled venue call"
+    );
+    let key = expect_unknown(stalled.await??)?;
     assert!(started.elapsed() < CALL_DEADLINE * 4);
+    await_until(|| async {
+        ledger_report(&app.ledger).await.is_some_and(|report| {
+            report
+                .effects
+                .get(&healthy)
+                .is_some_and(|effects| effects.acknowledgements == 1)
+        })
+    })
+    .await?;
     await_until(|| async {
         bounded_call(&app.router, |reply| RouterMsg::ReconcileAll { reply })
             .await
@@ -517,7 +562,7 @@ async fn phase_4(app: &App) -> Result<OrderKey, AnyError> {
     .await?;
     assert_eq!(app.venue_a.accept_count(&key), 1);
     await_until(|| async { app.venue_a.status(&key) == Some(OrderStatus::Filled) }).await?;
-    println!("PHASE 4 OK — stuck request timed out and reconciled");
+    println!("PHASE 4 OK — stalled call pipelined, healthy venue live, reconciled");
     Ok(key)
 }
 

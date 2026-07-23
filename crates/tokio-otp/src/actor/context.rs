@@ -253,6 +253,21 @@ impl<M> ActorRef<M> {
     /// the request before it is handled, in which case this returns
     /// [`CallError::ReplyDropped`]. Conflating mailboxes are for state
     /// snapshots rather than request/response commands.
+    ///
+    /// # Head-of-line blocking inside handlers
+    ///
+    /// An actor processes one message at a time, so a handler that awaits
+    /// `call` stops its own mailbox for the full round-trip: every queued
+    /// message, however urgent or unrelated, waits behind the outstanding
+    /// request for up to the composed deadline. This is the actor-model
+    /// equivalent of blocking inside an Erlang `gen_server` callback, and in
+    /// fan-out or routing actors it turns one slow callee into head-of-line
+    /// blocking for all traffic through the intermediary. Pipeline instead:
+    /// spawn the bounded call onto a task that completes the original
+    /// [`Reply`] and reports any state change back to the actor as an
+    /// ordinary message via [`ActorContext::myself`], or move the slow
+    /// dependency behind a dedicated child actor. The book's request/reply
+    /// chapter covers the pattern.
     pub async fn call<T>(&self, message: impl FnOnce(Reply<T>) -> M) -> Result<T, CallError> {
         let (sender, receiver) = oneshot::channel();
         self.send(message(Reply { sender })).await?;
