@@ -141,6 +141,15 @@ const URGENT_BOUND: Duration = Duration::from_secs(2);
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
+fn feed_message_key(message: &FeedMsg) -> &'static str {
+    match message {
+        FeedMsg::Tick(snapshot) => snapshot.symbol,
+        // Control traffic must have a dedicated key so a later market-data
+        // snapshot cannot conflate away a pending crash command.
+        FeedMsg::Crash => "__control__",
+    }
+}
+
 struct App {
     handle: RuntimeHandle,
     venue_a_feed: ActorRef<FeedMsg>,
@@ -207,7 +216,7 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
             latency: latency.clone(),
         },
         ActorOptions::new()
-            .mailbox(MailboxMode::Conflate)
+            .mailbox(MailboxMode::conflate_by_key(feed_message_key))
             .message_size(),
     );
     let venue_a_gateway = venues.actor(
@@ -233,12 +242,7 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
             }
         },
         ActorOptions::new()
-            .mailbox(MailboxMode::conflate_by_key(
-                |message: &FeedMsg| match message {
-                    FeedMsg::Tick(snapshot) => snapshot.symbol,
-                    FeedMsg::Crash => "__control__",
-                },
-            ))
+            .mailbox(MailboxMode::conflate_by_key(feed_message_key))
             .message_size(),
     );
     let venue_b_gateway = venues.actor("venue-b-gateway", {

@@ -25,9 +25,18 @@ use crate::actor::{
 pub struct ActorStats {
     /// Actor id used to correlate these stats with supervisor snapshots.
     pub actor_id: String,
-    /// Messages removed from the mailbox by the actor.
+    /// Messages removed from the mailbox by the actor for handling.
+    ///
+    /// This can be lower than [`messages_accepted`](Self::messages_accepted):
+    /// accepted messages may be conflated before the actor receives them or
+    /// discarded when an incarnation stops.
     pub messages_received: u64,
-    /// Messages accepted by `send` or `try_send`.
+    /// Messages accepted into the mailbox by `send` or `try_send`.
+    ///
+    /// Acceptance does not mean the actor handled the message. In particular,
+    /// a conflating mailbox counts every successful send here and separately
+    /// counts unread messages replaced by newer ones in
+    /// [`messages_conflated`](Self::messages_conflated).
     pub messages_accepted: u64,
     /// Previously unread messages replaced by newer messages in a conflating mailbox.
     pub messages_conflated: u64,
