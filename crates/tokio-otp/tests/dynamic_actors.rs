@@ -324,6 +324,13 @@ async fn timed_out_removal_terminates_the_typed_ref() {
         handle.remove_child("dynamic").await,
         Err(ControlError::ShutdownTimedOut(actor_id)) if actor_id == "dynamic"
     ));
+    assert!(
+        handle
+            .actor_stats()
+            .iter()
+            .all(|stats| stats.actor_id != "dynamic"),
+        "timed-out removal immediately forgets actor stats"
+    );
     assert!(matches!(
         actor_ref.send(()).await,
         Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "dynamic"
