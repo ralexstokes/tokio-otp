@@ -174,7 +174,7 @@ pub enum ControlMsg {
 
 #[derive(Debug)]
 pub enum HealthMsg {
-    RestartObserved { child_id: String },
+    RestartsObserved { count: u64 },
     ResetBreaker,
     Tripped { reply: Reply<bool> },
 }
