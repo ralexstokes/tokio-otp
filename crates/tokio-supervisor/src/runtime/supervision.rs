@@ -128,6 +128,14 @@ pub(crate) struct RuntimeMeta {
     pub(crate) path_prefix: Vec<String>,
     pub(crate) observability: SupervisorObservability,
     pub(crate) parent_link: Option<ParentLink>,
+    /// Whether this supervisor incarnation could ever be replaced by another
+    /// one: it is restartable by its parent, or some ancestor is revivable
+    /// *along a statically configured chain* (reincarnation respawns static
+    /// children only; dynamically added children are orphaned). A root
+    /// supervisor is never revivable. Terminality judgments about statically
+    /// configured children are final only when this is `false` — a revivable
+    /// supervisor's replacement incarnation recreates them.
+    pub(crate) revivable: bool,
 }
 
 /// Core state machine that drives the supervisor's select loop.
@@ -178,6 +186,10 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) task_map: HashMap<Id, TaskMeta>,
     pub(crate) pending_exit: Option<Result<(), SupervisorError>>,
     pub(crate) restart_epoch: u64,
+    /// Cumulative restarts scheduled across all direct children (including
+    /// since-removed ones), seeded from the previous incarnation for nested
+    /// supervisors; exposed as [`SupervisorSnapshot::total_restarts`].
+    pub(crate) total_restarts: u64,
 }
 
 impl SupervisorRuntime {
@@ -192,6 +204,7 @@ impl SupervisorRuntime {
         nested_channels: NestedChannels,
         path_prefix: Vec<String>,
         parent_link: Option<ParentLink>,
+        revivable: bool,
     ) -> Self {
         let default_restart_intensity = config.restart_intensity;
         let start_mode = config.start_mode;
@@ -201,14 +214,46 @@ impl SupervisorRuntime {
         let mut child_order = Vec::with_capacity(config.children.len());
         let mut next_child_instance = 0u64;
 
+        let mut displaced: Vec<Arc<StableSupervisorChannels>> = Vec::new();
+        let mut static_supervisor_ids: Vec<String> = Vec::new();
         for spec in config.children {
             let id = spec.id.clone();
             let formatted_path = format_child_path(&path_prefix, &id);
-            let child_nested_channels = nested_channels
-                .lock()
-                .expect("nested channel map poisoned")
-                .get(&id)
-                .cloned();
+            let child_nested_channels = match &spec.kind {
+                ChildKind::Supervisor(supervisor) => {
+                    static_supervisor_ids.push(id.clone());
+                    // Reuse the stable identity only if it was minted for this
+                    // static child. A dynamically added child that happens to
+                    // share the id is a different identity and must not be
+                    // conflated with the recreated static child.
+                    let reusable = nested_channels
+                        .lock()
+                        .expect("nested channel map poisoned")
+                        .get(&id)
+                        .filter(|channels| channels.statically_configured())
+                        .cloned();
+                    Some(reusable.unwrap_or_else(|| {
+                        // Missing (a previous incarnation removed this static
+                        // child, ending its stable identity) or occupied by a
+                        // dynamically added child's channels: mint a fresh
+                        // static identity, displacing any dynamic occupant.
+                        let stable = supervisor.stable_channels(true);
+                        nested_handles
+                            .lock()
+                            .expect("nested handle map poisoned")
+                            .insert(id.clone(), stable.handle());
+                        if let Some(occupant) = nested_channels
+                            .lock()
+                            .expect("nested channel map poisoned")
+                            .insert(id.clone(), Arc::clone(&stable))
+                        {
+                            displaced.push(occupant);
+                        }
+                        stable
+                    }))
+                }
+                ChildKind::Task(_) => None,
+            };
             let key = children.insert(ChildEntry::new(
                 id.clone(),
                 formatted_path,
@@ -221,6 +266,38 @@ impl SupervisorRuntime {
             children_by_id.insert(id.clone(), key);
             child_order.push(key);
         }
+
+        // Stable channels left behind by a previous incarnation for children
+        // this incarnation will never spawn (added dynamically, so absent
+        // from the static supervisor configuration — including a dynamic
+        // supervisor whose id now belongs to a static task) are orphaned for
+        // good: no future incarnation spawns them either. Close them, along
+        // with any identities displaced above, so their observers terminate
+        // instead of hanging.
+        let orphaned: Vec<Arc<StableSupervisorChannels>> = {
+            let mut handle_map = nested_handles.lock().expect("nested handle map poisoned");
+            let mut channel_map = nested_channels.lock().expect("nested channel map poisoned");
+            let orphaned_ids: Vec<String> = channel_map
+                .keys()
+                .filter(|id| !static_supervisor_ids.contains(id))
+                .cloned()
+                .collect();
+            orphaned_ids
+                .into_iter()
+                .filter_map(|id| {
+                    handle_map.remove(&id);
+                    channel_map.remove(&id)
+                })
+                .collect()
+        };
+        for channels in orphaned.into_iter().chain(displaced) {
+            channels.terminal();
+        }
+        // Nested incarnations reuse the stable snapshot channel, so resume the
+        // cumulative restart counter from the previous incarnation's final
+        // snapshot; a fresh root channel holds the initial snapshot (zero).
+        // This keeps `total_restarts` monotonic across incarnations.
+        let total_restarts = snapshots.borrow().total_restarts;
         let nested_snapshot_capacity = config
             .control_channel_capacity
             .max(config.event_channel_capacity);
@@ -237,6 +314,7 @@ impl SupervisorRuntime {
                 path_prefix,
                 observability,
                 parent_link,
+                revivable,
             },
             state: SupervisorState::Running,
             group_token: CancellationToken::new(),
@@ -263,6 +341,7 @@ impl SupervisorRuntime {
             task_map: HashMap::new(),
             pending_exit: None,
             restart_epoch: 0,
+            total_restarts,
         }
     }
 
@@ -492,6 +571,9 @@ impl SupervisorRuntime {
             if startup_aborted {
                 self.publish_snapshot();
             }
+            // Skipped by the group respawn and never restarted afterwards; if
+            // this supervisor is the root, that judgment is final.
+            self.mark_child_terminal(key);
             return true;
         }
         false
@@ -597,7 +679,7 @@ impl SupervisorRuntime {
             return Err(ControlError::DuplicateChildId(id));
         }
 
-        let stable = supervisor.supervisor.stable_channels();
+        let stable = supervisor.supervisor.stable_channels(false);
         let definition = Arc::new(ChildDefinition::supervisor(id.clone(), supervisor));
         let formatted_path = format_child_path(&self.meta.path_prefix, &id);
         let key = self.children.insert(ChildEntry::new(
@@ -631,6 +713,24 @@ impl SupervisorRuntime {
     pub(crate) fn finish(&mut self) {
         self.state = SupervisorState::Stopped;
         self.send_event(SupervisorEvent::SupervisorStopped);
+    }
+
+    /// Called once the runtime loop has exited (graceful stop or fatal
+    /// error). A non-revivable supervisor can never run again, so every
+    /// nested child is terminal: close their stable channels. A revivable
+    /// supervisor's stop may be a restart cycle, so its statically
+    /// configured children stay open (its parent cascades terminality when
+    /// it will never be respawned) — but its dynamically added children are
+    /// closed either way: a replacement incarnation orphans them rather
+    /// than respawning them.
+    pub(crate) fn finalize_stable_channels(&self) {
+        for (_, entry) in self.children.iter() {
+            if let Some(channels) = entry.nested_channels.as_ref()
+                && (!self.meta.revivable || !channels.statically_configured())
+            {
+                channels.terminal();
+            }
+        }
     }
 
     fn handle_nested_snapshot(&mut self, notification: NestedSnapshotNotification) {
@@ -900,6 +1000,9 @@ impl SupervisorRuntime {
                 .lock()
                 .expect("nested channel map poisoned")
                 .remove(&entry.id);
+            if let Some(channels) = entry.nested_channels.as_ref() {
+                channels.terminal();
+            }
         }
         self.send_event(SupervisorEvent::ChildRemoved { id: entry.id });
     }
@@ -968,12 +1071,56 @@ impl SupervisorRuntime {
                 Strategy::OneForAll => self.handle_one_for_all_restart(classified.key).await?,
                 Strategy::RestForOne => self.handle_rest_for_one_restart(classified.key).await?,
             }
-        } else if allow_restart && !self.children[classified.key].runtime.has_reported_ready {
-            self.children[classified.key].runtime.startup_aborted = true;
-            self.publish_snapshot();
+        } else if allow_restart {
+            if !self.children[classified.key].runtime.has_reported_ready {
+                self.children[classified.key].runtime.startup_aborted = true;
+                self.publish_snapshot();
+            }
+            // The exit will not be restarted. Under group strategies a
+            // stopped non-`Never` child can still be respawned by a later
+            // sibling-triggered group restart, so finality needs more than
+            // the exit itself: a `OneForOne` stop and a `Never` policy are
+            // always final, and under `RestForOne` so is a stop of the first
+            // child — a group restart respawns only the suffix from the
+            // failing position, and nothing precedes the first. Children at
+            // other group positions conservatively stay open (an earlier
+            // sibling's failure could revive them) until the supervisor
+            // stops.
+            let stop_is_final = match self.meta.strategy {
+                Strategy::OneForOne => true,
+                Strategy::OneForAll => matches!(restart_policy, RestartPolicy::Never),
+                Strategy::RestForOne => {
+                    matches!(restart_policy, RestartPolicy::Never)
+                        || self.child_order.first() == Some(&classified.key)
+                }
+            };
+            if stop_is_final {
+                self.mark_child_terminal(classified.key);
+            }
         }
 
         Ok(())
+    }
+
+    /// Marks a permanently stopped nested-supervisor child's stable channels
+    /// as terminal. No-op for task children.
+    ///
+    /// A revivable supervisor's judgment is provisional only for its
+    /// statically configured children: an ancestor reincarnation recreates
+    /// those from the static configuration with the same stable channels, so
+    /// they must stay open. A dynamically added child is orphaned by
+    /// reincarnation instead, so its stop is final either way.
+    fn mark_child_terminal(&self, key: ChildKey) {
+        let Some(entry) = self.children.get(key) else {
+            return;
+        };
+        let Some(channels) = entry.nested_channels.as_ref() else {
+            return;
+        };
+        if self.meta.revivable && channels.statically_configured() {
+            return;
+        }
+        channels.terminal();
     }
 
     fn auto_shutdown_triggered(&self, exited_key: ChildKey, status: &ExitStatus) -> bool {
@@ -1248,6 +1395,7 @@ impl SupervisorRuntime {
     }
 
     fn schedule_restart(&mut self, key: ChildKey) -> Result<Duration, SupervisorError> {
+        self.total_restarts = self.total_restarts.saturating_add(1);
         let delay = {
             let now = Instant::now();
             let child = &mut self.children[key].runtime;
@@ -1413,6 +1561,7 @@ impl SupervisorRuntime {
                 SupervisorState::Stopped => SupervisorStateView::Stopped,
             },
             strategy: self.meta.strategy,
+            total_restarts: self.total_restarts,
             children,
         }
     }

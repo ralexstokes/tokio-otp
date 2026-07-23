@@ -12,7 +12,7 @@ use crate::{
     child::{ChildSpec, SupervisorSpec},
     error::{ControlError, RestartMonitorError, SupervisorError},
     event::SupervisorEvent,
-    monitor::RestartMonitor,
+    monitor::{RestartMonitor, RestartWatch},
     snapshot::{ChildMembershipView, SupervisorSnapshot, SupervisorStateView},
 };
 
@@ -73,12 +73,29 @@ struct IncarnationBinding {
 pub(crate) type NestedHandles = Arc<Mutex<HashMap<String, SupervisorHandle>>>;
 pub(crate) type NestedChannels = Arc<Mutex<HashMap<String, Arc<StableSupervisorChannels>>>>;
 
+/// Stable snapshot channel for a nested supervisor.
+///
+/// The sender is dropped when the supervisor child becomes terminal (it can
+/// never run again), which closes the channel for watch-style consumers such
+/// as [`RestartWatch`]. The retained receiver keeps serving the final snapshot
+/// to [`SupervisorHandle::snapshot`] / `subscribe_snapshots` afterwards.
+struct SnapshotSlot {
+    tx: Option<watch::Sender<SupervisorSnapshot>>,
+    rx: watch::Receiver<SupervisorSnapshot>,
+}
+
 pub(crate) struct StableSupervisorChannels {
     binding: Mutex<Option<IncarnationBinding>>,
     events_tx: broadcast::Sender<SupervisorEvent>,
-    snapshots_tx: watch::Sender<SupervisorSnapshot>,
+    snapshots: Mutex<SnapshotSlot>,
     nested_handles: NestedHandles,
     nested_channels: NestedChannels,
+    /// Whether these channels belong to a statically configured child (part
+    /// of the parent's `SupervisorConfig`) as opposed to a dynamically added
+    /// one. A replacement parent incarnation respawns exactly the static
+    /// children, so reconciliation uses this to tell a reusable identity from
+    /// an orphaned or colliding one.
+    statically_configured: bool,
 }
 
 impl StableSupervisorChannels {
@@ -87,16 +104,25 @@ impl StableSupervisorChannels {
         event_capacity: usize,
         nested_handles: NestedHandles,
         nested_channels: NestedChannels,
+        statically_configured: bool,
     ) -> Arc<Self> {
         let (events_tx, _) = broadcast::channel(event_capacity);
-        let (snapshots_tx, _) = watch::channel(initial_snapshot);
+        let (snapshots_tx, snapshots_rx) = watch::channel(initial_snapshot);
         Arc::new(Self {
             binding: Mutex::new(None),
             events_tx,
-            snapshots_tx,
+            snapshots: Mutex::new(SnapshotSlot {
+                tx: Some(snapshots_tx),
+                rx: snapshots_rx,
+            }),
             nested_handles,
             nested_channels,
+            statically_configured,
         })
+    }
+
+    pub(crate) fn statically_configured(&self) -> bool {
+        self.statically_configured
     }
 
     pub(crate) fn handle(self: &Arc<Self>) -> SupervisorHandle {
@@ -136,7 +162,58 @@ impl StableSupervisorChannels {
     }
 
     pub(crate) fn snapshots(&self) -> watch::Sender<SupervisorSnapshot> {
-        self.snapshots_tx.clone()
+        let slot = self
+            .snapshots
+            .lock()
+            .expect("stable snapshot slot poisoned");
+        match &slot.tx {
+            Some(tx) => tx.clone(),
+            // Terminal: no incarnation can run, so no publisher should exist.
+            // Hand out a detached sender so a stray publish goes nowhere.
+            None => watch::channel(slot.rx.borrow().clone()).0,
+        }
+    }
+
+    pub(crate) fn snapshots_rx(&self) -> watch::Receiver<SupervisorSnapshot> {
+        let slot = self
+            .snapshots
+            .lock()
+            .expect("stable snapshot slot poisoned");
+        match &slot.tx {
+            Some(tx) => tx.subscribe(),
+            None => slot.rx.clone(),
+        }
+    }
+
+    /// Marks this supervisor child as terminal: no future incarnation will
+    /// ever run. Drops the stable snapshot sender so watch-style consumers
+    /// observe channel closure, and cascades to nested descendants, which can
+    /// never run again either.
+    ///
+    /// Callers must only invoke this for judgments no ancestor reincarnation
+    /// can undo: a root supervisor's decision (a non-restarted exit, or the
+    /// root stopping), removal (which ends the stable identity — a later
+    /// recreation mints a fresh one), or an orphaned dynamic child that no
+    /// incarnation will spawn again.
+    pub(crate) fn terminal(&self) {
+        let tx = self
+            .snapshots
+            .lock()
+            .expect("stable snapshot slot poisoned")
+            .tx
+            .take();
+        drop(tx);
+
+        let descendants: Vec<_> = self
+            .nested_channels
+            .lock()
+            .expect("nested channel map poisoned")
+            .values()
+            .cloned()
+            .collect();
+        for channels in descendants {
+            channels.terminal();
+        }
     }
 
     pub(crate) fn nested_handles(&self) -> NestedHandles {
@@ -239,9 +316,10 @@ pub(crate) struct SupervisorHandleInit {
 /// - **Dynamic children**: [`add_child`](Self::add_child) /
 ///   [`remove_child`](Self::remove_child) (and `_at` variants for nested
 ///   supervisors).
-/// - **Observability**: [`subscribe`](Self::subscribe) for events,
+/// - **Observability**: [`subscribe`](Self::subscribe) for (lossy) events,
 ///   [`snapshot`](Self::snapshot) / [`subscribe_snapshots`](Self::subscribe_snapshots)
-///   for state.
+///   for state, [`watch_restarts`](Self::watch_restarts) for reliable restart
+///   counting.
 /// - **Completion**: [`wait`](Self::wait) to await the supervisor's exit.
 ///
 /// Dropping the last handle clone requests graceful shutdown, equivalent to
@@ -471,12 +549,65 @@ impl SupervisorHandle {
 
     /// Returns a new receiver for supervisor lifecycle events.
     ///
+    /// # Events are lossy observability, not durable control
+    ///
     /// The receiver is backed by a bounded broadcast channel. If the receiver
     /// falls behind by more than the configured
     /// [`event_channel_capacity`](crate::SupervisorBuilder::event_channel_capacity),
-    /// it will receive a `Lagged` error and skip missed events.
+    /// it receives a `Lagged` error and skips the missed events. Events
+    /// forwarded from nested supervisors cross an additional bounded internal
+    /// channel and can be dropped there without a `Lagged` marker on this
+    /// receiver.
+    ///
+    /// This contract makes the event stream suitable for logging, tracing,
+    /// and dashboards, but **not** for driving safety or control logic: a
+    /// consumer that counts events can silently under-count. Consumers that
+    /// nevertheless gate decisions on events must fail closed on `Lagged`
+    /// (treat the gap as if the guarded condition occurred), or better, use a
+    /// cumulative source that cannot miss occurrences:
+    ///
+    /// - [`watch_restarts`](Self::watch_restarts) for restart activity, or
+    /// - [`subscribe_snapshots`](Self::subscribe_snapshots) with the
+    ///   monotonic [`SupervisorSnapshot::total_restarts`] and per-child
+    ///   [`ChildSnapshot::restart_count`](crate::ChildSnapshot::restart_count)
+    ///   counters. Snapshots are delivered over a `watch` channel, which
+    ///   conflates intermediate values but never lags, so counter deltas
+    ///   account for every restart.
     pub fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.events_tx().subscribe()
+    }
+
+    /// Returns a [`RestartWatch`] that reliably reports this supervisor's
+    /// restart activity as it happens.
+    ///
+    /// The watch observes the monotonic
+    /// [`SupervisorSnapshot::total_restarts`] counter over the lossless
+    /// snapshot `watch` channel, so unlike counting [`subscribe`](Self::subscribe)
+    /// events it can never silently miss a restart the counter covers —
+    /// conflated updates are reported as one delta covering every restart in
+    /// the batch. Use it for control logic such as aggregate restart
+    /// breakers.
+    ///
+    /// The counter covers this supervisor's **direct children** only. To
+    /// observe a nested subtree, watch each nested supervisor's own handle
+    /// ([`supervisor`](Self::supervisor)) — `total_restarts` does not
+    /// aggregate across depth, and under group strategies sibling respawns
+    /// are not counted. See [`SupervisorSnapshot::total_restarts`] for the
+    /// exact contract.
+    ///
+    /// The baseline is captured here, synchronously: only restarts recorded
+    /// after this call are reported.
+    ///
+    /// ```no_run
+    /// # async fn example(handle: tokio_supervisor::SupervisorHandle) {
+    /// let mut restarts = handle.watch_restarts();
+    /// while let Some(newly_recorded) = restarts.next().await {
+    ///     // Feed `newly_recorded` into a sliding-window breaker.
+    /// }
+    /// # }
+    /// ```
+    pub fn watch_restarts(&self) -> RestartWatch {
+        RestartWatch::new(self.snapshots_rx())
     }
 
     /// Returns a clone of the latest [`SupervisorSnapshot`].
@@ -549,7 +680,7 @@ impl SupervisorHandle {
     fn snapshots_rx(&self) -> watch::Receiver<SupervisorSnapshot> {
         match &self.kind {
             HandleKind::Root(root) => root.snapshots_rx.clone(),
-            HandleKind::Stable(stable) => stable.snapshots_tx.subscribe(),
+            HandleKind::Stable(stable) => stable.snapshots_rx(),
         }
     }
 

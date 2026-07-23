@@ -30,10 +30,17 @@ impl Actor for Health {
 
     async fn handle(&mut self, message: HealthMsg, _ctx: &ActorContext<HealthMsg>) -> ActorResult {
         match message {
-            HealthMsg::RestartObserved { child_id } => {
-                tracing::warn!(%child_id, "venue subtree restart observed");
+            HealthMsg::RestartsObserved { count } => {
+                tracing::warn!(count, "venue subtree restarts observed");
                 let now = Instant::now();
-                self.restarts.push_back(now);
+                // A single observation may cover several restarts when
+                // snapshot updates were conflated; count each one. They all
+                // carry this observation's timestamp rather than their own
+                // arrival times, which can only widen the window's view
+                // (trip earlier) — the fail-closed direction for a breaker.
+                for _ in 0..count {
+                    self.restarts.push_back(now);
+                }
                 while self
                     .restarts
                     .front()

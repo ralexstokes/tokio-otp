@@ -96,6 +96,7 @@ impl Supervisor {
                     Vec::new(),
                     None,
                     None,
+                    false,
                 )
                 .await;
             let _ = task_done_tx.send(Some(result.clone()));
@@ -120,6 +121,7 @@ impl Supervisor {
         parent_link: ParentLink,
         channels: Arc<StableSupervisorChannels>,
         path: Vec<String>,
+        revivable: bool,
     ) -> ChildResult {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (command_tx, command_rx) = mpsc::channel(self.config.control_channel_capacity);
@@ -144,6 +146,7 @@ impl Supervisor {
                     path,
                     Some(parent_link),
                     Some(startup_ctx),
+                    revivable,
                 )
                 .await;
             let _ = task_done_tx.send(Some(result.clone()));
@@ -187,6 +190,7 @@ impl Supervisor {
         path: Vec<String>,
         parent_link: Option<ParentLink>,
         startup_ready: Option<ChildContext>,
+        revivable: bool,
     ) -> Result<(), SupervisorError> {
         let supervisor_name = supervisor_name_for_path(&path).to_owned();
         let supervisor_path = format_path(&path);
@@ -201,8 +205,9 @@ impl Supervisor {
             nested_channels,
             path,
             parent_link,
+            revivable,
         );
-        runtime
+        let result = runtime
             .run(startup_ready)
             .instrument(info_span!(
                 "supervisor",
@@ -210,16 +215,22 @@ impl Supervisor {
                 supervisor_path = %supervisor_path,
                 strategy,
             ))
-            .await
+            .await;
+        runtime.finalize_stable_channels();
+        result
     }
 
-    pub(crate) fn stable_channels(&self) -> Arc<StableSupervisorChannels> {
+    pub(crate) fn stable_channels(
+        &self,
+        statically_configured: bool,
+    ) -> Arc<StableSupervisorChannels> {
         let (nested_handles, nested_channels) = prepare_nested_channels(&self.config);
         StableSupervisorChannels::new(
             initial_snapshot(&self.config),
             self.config.event_channel_capacity,
             nested_handles,
             nested_channels,
+            statically_configured,
         )
     }
 }
@@ -238,7 +249,7 @@ fn prepare_nested_channels(config: &SupervisorConfig) -> (NestedHandles, NestedC
 
     for child in &config.children {
         if let ChildKind::Supervisor(supervisor) = &child.kind {
-            let stable = supervisor.stable_channels();
+            let stable = supervisor.stable_channels(true);
             prepared_handles.insert(child.id.clone(), stable.handle());
             prepared_channels.insert(child.id.clone(), stable);
         }
@@ -253,6 +264,7 @@ pub(crate) fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot 
     SupervisorSnapshot {
         state: SupervisorStateView::Running,
         strategy: config.strategy,
+        total_restarts: 0,
         children: config
             .children
             .iter()

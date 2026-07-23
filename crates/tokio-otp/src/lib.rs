@@ -278,8 +278,8 @@ pub use supervised_actors::SupervisedActors;
 pub use tokio_supervisor::{
     AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,
     ChildSpec, ChildStateView, ControlError, EventPathSegment, ExitStatusView, RestartIntensity,
-    RestartMonitor, RestartMonitorError, RestartPolicy, ShutdownMode, ShutdownPolicy, StartMode,
-    Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
+    RestartMonitor, RestartMonitorError, RestartPolicy, RestartWatch, ShutdownMode, ShutdownPolicy,
+    StartMode, Strategy, Supervisor, SupervisorBuildError, SupervisorBuilder, SupervisorError,
     SupervisorEvent, SupervisorHandle, SupervisorSnapshot, SupervisorSpec, SupervisorStateView,
     SupervisorToken,
     prelude::{SupervisorEventReceiverExt, SupervisorSnapshotReceiverExt},

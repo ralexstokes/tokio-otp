@@ -13,6 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let handle = supervisor.spawn();
+    // Events are lossy observability: a slow subscriber sees
+    // `RecvError::Lagged` and skips missed events. Control logic (e.g. a
+    // restart breaker) should use `watch_restarts()` or snapshots instead.
     let mut events = handle.subscribe();
 
     let observer = tokio::spawn(async move {

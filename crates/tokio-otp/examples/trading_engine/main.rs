@@ -196,28 +196,33 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
 
     let background_stop = CancellationToken::new();
     let sampler = tokio::spawn(telemetry::sample(handle.clone(), background_stop.clone()));
-    let mut events = handle.subscribe();
+    // The aggregate restart breaker is a safety mechanism, so it must not be
+    // fed from the lossy event broadcast (`handle.subscribe()`), which can
+    // drop `ChildRestarted` events under load. Instead it watches the venues
+    // supervisor's cumulative `total_restarts` counter over the lossless
+    // snapshot watch channel: conflated updates still arrive as one delta
+    // covering every restart, so the breaker can never silently under-count.
+    // The counter covers the venues supervisor's direct children — exactly
+    // the flat venue actor set built above. If venues ever gains nested
+    // per-venue supervisors, watch each nested handle as well:
+    // `total_restarts` does not aggregate across depth.
+    let mut venue_restarts = handle
+        .supervisor("venues")
+        .expect("venues supervisor")
+        .watch_restarts();
     let event_health = health.clone();
     let event_stop = background_stop.clone();
     let event_pump = tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = event_stop.cancelled() => break,
-                event = events.recv() => match event {
-                    Ok(event) => {
-                        let path = event.path();
-                        if path.first().is_some_and(|segment| segment.id == "venues")
-                            && let SupervisorEvent::ChildRestarted { id, .. } = event.leaf()
-                        {
-                            let _ = event_health
-                                .send(HealthMsg::RestartObserved { child_id: id.clone() })
-                                .await;
-                        }
+                observed = venue_restarts.next() => match observed {
+                    Some(count) => {
+                        let _ = event_health
+                            .send(HealthMsg::RestartsObserved { count })
+                            .await;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        panic!("event pump lagged by {skipped} events");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    None => break,
                 }
             }
         }

@@ -25,6 +25,31 @@ pub struct SupervisorSnapshot {
     pub state: SupervisorStateView,
     /// The restart strategy in use.
     pub strategy: Strategy,
+    /// Cumulative number of restarts this supervisor has scheduled for its
+    /// direct children — exactly the occurrences the restart-intensity window
+    /// records. That includes clean exits restarted under
+    /// [`RestartPolicy::Always`](crate::RestartPolicy::Always); under group
+    /// strategies such as [`Strategy::OneForAll`], sibling respawns caused by
+    /// another child's exit do not increment it — only the exiting child's
+    /// scheduled restart counts.
+    ///
+    /// The counter is monotonic for the supervisor's stable identity. Unlike
+    /// the per-child [`ChildSnapshot::restart_count`], it keeps the restarts
+    /// of children that have since been removed, and a nested supervisor
+    /// carries it across its own incarnations: a replacement incarnation
+    /// resumes from its predecessor's count (the nested supervisor's own
+    /// restart increments the parent's counter).
+    ///
+    /// Because snapshots are delivered over a `watch` channel (which conflates
+    /// intermediate values but never lags), deltas of this counter are a
+    /// reliable way to observe restart activity — unlike counting
+    /// [`SupervisorEvent`](crate::SupervisorEvent)s from the lossy broadcast
+    /// channel. See [`SupervisorHandle::watch_restarts`](crate::SupervisorHandle::watch_restarts).
+    ///
+    /// The counter only covers direct children. Restarts inside a nested
+    /// supervisor are visible on that nested snapshot's own `total_restarts`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub total_restarts: u64,
     /// Ordered list of child snapshots, matching the supervisor's child order.
     pub children: Vec<ChildSnapshot>,
 }
@@ -73,8 +98,16 @@ impl SupervisorSnapshot {
         Self {
             state,
             strategy,
+            total_restarts: 0,
             children,
         }
+    }
+
+    /// Sets the cumulative restart count recorded by this supervisor.
+    #[must_use]
+    pub fn total_restarts(mut self, total_restarts: u64) -> Self {
+        self.total_restarts = total_restarts;
+        self
     }
 
     /// Looks up a direct child by id.

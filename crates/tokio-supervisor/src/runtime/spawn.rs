@@ -109,6 +109,21 @@ impl SupervisorRuntime {
             )
         };
         let child_path_segments = self.child_path(key);
+        // A nested supervisor can be revived after this incarnation ends if
+        // its own policy permits a restart, or if this supervisor can itself
+        // be reincarnated — but reincarnation respawns only the *static*
+        // children; a dynamically added child is orphaned instead, so
+        // ancestor revivability does not propagate across a dynamic edge.
+        // The child's terminality judgments about its own children are final
+        // only when neither condition holds.
+        let statically_configured = nested_channels
+            .as_ref()
+            .is_some_and(|channels| channels.statically_configured());
+        let child_revivable = (self.meta.revivable && statically_configured)
+            || !matches!(
+                self.children[key].runtime.definition.restart,
+                crate::restart::RestartPolicy::Never
+            );
         let nested_run = if matches!(&kind, ChildKind::Supervisor(_)) {
             let channels = nested_channels.ok_or_else(|| {
                 SupervisorError::Internal(format!(
@@ -163,7 +178,13 @@ impl SupervisorRuntime {
                         let (parent_link, channels, child_path_segments) =
                             nested_run.expect("nested run state validated before spawn");
                         supervisor
-                            .run_as_child(ctx, parent_link, channels, child_path_segments)
+                            .run_as_child(
+                                ctx,
+                                parent_link,
+                                channels,
+                                child_path_segments,
+                                child_revivable,
+                            )
                             .await
                     }
                 };
