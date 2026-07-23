@@ -169,15 +169,24 @@ Two properties make the pattern work:
 - **Mailbox ordering.** The task sends the resolution message and waits for
   the mailbox to accept it *before* completing the caller's reply. Anything
   the caller sends after seeing the reply is queued behind the resolution in
-  the actor's FIFO mailbox, so the actor never processes a follow-up before
-  recording the outcome it follows.
+  the actor's FIFO mailbox, so within a single actor incarnation a
+  follow-up is never processed before the outcome it follows.
 
-The spawned task is not bound to the actor's lifecycle. If the actor
-restarts while a call is in flight, the task keeps running and its
-resolution message is delivered to the new incarnation, which must be
-prepared to drop resolutions for keys it no longer knows. When per-callee
-state outgrows what a resolution message can carry, promote the callee to a
-dedicated child actor and let supervision manage its lifecycle instead.
+The spawned task is not bound to the actor's lifecycle, and the ordering
+above is a same-incarnation guarantee. If the actor restarts while a call
+is in flight, the task keeps running, but its resolution message is subject
+to the at-most-once contract described above: accepted by the old
+incarnation's mailbox and not yet handled, it is lost with that
+incarnation; sent after the restart, it is delivered to the new
+incarnation, which has no matching in-flight state. Two rules keep this
+safe. Correlation keys must be unique across incarnations — drawn from
+restart-stable state, not from a counter that resets with the actor — so a
+stale resolution can never alias a new request's state and an unmatched one
+can simply be dropped. And an outcome that must survive the actor needs
+durable state or a reconciliation path; otherwise a lost resolution leaves
+the request unknown forever. When per-callee state outgrows what a
+resolution message can carry, promote the callee to a dedicated child actor
+and let supervision manage its lifecycle instead.
 
 Not every handler needs this treatment. A serial batch operation that
 mutates actor state between calls — a reconciliation sweep run while

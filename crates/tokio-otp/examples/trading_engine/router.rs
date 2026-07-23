@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -33,7 +33,10 @@ struct OrderIntent {
 
 #[derive(Clone)]
 pub struct OrderRouter {
-    sequence: u64,
+    /// Shared across incarnations (like `intake_gate`), not per-incarnation
+    /// state: order keys are idempotency keys and correlate pipelined
+    /// resolutions, so they must never repeat after a router restart.
+    sequence: Arc<AtomicU64>,
     intents: HashMap<OrderKey, OrderIntent>,
     gateways: HashMap<VenueId, ActorRef<GatewayMsg>>,
     ledger: ActorRef<LedgerMsg>,
@@ -45,9 +48,10 @@ impl OrderRouter {
         gateways: HashMap<VenueId, ActorRef<GatewayMsg>>,
         ledger: ActorRef<LedgerMsg>,
         intake_gate: Arc<AtomicBool>,
+        sequence: Arc<AtomicU64>,
     ) -> Self {
         Self {
-            sequence: 0,
+            sequence,
             intents: HashMap::new(),
             gateways,
             ledger,
@@ -64,8 +68,13 @@ impl OrderRouter {
 // therefore pipeline the call: `handle` records intent and spawns the
 // deadline-bounded call, the spawned task completes the caller's `Reply`,
 // and the router learns the outcome through an ordinary `SubmitResolved`
-// message. The spawned task outlives a router restart; a resolution that
-// arrives at a fresh incarnation finds no matching intent and is dropped.
+// message. The spawned task outlives a router restart, so resolutions
+// correlate by order key alone and the key sequence is shared across
+// incarnations: a stale resolution can never alias a fresh incarnation's
+// intent — it finds no matching key and is dropped. A resolution accepted by
+// the old incarnation's mailbox but not yet handled is lost with it
+// (at-most-once delivery); in a real system reconciliation would eventually
+// resolve the intent it leaves pending.
 impl Actor for OrderRouter {
     type Msg = RouterMsg;
 
@@ -81,8 +90,7 @@ impl Actor for OrderRouter {
                     reply.send(SubmitResult::IntakeClosed);
                     return Ok(());
                 }
-                self.sequence += 1;
-                let key = format!("ord-{}", self.sequence);
+                let key = format!("ord-{}", self.sequence.fetch_add(1, Ordering::Relaxed) + 1);
                 self.intents.insert(
                     key.clone(),
                     OrderIntent {
@@ -118,7 +126,8 @@ impl Actor for OrderRouter {
                     };
                     // Queue the state update before releasing the caller so a
                     // follow-up sent after the reply (a cancel, a reconcile)
-                    // is ordered behind it in the router's FIFO mailbox.
+                    // is ordered behind it in the router's FIFO mailbox — a
+                    // same-incarnation guarantee; see the note on the impl.
                     let _ = myself
                         .send(RouterMsg::SubmitResolved { key, disposition })
                         .await;

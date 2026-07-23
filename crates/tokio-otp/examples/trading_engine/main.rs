@@ -119,7 +119,7 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -275,7 +275,18 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     core.define(router_slot, {
         let ledger = ledger.clone();
         let intake_gate = intake_gate.clone();
-        move || OrderRouter::new(gateways.clone(), ledger.clone(), intake_gate.clone())
+        // Order keys correlate the router's pipelined gateway calls, so the
+        // sequence lives outside the per-incarnation state: keys must stay
+        // unique across router restarts (see router.rs).
+        let sequence = Arc::new(AtomicU64::new(0));
+        move || {
+            OrderRouter::new(
+                gateways.clone(),
+                ledger.clone(),
+                intake_gate.clone(),
+                sequence.clone(),
+            )
+        }
     });
     core.define(control_slot, {
         let intake_gate = intake_gate.clone();
