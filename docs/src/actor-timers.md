@@ -58,6 +58,25 @@ that incarnation stops, restarts, or observes shutdown. A timer task waiting
 for mailbox capacity is cancelled too, so it cannot follow the actor's stable
 ref and leak a stale message into the next incarnation.
 
+## Cross-actor timers
+
+`send_after_to` and `interval_to` are the cross-actor forms of `send_after`
+and `interval`: they take an `ActorRef<T>` and deliver the message to that
+actor's mailbox instead of the scheduler's own.
+
+```rust,ignore
+ctx.send_after_to(&ledger, LedgerMsg::Expire { key }, Duration::from_secs(30));
+ctx.interval_to(&monitor, MonitorMsg::Heartbeat, Duration::from_secs(5));
+```
+
+Lifecycle binding stays with the *scheduling* actor: the timer is cancelled
+when the scheduler's incarnation stops or restarts, exactly like a self timer.
+It is not bound to the target's lifecycle. A target that restarts before the
+timer fires receives the message in its next incarnation, so cross-actor timer
+messages should carry a key or generation the target's handler can use to
+reject deliveries it no longer expects. An interval stops only if the target
+terminates permanently.
+
 ## State timeouts
 
 Rust enums already make actor state machines explicit. `state_timeout` adds

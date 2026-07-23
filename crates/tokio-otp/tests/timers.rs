@@ -544,3 +544,175 @@ async fn interval_waits_for_mailbox_capacity_and_skips_missed_ticks() {
 
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }
+
+#[derive(Clone)]
+struct Sink {
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl RawActor for Sink {
+    type Msg = &'static str;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("observer alive");
+        }
+        Ok(())
+    }
+}
+
+fn build_cross_runtime<F>(
+    scheduler: impl FnOnce(ActorRef<&'static str>) -> F,
+) -> (
+    Runtime,
+    ActorRef<<F::Actor as RawActor>::Msg>,
+    mpsc::UnboundedReceiver<&'static str>,
+)
+where
+    F: ActorFactory,
+{
+    let (observed_tx, observed_rx) = mpsc::unbounded_channel();
+    let mut builder = GraphBuilder::new();
+    let sink_ref = builder.actor("sink", move || Sink {
+        observed: observed_tx.clone(),
+    });
+    let scheduler_ref = builder.actor("scheduler", scheduler(sink_ref));
+    let graph = builder.build().expect("valid graph");
+    let runtime = tokio_otp::SupervisedActors::new(graph)
+        .build_runtime(SupervisorBuilder::new().strategy(Strategy::OneForOne))
+        .expect("runtime builds");
+    (runtime, scheduler_ref, observed_rx)
+}
+
+#[derive(Clone)]
+struct CrossScheduler {
+    target: ActorRef<&'static str>,
+}
+
+impl RawActor for CrossScheduler {
+    type Msg = ();
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let _timer = ctx.send_after_to(&self.target, "cross", Duration::from_millis(20));
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn send_after_to_delivers_to_the_target_actor() {
+    let (runtime, _, mut observed_rx) = build_cross_runtime(|target| {
+        move || CrossScheduler {
+            target: target.clone(),
+        }
+    });
+    let handle = runtime.spawn();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("cross-actor timer fired"),
+        Some("cross")
+    );
+    assert!(
+        timeout(Duration::from_millis(60), observed_rx.recv())
+            .await
+            .is_err(),
+        "one-shot cross-actor timer must not fire twice"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
+struct RestartingCrossScheduler {
+    target: ActorRef<&'static str>,
+    runs: Arc<AtomicUsize>,
+}
+
+impl RawActor for RestartingCrossScheduler {
+    type Msg = ();
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
+            let _old = ctx.send_after_to(&self.target, "old", Duration::from_millis(150));
+            return Err::<(), BoxError>(Box::new(io::Error::other("restart")));
+        }
+
+        let _new = ctx.send_after_to(&self.target, "new", Duration::from_millis(10));
+        while ctx.recv().await.is_some() {}
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_cancels_previous_incarnations_cross_actor_timer() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (runtime, _, mut observed_rx) = build_cross_runtime(|target| {
+        move || RestartingCrossScheduler {
+            target: target.clone(),
+            runs: runs.clone(),
+        }
+    });
+    let handle = runtime.spawn();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("new incarnation cross-actor timer fired"),
+        Some("new")
+    );
+    assert!(
+        timeout(Duration::from_millis(200), observed_rx.recv())
+            .await
+            .is_err(),
+        "a previous scheduler incarnation delivered a stale cross-actor message"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone)]
+struct CrossInterval {
+    target: ActorRef<&'static str>,
+}
+
+impl RawActor for CrossInterval {
+    type Msg = ();
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let timer = ctx.interval_to(&self.target, "tick", Duration::from_millis(10));
+        while ctx.recv().await.is_some() {
+            timer.cancel();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn interval_to_repeats_until_cancelled() {
+    let (runtime, scheduler_ref, mut observed_rx) = build_cross_runtime(|target| {
+        move || CrossInterval {
+            target: target.clone(),
+        }
+    });
+    let handle = runtime.spawn();
+
+    for _ in 1..=3 {
+        assert_eq!(
+            timeout(Duration::from_secs(1), observed_rx.recv())
+                .await
+                .expect("cross-actor interval ticked"),
+            Some("tick")
+        );
+    }
+    scheduler_ref.send(()).await.expect("scheduler alive");
+    assert!(
+        timeout(Duration::from_millis(50), observed_rx.recv())
+            .await
+            .is_err(),
+        "cross-actor interval continued after cancellation"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
