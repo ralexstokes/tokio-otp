@@ -202,7 +202,7 @@ impl Supervisor {
             path,
             parent_link,
         );
-        runtime
+        let result = runtime
             .run(startup_ready)
             .instrument(info_span!(
                 "supervisor",
@@ -210,7 +210,9 @@ impl Supervisor {
                 supervisor_path = %supervisor_path,
                 strategy,
             ))
-            .await
+            .await;
+        runtime.finalize_stable_channels();
+        result
     }
 
     pub(crate) fn stable_channels(&self) -> Arc<StableSupervisorChannels> {

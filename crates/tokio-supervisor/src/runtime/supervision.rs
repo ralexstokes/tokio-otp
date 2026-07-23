@@ -178,9 +178,9 @@ pub(crate) struct SupervisorRuntime {
     pub(crate) task_map: HashMap<Id, TaskMeta>,
     pub(crate) pending_exit: Option<Result<(), SupervisorError>>,
     pub(crate) restart_epoch: u64,
-    /// Cumulative failure-triggered restarts recorded across all direct
-    /// children (including since-removed ones); exposed on snapshots as
-    /// [`SupervisorSnapshot::total_restarts`].
+    /// Cumulative restarts scheduled across all direct children (including
+    /// since-removed ones), seeded from the previous incarnation for nested
+    /// supervisors; exposed as [`SupervisorSnapshot::total_restarts`].
     pub(crate) total_restarts: u64,
 }
 
@@ -225,6 +225,11 @@ impl SupervisorRuntime {
             children_by_id.insert(id.clone(), key);
             child_order.push(key);
         }
+        // Nested incarnations reuse the stable snapshot channel, so resume the
+        // cumulative restart counter from the previous incarnation's final
+        // snapshot; a fresh root channel holds the initial snapshot (zero).
+        // This keeps `total_restarts` monotonic across incarnations.
+        let total_restarts = snapshots.borrow().total_restarts;
         let nested_snapshot_capacity = config
             .control_channel_capacity
             .max(config.event_channel_capacity);
@@ -267,7 +272,7 @@ impl SupervisorRuntime {
             task_map: HashMap::new(),
             pending_exit: None,
             restart_epoch: 0,
-            total_restarts: 0,
+            total_restarts,
         }
     }
 
@@ -497,6 +502,9 @@ impl SupervisorRuntime {
             if startup_aborted {
                 self.publish_snapshot();
             }
+            // Skipped by the group respawn and never restarted afterwards:
+            // this child can never run again.
+            self.mark_child_terminal(key);
             return true;
         }
         false
@@ -636,6 +644,23 @@ impl SupervisorRuntime {
     pub(crate) fn finish(&mut self) {
         self.state = SupervisorState::Stopped;
         self.send_event(SupervisorEvent::SupervisorStopped);
+    }
+
+    /// Called once the runtime loop has exited (graceful stop or fatal
+    /// error). A root supervisor can never run again, so every nested child
+    /// is terminal: close their stable channels. A nested supervisor skips
+    /// this — its stop may be a restart cycle, and the parent marks it (and,
+    /// recursively, its descendants) terminal only when it will never be
+    /// respawned.
+    pub(crate) fn finalize_stable_channels(&self) {
+        if self.meta.parent_link.is_some() {
+            return;
+        }
+        for (_, entry) in self.children.iter() {
+            if let Some(channels) = entry.nested_channels.as_ref() {
+                channels.terminal();
+            }
+        }
     }
 
     fn handle_nested_snapshot(&mut self, notification: NestedSnapshotNotification) {
@@ -905,6 +930,9 @@ impl SupervisorRuntime {
                 .lock()
                 .expect("nested channel map poisoned")
                 .remove(&entry.id);
+            if let Some(channels) = entry.nested_channels.as_ref() {
+                channels.terminal();
+            }
         }
         self.send_event(SupervisorEvent::ChildRemoved { id: entry.id });
     }
@@ -973,12 +1001,27 @@ impl SupervisorRuntime {
                 Strategy::OneForAll => self.handle_one_for_all_restart(classified.key).await?,
                 Strategy::RestForOne => self.handle_rest_for_one_restart(classified.key).await?,
             }
-        } else if allow_restart && !self.children[classified.key].runtime.has_reported_ready {
-            self.children[classified.key].runtime.startup_aborted = true;
-            self.publish_snapshot();
+        } else if allow_restart {
+            if !self.children[classified.key].runtime.has_reported_ready {
+                self.children[classified.key].runtime.startup_aborted = true;
+                self.publish_snapshot();
+            }
+            // The exit will not be restarted, so this child can never run
+            // again: close its stable channels.
+            self.mark_child_terminal(classified.key);
         }
 
         Ok(())
+    }
+
+    /// Marks a permanently stopped nested-supervisor child's stable channels
+    /// as terminal. No-op for task children.
+    fn mark_child_terminal(&self, key: ChildKey) {
+        if let Some(entry) = self.children.get(key)
+            && let Some(channels) = entry.nested_channels.as_ref()
+        {
+            channels.terminal();
+        }
     }
 
     fn auto_shutdown_triggered(&self, exited_key: ChildKey, status: &ExitStatus) -> bool {

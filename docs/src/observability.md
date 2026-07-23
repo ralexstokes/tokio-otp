@@ -64,10 +64,14 @@ tokio::spawn(async move {
 
 `RestartWatch` tracks the monotonic `total_restarts` counter over the lossless
 snapshot channel, so it cannot miss a restart the way an event subscriber can.
-The `trading_engine` example's phase-7 breaker is built this way. Note that
-the counter records failure-triggered restarts (the same occurrences the
-restart-intensity window tracks); under `OneForAll`, sibling respawns caused
-by another child's failure do not increment it.
+Nested supervisors carry the counter across their own incarnations, so a watch
+on a restart-stable handle keeps working through restarts of the watched
+supervisor itself, and `next()` returns `None` once the supervisor can never
+restart a child again. The `trading_engine` example's phase-7 breaker is built
+this way. Note that the counter records scheduled restarts — the same
+occurrences the restart-intensity window records, including clean exits
+restarted under `RestartPolicy::Always`; under `OneForAll`, sibling respawns
+caused by another child's exit do not increment it.
 
 ## Tracing And Stats
 

@@ -122,12 +122,15 @@ impl RestartWatch {
     /// Waits until the supervisor records further restarts and returns how
     /// many were recorded since the previous observation.
     ///
-    /// Returns `None` once the supervisor has stopped and every recorded
-    /// restart has been reported. If the watched supervisor is a nested child
-    /// that is itself restarted by its parent, its counter restarts from zero;
-    /// the watch resynchronizes its baseline and continues counting restarts
-    /// of the new incarnation. (The nested supervisor's own restart is counted
-    /// by the parent supervisor, not here.)
+    /// A nested supervisor carries the counter across its own incarnations,
+    /// so a watch on a restart-stable handle keeps reporting deltas through
+    /// restarts of the watched supervisor itself. (The nested supervisor's
+    /// own restart is counted by the parent supervisor, not here.)
+    ///
+    /// Returns `None` once every recorded restart has been reported and the
+    /// supervisor can never restart a child again: the root supervisor
+    /// stopped, or a watched nested supervisor became terminal (it exited
+    /// without being restarted, was removed, or its parent stopped).
     pub async fn next(&mut self) -> Option<u64> {
         loop {
             if let Some(delta) = self.observe() {
@@ -142,12 +145,10 @@ impl RestartWatch {
 
     fn observe(&mut self) -> Option<u64> {
         let total = self.snapshots.borrow_and_update().total_restarts;
-        if total < self.observed {
-            // A new incarnation of the supervisor reset the counter.
-            self.observed = total;
-            return None;
-        }
-        let delta = total - self.observed;
+        // The counter is monotonic, even across nested-supervisor
+        // incarnations; treat a (theoretically impossible) regression as a
+        // fresh baseline rather than reporting a bogus delta.
+        let delta = total.saturating_sub(self.observed);
         self.observed = total;
         (delta > 0).then_some(delta)
     }

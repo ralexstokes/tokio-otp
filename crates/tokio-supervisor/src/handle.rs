@@ -73,10 +73,21 @@ struct IncarnationBinding {
 pub(crate) type NestedHandles = Arc<Mutex<HashMap<String, SupervisorHandle>>>;
 pub(crate) type NestedChannels = Arc<Mutex<HashMap<String, Arc<StableSupervisorChannels>>>>;
 
+/// Stable snapshot channel for a nested supervisor.
+///
+/// The sender is dropped when the supervisor child becomes terminal (it can
+/// never run again), which closes the channel for watch-style consumers such
+/// as [`RestartWatch`]. The retained receiver keeps serving the final snapshot
+/// to [`SupervisorHandle::snapshot`] / `subscribe_snapshots` afterwards.
+struct SnapshotSlot {
+    tx: Option<watch::Sender<SupervisorSnapshot>>,
+    rx: watch::Receiver<SupervisorSnapshot>,
+}
+
 pub(crate) struct StableSupervisorChannels {
     binding: Mutex<Option<IncarnationBinding>>,
     events_tx: broadcast::Sender<SupervisorEvent>,
-    snapshots_tx: watch::Sender<SupervisorSnapshot>,
+    snapshots: Mutex<SnapshotSlot>,
     nested_handles: NestedHandles,
     nested_channels: NestedChannels,
 }
@@ -89,11 +100,14 @@ impl StableSupervisorChannels {
         nested_channels: NestedChannels,
     ) -> Arc<Self> {
         let (events_tx, _) = broadcast::channel(event_capacity);
-        let (snapshots_tx, _) = watch::channel(initial_snapshot);
+        let (snapshots_tx, snapshots_rx) = watch::channel(initial_snapshot);
         Arc::new(Self {
             binding: Mutex::new(None),
             events_tx,
-            snapshots_tx,
+            snapshots: Mutex::new(SnapshotSlot {
+                tx: Some(snapshots_tx),
+                rx: snapshots_rx,
+            }),
             nested_handles,
             nested_channels,
         })
@@ -136,7 +150,52 @@ impl StableSupervisorChannels {
     }
 
     pub(crate) fn snapshots(&self) -> watch::Sender<SupervisorSnapshot> {
-        self.snapshots_tx.clone()
+        let slot = self
+            .snapshots
+            .lock()
+            .expect("stable snapshot slot poisoned");
+        match &slot.tx {
+            Some(tx) => tx.clone(),
+            // Terminal: no incarnation can run, so no publisher should exist.
+            // Hand out a detached sender so a stray publish goes nowhere.
+            None => watch::channel(slot.rx.borrow().clone()).0,
+        }
+    }
+
+    pub(crate) fn snapshots_rx(&self) -> watch::Receiver<SupervisorSnapshot> {
+        let slot = self
+            .snapshots
+            .lock()
+            .expect("stable snapshot slot poisoned");
+        match &slot.tx {
+            Some(tx) => tx.subscribe(),
+            None => slot.rx.clone(),
+        }
+    }
+
+    /// Marks this supervisor child as terminal: no future incarnation will
+    /// ever run. Drops the stable snapshot sender so watch-style consumers
+    /// observe channel closure, and cascades to nested descendants, which can
+    /// never run again either.
+    pub(crate) fn terminal(&self) {
+        let tx = self
+            .snapshots
+            .lock()
+            .expect("stable snapshot slot poisoned")
+            .tx
+            .take();
+        drop(tx);
+
+        let descendants: Vec<_> = self
+            .nested_channels
+            .lock()
+            .expect("nested channel map poisoned")
+            .values()
+            .cloned()
+            .collect();
+        for channels in descendants {
+            channels.terminal();
+        }
     }
 
     pub(crate) fn nested_handles(&self) -> NestedHandles {
@@ -595,7 +654,7 @@ impl SupervisorHandle {
     fn snapshots_rx(&self) -> watch::Receiver<SupervisorSnapshot> {
         match &self.kind {
             HandleKind::Root(root) => root.snapshots_rx.clone(),
-            HandleKind::Stable(stable) => stable.snapshots_tx.subscribe(),
+            HandleKind::Stable(stable) => stable.snapshots_rx(),
         }
     }
 

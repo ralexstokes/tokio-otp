@@ -25,15 +25,20 @@ pub struct SupervisorSnapshot {
     pub state: SupervisorStateView,
     /// The restart strategy in use.
     pub strategy: Strategy,
-    /// Cumulative number of restarts recorded by this supervisor over its
-    /// lifetime, counting one restart per failure-triggered child restart —
-    /// the same occurrences the restart-intensity window tracks.
+    /// Cumulative number of restarts this supervisor has scheduled for its
+    /// direct children — exactly the occurrences the restart-intensity window
+    /// records. That includes clean exits restarted under
+    /// [`RestartPolicy::Always`](crate::RestartPolicy::Always); under group
+    /// strategies such as [`Strategy::OneForAll`], sibling respawns caused by
+    /// another child's exit do not increment it — only the exiting child's
+    /// scheduled restart counts.
     ///
-    /// Unlike the per-child [`ChildSnapshot::restart_count`], this counter is
-    /// monotonic for the life of the supervisor: it keeps the restarts of
-    /// children that have since been removed. Under group strategies such as
-    /// [`Strategy::OneForAll`], sibling respawns caused by another child's
-    /// failure do not increment it — only the failing child's restart counts.
+    /// The counter is monotonic for the supervisor's stable identity. Unlike
+    /// the per-child [`ChildSnapshot::restart_count`], it keeps the restarts
+    /// of children that have since been removed, and a nested supervisor
+    /// carries it across its own incarnations: a replacement incarnation
+    /// resumes from its predecessor's count (the nested supervisor's own
+    /// restart increments the parent's counter).
     ///
     /// Because snapshots are delivered over a `watch` channel (which conflates
     /// intermediate values but never lags), deltas of this counter are a
@@ -42,9 +47,7 @@ pub struct SupervisorSnapshot {
     /// channel. See [`SupervisorHandle::watch_restarts`](crate::SupervisorHandle::watch_restarts).
     ///
     /// The counter only covers direct children. Restarts inside a nested
-    /// supervisor are visible on that nested snapshot's own `total_restarts`
-    /// (and reset when the parent restarts the nested supervisor itself, which
-    /// increments the parent's counter instead).
+    /// supervisor are visible on that nested snapshot's own `total_restarts`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub total_restarts: u64,
     /// Ordered list of child snapshots, matching the supervisor's child order.
