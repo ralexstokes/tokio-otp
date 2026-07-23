@@ -168,22 +168,10 @@ impl RuntimeBuilder {
 
         match self.graph {
             Some(graph) => {
-                let actor_factory = graph.dynamic_factory();
-                let actors = graph.actors().to_vec();
                 let supervised = SupervisedActors::new(graph)
                     .restart(self.restart)
                     .shutdown(self.shutdown);
-                let children = supervised.build();
-                let supervisor = children
-                    .into_iter()
-                    .fold(supervisor, |builder, child| builder.child(child))
-                    .build()?;
-                Ok(Runtime::with_actor_tree(
-                    supervisor,
-                    actor_factory,
-                    actors,
-                    subtrees,
-                ))
+                supervised.build_runtime_with_subtrees(supervisor, subtrees)
             }
             None => {
                 let supervisor = supervisor.build()?;

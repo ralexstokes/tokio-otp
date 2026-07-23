@@ -115,7 +115,10 @@ recursive `actor_stats()` result.
 For a raw nested `Supervisor` that was not built as a runtime subtree, use
 `Graph::dynamic_factory`, `RuntimeHandle::supervisor`, and
 `SupervisorHandleExt` as the lower-level escape hatch. Actors added through
-that raw path are not part of runtime actor stats.
+that raw path are not part of runtime actor stats. Raw removals also bypass the
+runtime registry's immediate bookkeeping; the next `actor_stats()` sample
+reconciles tracked entries against the supervisor snapshot and prunes removed
+children.
 
 ## Name-based discovery, when you want it
 

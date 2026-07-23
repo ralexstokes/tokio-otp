@@ -154,12 +154,19 @@ async fn runtime_builder_composes_subtrees_with_recursive_actor_stats() {
     let root_ref = root_graph.actor("root-worker", Drain::<()>::new);
     let mut nested_graph = GraphBuilder::new();
     let nested_ref = nested_graph.actor("nested-worker", Drain::<()>::new);
+    let mut leaf_graph = GraphBuilder::new();
+    let leaf_ref = leaf_graph.actor("leaf-worker", Drain::<()>::new);
 
     let runtime = Runtime::builder()
         .graph(root_graph.build().expect("valid root graph"))
         .subtree(
             "workers",
-            Runtime::builder().graph(nested_graph.build().expect("valid nested graph")),
+            Runtime::builder()
+                .graph(nested_graph.build().expect("valid nested graph"))
+                .subtree(
+                    "leaf",
+                    Runtime::builder().graph(leaf_graph.build().expect("valid leaf graph")),
+                ),
         )
         .build()
         .expect("nested runtime builds");
@@ -168,16 +175,38 @@ async fn runtime_builder_composes_subtrees_with_recursive_actor_stats() {
 
     root_ref.send(()).await.expect("root message sent");
     nested_ref.send(()).await.expect("nested message sent");
+    leaf_ref.send(()).await.expect("leaf message sent");
 
     let actor_ids = handle
         .actor_stats()
         .into_iter()
         .map(|stats| stats.actor_id)
         .collect::<Vec<_>>();
-    assert_eq!(actor_ids, ["root-worker", "nested-worker"]);
+    assert_eq!(actor_ids, ["root-worker", "nested-worker", "leaf-worker"]);
 
     let subtree = handle.subtree("workers").expect("actor-aware subtree");
-    assert_eq!(subtree.actor_stats(), vec![nested_ref.stats()]);
+    assert_eq!(
+        subtree.actor_stats(),
+        vec![nested_ref.stats(), leaf_ref.stats()]
+    );
+    assert_eq!(
+        subtree
+            .subtree("leaf")
+            .expect("recursive actor-aware subtree")
+            .actor_stats(),
+        vec![leaf_ref.stats()]
+    );
+
+    handle
+        .add_supervisor(
+            "raw",
+            SupervisorBuilder::new()
+                .build()
+                .expect("raw supervisor builds"),
+        )
+        .await
+        .expect("raw supervisor added");
+    assert!(handle.subtree("raw").is_none());
 
     let dynamic = subtree
         .add_actor(
@@ -197,9 +226,10 @@ async fn runtime_builder_composes_subtrees_with_recursive_actor_stats() {
     );
 
     subtree
+        .supervisor_handle()
         .remove_child("dynamic-worker")
         .await
-        .expect("nested actor removed");
+        .expect("nested actor removed through raw handle");
     assert!(
         handle
             .actor_stats()
@@ -208,11 +238,71 @@ async fn runtime_builder_composes_subtrees_with_recursive_actor_stats() {
     );
 
     handle
+        .supervisor_handle()
         .remove_child("workers")
         .await
-        .expect("subtree removed");
+        .expect("subtree removed through raw handle");
     assert_eq!(handle.actor_stats(), vec![root_ref.stats()]);
     assert!(handle.subtree("workers").is_none());
+
+    handle
+        .remove_child("raw")
+        .await
+        .expect("raw supervisor removed");
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("supervisor shut down cleanly");
+}
+
+#[tokio::test]
+async fn recursive_stats_prune_dynamic_actors_lost_on_subtree_restart() {
+    let mut nested_graph = GraphBuilder::new();
+    let static_ref = nested_graph.actor("static-worker", || FailOnMessage);
+    let runtime = Runtime::builder()
+        .subtree(
+            "workers",
+            Runtime::builder()
+                .graph(nested_graph.build().expect("valid nested graph"))
+                .restart_intensity(RestartIntensity::new(0, Duration::from_secs(60))),
+        )
+        .build()
+        .expect("nested runtime builds");
+    let handle = runtime.spawn();
+    handle.wait_started().await.expect("runtime started");
+
+    let subtree = handle.subtree("workers").expect("actor-aware subtree");
+    let dynamic_ref = subtree
+        .add_actor(
+            "dynamic-worker",
+            Drain::<()>::new,
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("dynamic actor added");
+    assert!(
+        handle
+            .actor_stats()
+            .iter()
+            .any(|stats| stats.actor_id == "dynamic-worker")
+    );
+
+    let restart = handle
+        .monitor_restart("workers")
+        .expect("subtree child is known");
+    static_ref.send(()).await.expect("failure triggered");
+    timeout(Duration::from_secs(1), restart.into_future())
+        .await
+        .expect("subtree restarted within timeout")
+        .expect("subtree restart succeeded");
+
+    let stats = handle.actor_stats();
+    assert_eq!(stats, vec![static_ref.stats()]);
+    assert!(matches!(
+        dynamic_ref.send(()).await,
+        Err(SendError::ActorTerminated { .. })
+    ));
 
     handle
         .shutdown_and_wait()

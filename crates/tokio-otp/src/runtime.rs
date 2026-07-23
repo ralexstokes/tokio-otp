@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     future::Future,
     sync::{
         Arc, Mutex,
@@ -39,7 +40,23 @@ impl ActorRuntimeState {
         }
     }
 
-    fn actor_stats(&self) -> Vec<ActorStats> {
+    fn actor_stats(&self, supervisor: &SupervisorHandle) -> Vec<ActorStats> {
+        let snapshot = supervisor.snapshot();
+        let child_ids = snapshot
+            .children
+            .iter()
+            .map(|child| child.id.as_str())
+            .collect::<HashSet<_>>();
+
+        self.actors
+            .lock()
+            .expect("actor stats lock poisoned")
+            .retain(|actor| child_ids.contains(actor.label()));
+        self.subtrees
+            .lock()
+            .expect("actor subtree lock poisoned")
+            .retain(|(id, _)| child_ids.contains(id.as_str()));
+
         let mut stats = self
             .actors
             .lock()
@@ -52,10 +69,12 @@ impl ActorRuntimeState {
             .lock()
             .expect("actor subtree lock poisoned")
             .iter()
-            .map(|(_, subtree)| Arc::clone(subtree))
+            .map(|(id, subtree)| (id.clone(), Arc::clone(subtree)))
             .collect::<Vec<_>>();
-        for subtree in subtrees {
-            stats.extend(subtree.actor_stats());
+        for (id, subtree) in subtrees {
+            if let Some(supervisor) = supervisor.supervisor(&id) {
+                stats.extend(subtree.actor_stats(&supervisor));
+            }
         }
         stats
     }
@@ -236,14 +255,6 @@ impl Runtime {
                 Vec::new(),
             )),
         }
-    }
-
-    pub(crate) fn with_actors(
-        supervisor: Supervisor,
-        actor_factory: RunnableActorFactory,
-        actors: Vec<RunnableActor>,
-    ) -> Self {
-        Self::with_actor_tree(supervisor, actor_factory, actors, Vec::new())
     }
 
     pub(crate) fn with_actor_tree(
@@ -445,9 +456,15 @@ impl RuntimeHandle {
     }
 
     /// Returns point-in-time stats for this runtime and all nested runtime
-    /// subtrees, in depth-first declaration order.
+    /// subtrees. This runtime's actors come first, followed recursively by each
+    /// subtree in declaration order.
+    ///
+    /// Before sampling, tracked actors and subtrees are reconciled against the
+    /// current supervisor snapshot. This removes stale entries after raw child
+    /// removal or when a restarted subtree drops incarnation-local dynamic
+    /// children.
     pub fn actor_stats(&self) -> Vec<ActorStats> {
-        self.actors.actor_stats()
+        self.actors.actor_stats(&self.supervisor)
     }
 
     /// Returns a watch receiver that updates when the snapshot changes.
