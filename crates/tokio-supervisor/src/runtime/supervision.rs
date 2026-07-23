@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant as StdInstant},
 };
@@ -215,20 +215,18 @@ impl SupervisorRuntime {
         let mut next_child_instance = 0u64;
 
         let mut displaced: Vec<Arc<StableSupervisorChannels>> = Vec::new();
-        let mut static_supervisor_ids: Vec<String> = Vec::new();
+        let mut handle_map = nested_handles.lock().expect("nested handle map poisoned");
+        let mut channel_map = nested_channels.lock().expect("nested channel map poisoned");
         for spec in config.children {
             let id = spec.id.clone();
             let formatted_path = format_child_path(&path_prefix, &id);
             let child_nested_channels = match &spec.kind {
                 ChildKind::Supervisor(supervisor) => {
-                    static_supervisor_ids.push(id.clone());
                     // Reuse the stable identity only if it was minted for this
                     // static child. A dynamically added child that happens to
                     // share the id is a different identity and must not be
                     // conflated with the recreated static child.
-                    let reusable = nested_channels
-                        .lock()
-                        .expect("nested channel map poisoned")
+                    let reusable = channel_map
                         .get(&id)
                         .filter(|channels| channels.statically_configured())
                         .cloned();
@@ -238,14 +236,8 @@ impl SupervisorRuntime {
                         // dynamically added child's channels: mint a fresh
                         // static identity, displacing any dynamic occupant.
                         let stable = supervisor.stable_channels(true);
-                        nested_handles
-                            .lock()
-                            .expect("nested handle map poisoned")
-                            .insert(id.clone(), stable.handle());
-                        if let Some(occupant) = nested_channels
-                            .lock()
-                            .expect("nested channel map poisoned")
-                            .insert(id.clone(), Arc::clone(&stable))
+                        handle_map.insert(id.clone(), stable.handle());
+                        if let Some(occupant) = channel_map.insert(id.clone(), Arc::clone(&stable))
                         {
                             displaced.push(occupant);
                         }
@@ -274,22 +266,24 @@ impl SupervisorRuntime {
         // good: no future incarnation spawns them either. Close them, along
         // with any identities displaced above, so their observers terminate
         // instead of hanging.
-        let orphaned: Vec<Arc<StableSupervisorChannels>> = {
-            let mut handle_map = nested_handles.lock().expect("nested handle map poisoned");
-            let mut channel_map = nested_channels.lock().expect("nested channel map poisoned");
-            let orphaned_ids: Vec<String> = channel_map
-                .keys()
-                .filter(|id| !static_supervisor_ids.contains(id))
-                .cloned()
-                .collect();
-            orphaned_ids
-                .into_iter()
-                .filter_map(|id| {
-                    handle_map.remove(&id);
-                    channel_map.remove(&id)
-                })
-                .collect()
-        };
+        let static_supervisor_ids: HashSet<&str> = children
+            .iter()
+            .filter_map(|(_, entry)| entry.nested_channels.as_ref().map(|_| entry.id.as_str()))
+            .collect();
+        let orphaned_ids: Vec<String> = channel_map
+            .keys()
+            .filter(|id| !static_supervisor_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let orphaned: Vec<Arc<StableSupervisorChannels>> = orphaned_ids
+            .into_iter()
+            .filter_map(|id| {
+                handle_map.remove(&id);
+                channel_map.remove(&id)
+            })
+            .collect();
+        drop(channel_map);
+        drop(handle_map);
         for channels in orphaned.into_iter().chain(displaced) {
             channels.terminal();
         }
@@ -724,12 +718,8 @@ impl SupervisorRuntime {
     /// closed either way: a replacement incarnation orphans them rather
     /// than respawning them.
     pub(crate) fn finalize_stable_channels(&self) {
-        for (_, entry) in self.children.iter() {
-            if let Some(channels) = entry.nested_channels.as_ref()
-                && (!self.meta.revivable || !channels.statically_configured())
-            {
-                channels.terminal();
-            }
+        for (key, _) in self.children.iter() {
+            self.mark_child_terminal(key);
         }
     }
 

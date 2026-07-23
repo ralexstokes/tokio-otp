@@ -7,7 +7,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{Notify, mpsc, watch},
+    sync::{Notify, mpsc},
     time::timeout,
 };
 use tokio_supervisor::{
@@ -17,6 +17,20 @@ use tokio_supervisor::{
 };
 
 mod common;
+
+use common::wait_for_snapshot;
+
+#[test]
+fn snapshot_builder_sets_total_restarts() {
+    let snapshot = SupervisorSnapshot::new(
+        SupervisorStateView::Running,
+        tokio_supervisor::Strategy::OneForOne,
+        Vec::new(),
+    )
+    .total_restarts(7);
+
+    assert_eq!(snapshot.total_restarts, 7);
+}
 
 #[tokio::test]
 async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
@@ -392,25 +406,4 @@ fn child_ids(snapshot: &SupervisorSnapshot) -> Vec<&str> {
         .iter()
         .map(|child| child.id.as_str())
         .collect()
-}
-
-async fn wait_for_snapshot(
-    snapshots: &mut watch::Receiver<SupervisorSnapshot>,
-    predicate: impl Fn(&SupervisorSnapshot) -> bool,
-) -> SupervisorSnapshot {
-    if predicate(&snapshots.borrow()) {
-        return snapshots.borrow().clone();
-    }
-
-    loop {
-        timeout(common::EVENT_TIMEOUT, snapshots.changed())
-            .await
-            .expect("timed out waiting for snapshot update")
-            .expect("snapshot stream closed unexpectedly");
-
-        let snapshot = snapshots.borrow().clone();
-        if predicate(&snapshot) {
-            return snapshot;
-        }
-    }
 }

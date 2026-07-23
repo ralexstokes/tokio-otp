@@ -10,10 +10,13 @@ use std::{
 };
 
 use tokio::{
-    sync::{broadcast, mpsc},
+    sync::{Notify, broadcast, mpsc, watch},
     time::timeout,
 };
-use tokio_supervisor::{BoxError, SupervisorEvent};
+use tokio_supervisor::{
+    BoxError, ChildSnapshot, ChildSpec, ChildStateView, RestartIntensity, RestartPolicy,
+    SupervisorEvent, SupervisorHandle, SupervisorSnapshot,
+};
 
 pub const EVENT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const QUIET_TIMEOUT: Duration = Duration::from_millis(150);
@@ -94,4 +97,83 @@ pub async fn recv_supervisor_event(
             panic!("supervisor event stream closed unexpectedly");
         }
     }
+}
+
+pub fn fail_on_generations(
+    id: &'static str,
+    trigger_failure: Arc<Notify>,
+    generations_to_fail: u64,
+) -> ChildSpec {
+    ChildSpec::new(id, move |ctx| {
+        let trigger_failure = trigger_failure.clone();
+        async move {
+            if ctx.generation() < generations_to_fail {
+                trigger_failure.notified().await;
+                return Err(test_error("boom"));
+            }
+
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }
+    })
+    .restart(RestartPolicy::OnFailure)
+}
+
+pub fn failing_child(
+    id: &'static str,
+    trigger_failure: &Arc<Notify>,
+    error: &'static str,
+) -> ChildSpec {
+    let trigger_failure = trigger_failure.clone();
+    ChildSpec::new(id, move |_ctx| {
+        let trigger_failure = trigger_failure.clone();
+        async move {
+            trigger_failure.notified().await;
+            Err(test_error(error))
+        }
+    })
+    .restart(RestartPolicy::OnFailure)
+    .restart_intensity(RestartIntensity::new(0, Duration::from_secs(60)))
+}
+
+pub async fn wait_for_child_running(
+    snapshots: &mut watch::Receiver<SupervisorSnapshot>,
+    id: &str,
+    generation: u64,
+) -> ChildSnapshot {
+    wait_for_snapshot(snapshots, |snapshot| {
+        snapshot.child(id).is_some_and(|child| {
+            child.generation == generation && child.state == ChildStateView::Running
+        })
+    })
+    .await
+    .child(id)
+    .expect("child should exist in matching snapshot")
+    .clone()
+}
+
+pub async fn wait_for_snapshot(
+    snapshots: &mut watch::Receiver<SupervisorSnapshot>,
+    predicate: impl Fn(&SupervisorSnapshot) -> bool,
+) -> SupervisorSnapshot {
+    if predicate(&snapshots.borrow()) {
+        return snapshots.borrow().clone();
+    }
+
+    loop {
+        timeout(EVENT_TIMEOUT, snapshots.changed())
+            .await
+            .expect("timed out waiting for snapshot update")
+            .expect("snapshot stream closed unexpectedly");
+
+        let snapshot = snapshots.borrow().clone();
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+    }
+}
+
+pub async fn shutdown(handle: SupervisorHandle) {
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
 }
