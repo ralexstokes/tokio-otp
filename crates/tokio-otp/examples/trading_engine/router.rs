@@ -10,15 +10,25 @@ use tokio_otp::prelude::*;
 
 use crate::messages::{
     CALL_DEADLINE, CancelOutcome, GatewayMsg, LedgerMsg, OrderKey, PlaceOutcome, QueryOutcome,
-    RouterMsg, SubmitResult, VenueId,
+    RouterMsg, SubmitDisposition, SubmitResult, VenueId,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntentState {
+    /// A pipelined `Place` call is still waiting on the gateway.
+    Pending,
+    /// The venue confirmed the order.
+    Confirmed,
+    /// The `Place` call timed out; only reconciliation can resolve it.
+    Unknown,
+}
 
 #[derive(Clone, Debug)]
 struct OrderIntent {
     venue: VenueId,
     symbol: &'static str,
     qty: i64,
-    unknown: bool,
+    state: IntentState,
 }
 
 #[derive(Clone)]
@@ -46,10 +56,20 @@ impl OrderRouter {
     }
 }
 
+// The router is a fan-out actor, and an actor processes one message at a
+// time: awaiting a gateway `call` inside `handle` would stop the mailbox for
+// the full round-trip, so one stalled venue would block cancels and queries
+// bound for healthy venues for up to CALL_DEADLINE — the actor-model
+// equivalent of blocking in a `gen_server` callback. Submit and Cancel
+// therefore pipeline the call: `handle` records intent and spawns the
+// deadline-bounded call, the spawned task completes the caller's `Reply`,
+// and the router learns the outcome through an ordinary `SubmitResolved`
+// message. The spawned task outlives a router restart; a resolution that
+// arrives at a fresh incarnation finds no matching intent and is dropped.
 impl Actor for OrderRouter {
     type Msg = RouterMsg;
 
-    async fn handle(&mut self, message: RouterMsg, _ctx: &ActorContext<RouterMsg>) -> ActorResult {
+    async fn handle(&mut self, message: RouterMsg, ctx: &ActorContext<RouterMsg>) -> ActorResult {
         match message {
             RouterMsg::Submit {
                 symbol,
@@ -63,70 +83,99 @@ impl Actor for OrderRouter {
                 }
                 self.sequence += 1;
                 let key = format!("ord-{}", self.sequence);
-                let gateway = self.gateways.get(venue).expect("known venue");
-                let result = tokio::time::timeout(
-                    CALL_DEADLINE,
-                    gateway.call(|reply| GatewayMsg::Place {
-                        key: key.clone(),
+                self.intents.insert(
+                    key.clone(),
+                    OrderIntent {
+                        venue,
                         symbol,
                         qty,
-                        reply,
-                    }),
-                )
-                .await;
-                match result {
-                    Ok(Ok(PlaceOutcome::Accepted { .. })) => {
-                        self.intents.insert(
-                            key.clone(),
-                            OrderIntent {
-                                venue,
-                                symbol,
-                                qty,
-                                unknown: false,
-                            },
-                        );
-                        reply.send(SubmitResult::Placed(key));
-                    }
-                    Err(_) => {
-                        self.intents.insert(
-                            key.clone(),
-                            OrderIntent {
-                                venue,
-                                symbol,
-                                qty,
-                                unknown: true,
-                            },
-                        );
-                        reply.send(SubmitResult::Unknown(key));
-                    }
-                    Ok(Err(_)) => reply.send(SubmitResult::Rejected),
-                }
+                        state: IntentState::Pending,
+                    },
+                );
+                let gateway = self.gateways.get(venue).expect("known venue").clone();
+                let myself = ctx.myself();
+                tokio::spawn(async move {
+                    let result = tokio::time::timeout(
+                        CALL_DEADLINE,
+                        gateway.call(|reply| GatewayMsg::Place {
+                            key: key.clone(),
+                            symbol,
+                            qty,
+                            reply,
+                        }),
+                    )
+                    .await;
+                    let (disposition, submitted) = match result {
+                        Ok(Ok(PlaceOutcome::Accepted { .. })) => (
+                            SubmitDisposition::Confirmed,
+                            SubmitResult::Placed(key.clone()),
+                        ),
+                        Err(_) => (
+                            SubmitDisposition::Unknown,
+                            SubmitResult::Unknown(key.clone()),
+                        ),
+                        Ok(Err(_)) => (SubmitDisposition::Rejected, SubmitResult::Rejected),
+                    };
+                    // Queue the state update before releasing the caller so a
+                    // follow-up sent after the reply (a cancel, a reconcile)
+                    // is ordered behind it in the router's FIFO mailbox.
+                    let _ = myself
+                        .send(RouterMsg::SubmitResolved { key, disposition })
+                        .await;
+                    reply.send(submitted);
+                });
             }
+            RouterMsg::SubmitResolved { key, disposition } => match disposition {
+                SubmitDisposition::Confirmed => {
+                    if let Some(intent) = self.intents.get_mut(&key) {
+                        intent.state = IntentState::Confirmed;
+                    }
+                }
+                SubmitDisposition::Unknown => {
+                    if let Some(intent) = self.intents.get_mut(&key) {
+                        intent.state = IntentState::Unknown;
+                    }
+                }
+                SubmitDisposition::Rejected => {
+                    self.intents.remove(&key);
+                }
+            },
             RouterMsg::Cancel { key, reply } => {
                 let Some(intent) = self.intents.get(&key) else {
                     reply.send(CancelOutcome::NotFound);
                     return Ok(());
                 };
-                let gateway = self.gateways.get(intent.venue).expect("known venue");
-                let outcome = match tokio::time::timeout(
-                    CALL_DEADLINE,
-                    gateway.call(|reply| GatewayMsg::Cancel {
-                        key: key.clone(),
-                        reply,
-                    }),
-                )
-                .await
-                {
-                    Ok(Ok(outcome)) => outcome,
-                    Ok(Err(_)) | Err(_) => CancelOutcome::Unknown,
-                };
-                reply.send(outcome);
+                // The exchange needs no router state after the venue lookup,
+                // so the whole call pipelines off the handle loop.
+                let gateway = self
+                    .gateways
+                    .get(intent.venue)
+                    .expect("known venue")
+                    .clone();
+                tokio::spawn(async move {
+                    let outcome = match tokio::time::timeout(
+                        CALL_DEADLINE,
+                        gateway.call(|reply| GatewayMsg::Cancel { key, reply }),
+                    )
+                    .await
+                    {
+                        Ok(Ok(outcome)) => outcome,
+                        Ok(Err(_)) | Err(_) => CancelOutcome::Unknown,
+                    };
+                    reply.send(outcome);
+                });
             }
             RouterMsg::ReconcileAll { reply } => {
+                // Deliberately inline and serial, unlike Submit and Cancel:
+                // reconciliation is an explicit operator-driven sweep run
+                // while intake is quiet, and each query/re-place step mutates
+                // intent state. Serializing the router for the sweep is the
+                // accepted trade-off here; a router that had to stay live
+                // during reconciliation would pipeline these calls too.
                 let unknown = self
                     .intents
                     .iter()
-                    .filter(|(_, intent)| intent.unknown)
+                    .filter(|(_, intent)| intent.state == IntentState::Unknown)
                     .map(|(key, intent)| (key.clone(), intent.clone()))
                     .collect::<Vec<_>>();
                 let mut resolved = 0;
@@ -142,7 +191,8 @@ impl Actor for OrderRouter {
                     .await;
                     match query {
                         Ok(Ok(QueryOutcome::Found(_))) => {
-                            self.intents.get_mut(&key).expect("known intent").unknown = false;
+                            self.intents.get_mut(&key).expect("known intent").state =
+                                IntentState::Confirmed;
                             self.ledger
                                 .send(LedgerMsg::Ack {
                                     key: key.clone(),
@@ -163,7 +213,8 @@ impl Actor for OrderRouter {
                             )
                             .await;
                             if matches!(placed, Ok(Ok(PlaceOutcome::Accepted { .. }))) {
-                                self.intents.get_mut(&key).expect("known intent").unknown = false;
+                                self.intents.get_mut(&key).expect("known intent").state =
+                                    IntentState::Confirmed;
                                 resolved += 1;
                             }
                         }
@@ -175,7 +226,7 @@ impl Actor for OrderRouter {
             RouterMsg::InFlight { reply } => reply.send(
                 self.intents
                     .values()
-                    .filter(|intent| intent.unknown)
+                    .filter(|intent| intent.state != IntentState::Confirmed)
                     .count(),
             ),
         }
