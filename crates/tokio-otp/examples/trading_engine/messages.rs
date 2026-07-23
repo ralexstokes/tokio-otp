@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use tokio::time::Instant;
-use tokio_otp::{Down, MessageSize, Reply};
+use tokio_otp::{MessageSize, MonitorEvent, Reply};
 
 pub type VenueId = &'static str;
 pub type OrderKey = String;
@@ -86,8 +86,7 @@ pub enum OrderStatus {
 #[derive(Debug)]
 pub enum ReconcilerMsg {
     Market(MarketSnapshot),
-    VenueDown { venue: VenueId, down: Down },
-    Remonitor { venue: VenueId },
+    Feed { venue: VenueId, event: MonitorEvent },
     StaleSweep { generation: u64 },
     Status { reply: Reply<ReconcilerStatus> },
 }

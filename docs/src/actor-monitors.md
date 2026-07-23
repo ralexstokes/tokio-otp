@@ -1,14 +1,15 @@
-# Actor monitors
+# Watching actors
 
-An actor can monitor another actor when a request or piece of state depends on
-that peer staying alive. A monitor turns the peer's exit into an ordinary typed
-message in the observer's mailbox:
+An actor can watch another actor when a request or piece of state depends on
+that peer. A watch follows the *logical* actor — the same restart-stable
+identity an `ActorRef` points at — and turns each lifecycle transition into an
+ordinary typed message in the observer's mailbox:
 
 ```rust
-use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, Down};
+use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, MonitorEvent};
 
 enum CoordinatorMsg {
-    WorkerDown(Down),
+    Worker(MonitorEvent),
 }
 
 #[derive(Clone)]
@@ -20,7 +21,7 @@ impl Actor for Coordinator {
     type Msg = CoordinatorMsg;
 
     async fn on_start(&mut self, ctx: &ActorContext<Self::Msg>) -> ActorResult {
-        ctx.monitor(&self.worker, CoordinatorMsg::WorkerDown);
+        ctx.watch(&self.worker, CoordinatorMsg::Worker);
         Ok(())
     }
 
@@ -29,35 +30,79 @@ impl Actor for Coordinator {
         message: Self::Msg,
         _ctx: &ActorContext<Self::Msg>,
     ) -> ActorResult {
-        let CoordinatorMsg::WorkerDown(down) = message;
-        eprintln!(
-            "{} generation {} exited: {:?}",
-            down.actor_id, down.generation, down.reason
-        );
+        let CoordinatorMsg::Worker(event) = message;
+        match event {
+            MonitorEvent::Up { actor_id, generation } => {
+                eprintln!("{actor_id} generation {generation} is up");
+            }
+            MonitorEvent::Down(down) => {
+                eprintln!(
+                    "{} generation {} exited: {:?}",
+                    down.actor_id, down.generation, down.reason
+                );
+            }
+            MonitorEvent::Lagged { actor_id, dropped } => {
+                eprintln!("{actor_id} watch lagged, {dropped} transitions dropped");
+            }
+            MonitorEvent::Terminated { actor_id, .. } => {
+                eprintln!("{actor_id} is permanently gone");
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
 ```
 
-`DownReason::Normal` covers a clean return and cooperative shutdown.
-`DownReason::Failure` covers errors, panics, aborts, and a dropped actor run.
-`DownReason::NoProcess` is delivered immediately when the ref is already
-exited, terminated, or detached. For a never-started actor, the generation in
-a `NoProcess` notification is only a placeholder.
+A watch survives restarts of the watched actor, so it never needs to be
+re-registered while the target lives. Events arrive in lifecycle order:
 
-A monitor targets one incarnation. The first actor run is generation `0`, and
-each restart increments the generation. After receiving `Down`, register a new
-monitor if the observer also needs to watch the replacement incarnation. A
-monitor registered before the target's first start waits for generation `0`,
-which removes actor-start ordering races from a graph.
+- `MonitorEvent::Up` — an incarnation started. The first actor run is
+  generation `0`, and each restart increments the generation. Registering a
+  watch on an already-running target delivers an immediate `Up` for the
+  current incarnation, so the observer always learns the current state.
+- `MonitorEvent::Down` — the current incarnation exited. `DownReason::Normal`
+  covers a clean return and cooperative shutdown; `DownReason::Failure` covers
+  errors, panics, aborts, and a dropped actor run. If the supervisor restarts
+  the actor, a matching `Up` follows.
+- `MonitorEvent::Lagged` — one or more transitions were dropped because the
+  observer could not keep up under sustained overload. This is a
+  resynchronization point, not an edge: treat the events that follow it as the
+  target's current state rather than assuming strict `Up`/`Down` alternation. A
+  healthy observer never sees it.
+- `MonitorEvent::Terminated` — the actor is permanently gone (its binding was
+  terminated, or it was dropped without ever starting). No further events
+  will be delivered.
 
-`ActorContext::monitor` returns a cloneable `MonitorRef`. Calling `cancel` on
-any clone suppresses future delivery. Cancellation cannot retract a `Down`
-message already accepted by the mailbox. All monitors are also cancelled when
-the observing actor stops or restarts, so an old observer incarnation cannot
-inject messages into its replacement.
+A watch registered before the target's first start stays silent until
+generation `0` starts, and a watch registered between incarnations stays
+silent until the next `Up`. This removes actor-start and restart ordering
+races from a graph: there is never a reason to retry registration.
 
-Monitor notifications use the observer's ordinary mailbox. FIFO mailboxes wait
+`ActorContext::watch` returns a cloneable `MonitorRef`. Calling `cancel` on
+any clone suppresses future delivery. Cancellation cannot retract an event
+already accepted by the mailbox. All watches are also cancelled when the
+observing actor stops or restarts, so an old observer incarnation cannot
+inject messages into its replacement; register watches in `on_start` so each
+observer incarnation holds its own.
+
+Watch notifications use the observer's ordinary mailbox. FIFO mailboxes wait
 for capacity and preserve every accepted notification. A conflating mailbox
-may replace an unread monitor message, so use FIFO when every peer exit must be
-observed.
+may replace an unread event with a later one, so use FIFO when every
+transition must be observed.
+
+Undelivered events are held in a bounded per-watch buffer. Under normal load
+this is never a factor — lifecycle events are rare. But if an observer's
+mailbox stays full while its target restarts in a tight loop, the buffer caps
+the memory that can accumulate: the oldest staged events are dropped. The loss
+is never silent — the dropped span is folded into a single `Lagged` marker, so
+the observer learns it fell behind and can resynchronize to the current state
+rather than replaying the entire storm. Because no mailbox mode can guarantee
+that every transition is observed under sustained overload, consumers that
+react to individual transitions should treat `Lagged` as a resync point. The
+terminal `Terminated` event is always the newest event, so it is never
+dropped.
+
+For one-shot, incarnation-scoped monitoring — "tell me if the incarnation I
+am talking to right now dies" — watch the target, act on the first `Down`,
+and cancel the `MonitorRef`.
