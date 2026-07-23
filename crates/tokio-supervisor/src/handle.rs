@@ -177,6 +177,12 @@ impl StableSupervisorChannels {
     /// ever run. Drops the stable snapshot sender so watch-style consumers
     /// observe channel closure, and cascades to nested descendants, which can
     /// never run again either.
+    ///
+    /// Callers must only invoke this for judgments no ancestor reincarnation
+    /// can undo: a root supervisor's decision (a non-restarted exit, or the
+    /// root stopping), removal (which ends the stable identity — a later
+    /// recreation mints a fresh one), or an orphaned dynamic child that no
+    /// incarnation will spawn again.
     pub(crate) fn terminal(&self) {
         let tx = self
             .snapshots

@@ -124,13 +124,18 @@ impl RestartWatch {
     ///
     /// A nested supervisor carries the counter across its own incarnations,
     /// so a watch on a restart-stable handle keeps reporting deltas through
-    /// restarts of the watched supervisor itself. (The nested supervisor's
-    /// own restart is counted by the parent supervisor, not here.)
+    /// restarts of the watched supervisor itself — including restarts of an
+    /// *ancestor*, which recreate the watched supervisor from the static
+    /// configuration. (The nested supervisor's own restart is counted by the
+    /// parent supervisor, not here.)
     ///
     /// Returns `None` once every recorded restart has been reported and the
-    /// supervisor can never restart a child again: the root supervisor
-    /// stopped, or a watched nested supervisor became terminal (it exited
-    /// without being restarted, was removed, or its parent stopped).
+    /// watched supervisor's stable identity can never produce another
+    /// incarnation: the root supervisor stopped, the watched supervisor (or
+    /// an ancestor) was removed, or it stopped by a decision no ancestor
+    /// reincarnation can undo. A nested supervisor that is merely stopped
+    /// under a live, restartable ancestor keeps the watch open — a later
+    /// ancestor restart revives it and the watch resumes reporting.
     pub async fn next(&mut self) -> Option<u64> {
         loop {
             if let Some(delta) = self.observe() {

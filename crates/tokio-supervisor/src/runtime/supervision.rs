@@ -208,11 +208,32 @@ impl SupervisorRuntime {
         for spec in config.children {
             let id = spec.id.clone();
             let formatted_path = format_child_path(&path_prefix, &id);
-            let child_nested_channels = nested_channels
-                .lock()
-                .expect("nested channel map poisoned")
-                .get(&id)
-                .cloned();
+            let child_nested_channels = match &spec.kind {
+                ChildKind::Supervisor(supervisor) => {
+                    let existing = nested_channels
+                        .lock()
+                        .expect("nested channel map poisoned")
+                        .get(&id)
+                        .cloned();
+                    Some(existing.unwrap_or_else(|| {
+                        // A previous incarnation removed this static child,
+                        // which ended its stable identity and closed its
+                        // channels. This incarnation recreates the child, so
+                        // mint a fresh identity for it.
+                        let stable = supervisor.stable_channels();
+                        nested_handles
+                            .lock()
+                            .expect("nested handle map poisoned")
+                            .insert(id.clone(), stable.handle());
+                        nested_channels
+                            .lock()
+                            .expect("nested channel map poisoned")
+                            .insert(id.clone(), Arc::clone(&stable));
+                        stable
+                    }))
+                }
+                ChildKind::Task(_) => None,
+            };
             let key = children.insert(ChildEntry::new(
                 id.clone(),
                 formatted_path,
@@ -224,6 +245,33 @@ impl SupervisorRuntime {
             next_child_instance = next_child_instance.saturating_add(1);
             children_by_id.insert(id.clone(), key);
             child_order.push(key);
+        }
+
+        // Stable channels left behind by a previous incarnation for children
+        // this incarnation will never spawn (added dynamically, so absent
+        // from the static configuration) are orphaned for good — no future
+        // incarnation spawns them either. Close them so their observers
+        // terminate instead of hanging.
+        let orphaned: Vec<Arc<StableSupervisorChannels>> = {
+            let mut handle_map = nested_handles.lock().expect("nested handle map poisoned");
+            let mut channel_map = nested_channels
+                .lock()
+                .expect("nested channel map poisoned");
+            let orphaned_ids: Vec<String> = channel_map
+                .keys()
+                .filter(|id| !children_by_id.contains_key(*id))
+                .cloned()
+                .collect();
+            orphaned_ids
+                .into_iter()
+                .filter_map(|id| {
+                    handle_map.remove(&id);
+                    channel_map.remove(&id)
+                })
+                .collect()
+        };
+        for channels in orphaned {
+            channels.terminal();
         }
         // Nested incarnations reuse the stable snapshot channel, so resume the
         // cumulative restart counter from the previous incarnation's final
@@ -502,8 +550,8 @@ impl SupervisorRuntime {
             if startup_aborted {
                 self.publish_snapshot();
             }
-            // Skipped by the group respawn and never restarted afterwards:
-            // this child can never run again.
+            // Skipped by the group respawn and never restarted afterwards; if
+            // this supervisor is the root, that judgment is final.
             self.mark_child_terminal(key);
             return true;
         }
@@ -1016,7 +1064,15 @@ impl SupervisorRuntime {
 
     /// Marks a permanently stopped nested-supervisor child's stable channels
     /// as terminal. No-op for task children.
+    ///
+    /// Only a root supervisor's judgment is final: a nested supervisor may
+    /// itself be reincarnated by an ancestor later, which recreates this
+    /// child from the static configuration with the same stable channels, so
+    /// a nested supervisor must leave them open.
     fn mark_child_terminal(&self, key: ChildKey) {
+        if self.meta.parent_link.is_some() {
+            return;
+        }
         if let Some(entry) = self.children.get(key)
             && let Some(channels) = entry.nested_channels.as_ref()
         {
