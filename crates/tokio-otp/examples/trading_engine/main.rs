@@ -1,3 +1,105 @@
+//! A multi-venue trading engine exercising the library's supervision,
+//! messaging, and timer features together.
+//!
+//! The topology is two supervision trees: a `trading-core` graph with a
+//! nested `venues` subtree (both one-for-one, sequential start). The core
+//! graph is built with slots so the mutual references resolve: venue actors
+//! need core refs (ledger, reconciler) before the core actors are defined.
+//!
+//! # Modules
+//!
+//! * `messages` — the shared vocabulary: one message enum per actor, the
+//!   outcome types, and `CALL_DEADLINE` for bounded calls.
+//! * `venue` — the exchange side: `ExchangeSim`, a shared fake exchange
+//!   holding order state and scripted misbehavior; `VenueFeed`, which turns
+//!   injected ticks into market snapshots for the reconciler (conflating
+//!   mailbox, simulated parse delay, scripted crash); and `VenueGateway`,
+//!   which handles place/cancel/query/cancel-all and schedules delayed fill
+//!   delivery.
+//! * `router` — `OrderRouter`, the order front door: assigns order keys,
+//!   makes deadline-bounded calls to gateways, and tracks intents whose
+//!   outcome timed out as unknown until `ReconcileAll` re-queries and
+//!   re-places them under the same idempotency key.
+//! * `ledger` — the record of effects: counts acks/fills/cancellations per
+//!   order key and serves a report for assertions. Drains its mailbox at
+//!   shutdown so queued effects are not lost.
+//! * `reconciler` — market-data health. Tracks each venue as
+//!   Fresh/Stale/Down: ticks make it Fresh, a state-timeout-driven sweep
+//!   demotes quiet venues, and watches on the feeds map restart and
+//!   termination events to Down.
+//! * `control` — the kill switch: closes the shared intake gate checked by
+//!   the router and fans `CancelAll` out to both gateways.
+//! * `health` — the restart circuit breaker: counts venue-subtree restarts
+//!   in a sliding window and trips the kill switch at a threshold.
+//! * `telemetry` — per-hop latency aggregates, the metrics debugging
+//!   recorder, and a background supervisor-snapshot sampler.
+//!
+//! # Data flow
+//!
+//! Three loops plus telemetry:
+//!
+//! ```text
+//! market data
+//! -----------
+//!       ticks
+//!         |
+//!         v
+//! +-----------+    Market snapshot     +------------+
+//! | VenueFeed |----------------------->| Reconciler |<--- StaleSweep
+//! +-----------+                        +------------+     (self, state timeout)
+//!       |                                   ^
+//!       |      feed lifecycle (watch)       |
+//!       +-----------------------------------+
+//!
+//! orders
+//! ------
+//!    Submit / Cancel / ReconcileAll
+//!                 |
+//!                 v
+//!         +-------------+   Ack (reconcile resolves unknown)
+//!         | OrderRouter |------------------------------------+
+//!         +-------------+                                    |
+//!                 |  call: Place / Cancel / Query            |
+//!                 v                                          v
+//!         +--------------+   Ack / Fill / Cancelled     +--------+
+//!         | VenueGateway |----------------------------->| Ledger |
+//!         +--------------+                              +--------+
+//!              |      ^
+//!              +------+
+//!            DeliverFill (self, delayed)
+//!
+//! safety
+//! ------
+//!    venue-subtree restarts
+//!         | supervisor restart counter (lossless watch)
+//!         v
+//!    event pump --RestartsObserved--> Health
+//!                                       | KillSwitch (breaker trips)
+//!                                       v
+//!    gateways <---- CancelAll ------ Control ----> closes intake gate (Router)
+//! ```
+//!
+//! 1. Market data: injected `FeedMsg::Tick`s flow through `VenueFeed` to the
+//!    reconciler, which marks the venue Fresh and re-arms its stale sweep.
+//!    Feed crashes reach the reconciler as watch events instead.
+//! 2. Orders: `RouterMsg::Submit` leads to a deadline-bounded `Place` call
+//!    on a gateway, which acks to the ledger and schedules a delayed fill
+//!    that reports `LedgerMsg::Fill` if the order was not cancelled in the
+//!    interim. A timed-out call marks the intent unknown until
+//!    `ReconcileAll` resolves it against the exchange.
+//! 3. Safety: venue restarts flow from the supervisor's lossless restart
+//!    counter (deliberately not the lossy event broadcast) through an event
+//!    pump into `Health`, whose breaker trips `Control`'s kill switch:
+//!    intake closes and open orders are cancelled.
+//!
+//! Telemetry sits across all of it: actors stamp `enqueued_at` on messages
+//! and record queue and handler latencies, and the sampler logs supervisor
+//! snapshots, with one final WARN-level dump at exit.
+//!
+//! `main` runs phases 0–8 as an acceptance script: readiness-gated startup,
+//! deterministic order flow, staleness, crash/restart, saturation and
+//! conflation, the breaker tripping, and final telemetry evidence.
+
 mod control;
 mod health;
 mod ledger;
