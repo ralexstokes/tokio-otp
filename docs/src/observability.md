@@ -9,21 +9,65 @@ The crates expose four views into a running system:
 
 ## Events And Snapshots
 
-`RuntimeHandle::subscribe()` returns supervisor lifecycle events. Use it to
-react to restarts or removals:
+`RuntimeHandle::subscribe()` returns supervisor lifecycle events. Use it for
+logging, tracing, and dashboards:
 
 ```rust,ignore
 let mut events = handle.subscribe();
 tokio::spawn(async move {
-    while let Ok(event) = events.recv().await {
-        println!("event: {event:?}");
+    loop {
+        match events.recv().await {
+            Ok(event) => println!("event: {event:?}"),
+            // The broadcast channel is bounded: a slow subscriber skips
+            // missed events and observes the gap as `Lagged`.
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                println!("missed {skipped} events");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
     }
 });
 ```
 
+**Events are lossy observability, not durable control.** The subscription is a
+bounded broadcast channel, and events forwarded from nested supervisors can
+additionally be dropped without a `Lagged` marker on your receiver. Never
+build safety logic by counting events: it can silently under-count. If a
+consumer must gate a decision on events anyway, it has to fail closed on
+`Lagged` — treat the gap as if the guarded condition occurred.
+
 `RuntimeHandle::snapshot()` returns the current tree state, and
 `subscribe_snapshots()` returns a `watch::Receiver` that updates when the
-snapshot changes.
+snapshot changes. The watch channel conflates intermediate snapshots but never
+lags, and snapshots carry cumulative counters — the per-child
+`ChildSnapshot::restart_count` and the supervisor-level
+`SupervisorSnapshot::total_restarts` — so counter deltas account for every
+restart even when updates are conflated. This is the reliable source to drive
+control logic from.
+
+## Reliable Restart Counting
+
+For control logic that reacts to restart activity — an aggregate restart
+breaker, for example — use `watch_restarts()` instead of counting events:
+
+```rust,ignore
+let mut restarts = handle.supervisor("venues").unwrap().watch_restarts();
+tokio::spawn(async move {
+    while let Some(newly_recorded) = restarts.next().await {
+        // Feed `newly_recorded` into a sliding-window breaker. A single
+        // observation may cover several restarts when snapshot updates
+        // were conflated; none are ever silently dropped.
+        breaker.send(HealthMsg::RestartsObserved { count: newly_recorded }).await?;
+    }
+});
+```
+
+`RestartWatch` tracks the monotonic `total_restarts` counter over the lossless
+snapshot channel, so it cannot miss a restart the way an event subscriber can.
+The `trading_engine` example's phase-7 breaker is built this way. Note that
+the counter records failure-triggered restarts (the same occurrences the
+restart-intensity window tracks); under `OneForAll`, sibling respawns caused
+by another child's failure do not increment it.
 
 ## Tracing And Stats
 
