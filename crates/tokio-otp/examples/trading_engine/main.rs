@@ -20,7 +20,7 @@ use std::{
 
 use metrics_util::debugging::Snapshotter;
 use tokio::time::Instant;
-use tokio_otp::{SupervisedActors, SupervisorBuilder, prelude::*};
+use tokio_otp::prelude::*;
 
 use control::Control;
 use health::Health;
@@ -41,7 +41,6 @@ type AnyError = Box<dyn Error + Send + Sync>;
 
 struct App {
     handle: RuntimeHandle,
-    venue_graph: Graph,
     venue_a_feed: ActorRef<FeedMsg>,
     venue_b_feed: ActorRef<FeedMsg>,
     router: ActorRef<RouterMsg>,
@@ -182,26 +181,21 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
 
     let venue_graph = venues.build()?;
     let core_graph = core.build()?;
-    let venue_supervisor = SupervisedActors::new(venue_graph.clone()).build_supervisor(
-        SupervisorBuilder::new()
-            .strategy(Strategy::OneForOne)
-            .start_mode(StartMode::Sequential)
-            .restart_intensity(RestartIntensity::new(5, Duration::from_secs(10))),
-    )?;
-    let runtime = SupervisedActors::new(core_graph).build_runtime(
-        SupervisorBuilder::new()
-            .strategy(Strategy::OneForOne)
-            .start_mode(StartMode::Sequential)
-            .supervisor("venues", venue_supervisor),
-    )?;
+    let venue_runtime = Runtime::builder()
+        .graph(venue_graph)
+        .strategy(Strategy::OneForOne)
+        .start_mode(StartMode::Sequential)
+        .restart_intensity(RestartIntensity::new(5, Duration::from_secs(10)));
+    let runtime = Runtime::builder()
+        .graph(core_graph)
+        .strategy(Strategy::OneForOne)
+        .start_mode(StartMode::Sequential)
+        .subtree("venues", venue_runtime)
+        .build()?;
     let handle = runtime.spawn();
 
     let background_stop = CancellationToken::new();
-    let sampler = tokio::spawn(telemetry::sample(
-        handle.clone(),
-        venue_graph.clone(),
-        background_stop.clone(),
-    ));
+    let sampler = tokio::spawn(telemetry::sample(handle.clone(), background_stop.clone()));
     let mut events = handle.subscribe();
     let event_health = health.clone();
     let event_stop = background_stop.clone();
@@ -231,7 +225,6 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
 
     Ok(App {
         handle,
-        venue_graph,
         venue_a_feed,
         venue_b_feed,
         router,
@@ -464,7 +457,11 @@ async fn phase_6(app: &App) -> Result<(), AnyError> {
         }
     });
     await_until(|| async {
-        let stats = app.venue_graph.stats();
+        let stats = app
+            .handle
+            .subtree("venues")
+            .expect("venue runtime subtree")
+            .actor_stats();
         ["venue-a-feed", "venue-b-feed"].iter().all(|id| {
             stats
                 .iter()
@@ -483,7 +480,11 @@ async fn phase_6(app: &App) -> Result<(), AnyError> {
     assert_eq!(app.venue_a.status(&open), Some(OrderStatus::Cancelled));
     flood_stop.cancel();
     flood.await?;
-    let feed_stats = app.venue_graph.stats();
+    let feed_stats = app
+        .handle
+        .subtree("venues")
+        .expect("venue runtime subtree")
+        .actor_stats();
     for id in ["venue-a-feed", "venue-b-feed"] {
         assert!(
             feed_stats
@@ -581,7 +582,7 @@ async fn phase_8(app: App, latency: LatencyRecorder, metrics: Snapshotter) -> Re
     );
     println!("selected metrics: {selected_metrics:#?}");
     println!("final supervisor snapshot: {:#?}", app.handle.snapshot());
-    println!("final venue actor stats: {:#?}", app.venue_graph.stats());
+    println!("final actor stats: {:#?}", app.handle.actor_stats());
     println!("PHASE 8 OK — staged shutdown and observability");
     Ok(())
 }

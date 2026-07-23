@@ -8,13 +8,14 @@ use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 /// One-stop builder for the common supervised-actor setup.
 ///
 /// Wires an actor [`Graph`] into a [`Runtime`] where every actor runs as its
-/// own supervised child. It can also build a graph-less runtime that starts
-/// empty and grows through [`RuntimeHandle::add_actor`](crate::RuntimeHandle::add_actor). Created via
+/// own supervised child. Nested builders added with [`subtree`](Self::subtree)
+/// preserve the same actor-aware runtime behavior recursively. It can also
+/// build a graph-less runtime that starts empty and grows through
+/// [`RuntimeHandle::add_actor`](crate::RuntimeHandle::add_actor). Created via
 /// [`Runtime::builder`].
 ///
-/// For per-actor policy overrides, or to compose actor children into a larger
-/// supervision tree, drop down to [`SupervisedActors`] with a
-/// [`SupervisorBuilder`].
+/// For per-actor policy overrides or arbitrary non-actor children, drop down
+/// to [`SupervisedActors`] with a [`SupervisorBuilder`].
 ///
 /// # Example
 ///
@@ -67,6 +68,7 @@ use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 #[derive(Default)]
 pub struct RuntimeBuilder {
     graph: Option<Graph>,
+    subtrees: Vec<(String, RuntimeBuilder)>,
     strategy: Strategy,
     start_mode: StartMode,
     restart: RestartPolicy,
@@ -77,7 +79,7 @@ pub struct RuntimeBuilder {
 impl RuntimeBuilder {
     /// Creates a builder with default settings: [`OneForOne`](Strategy::OneForOne)
     /// strategy, [`OnFailure`](RestartPolicy::OnFailure) restart, default shutdown
-    /// policy, and no graph.
+    /// policy, no graph, and no subtrees.
     pub fn new() -> Self {
         Self::default()
     }
@@ -86,6 +88,21 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn graph(mut self, graph: Graph) -> Self {
         self.graph = Some(graph);
+        self
+    }
+
+    /// Adds an actor-aware nested runtime subtree.
+    ///
+    /// Subtrees retain their graphs' actor metadata, so
+    /// [`RuntimeHandle::actor_stats`](crate::RuntimeHandle::actor_stats)
+    /// recursively includes their actors and
+    /// [`RuntimeHandle::subtree`](crate::RuntimeHandle::subtree) can create a
+    /// scoped actor-aware handle. Subtrees are inserted before this builder's
+    /// graph actors, in declaration order, which also determines sequential
+    /// startup order.
+    #[must_use]
+    pub fn subtree(mut self, id: impl Into<String>, subtree: RuntimeBuilder) -> Self {
+        self.subtrees.push((id.into(), subtree));
         self
     }
 
@@ -142,19 +159,27 @@ impl RuntimeBuilder {
             supervisor = supervisor.restart_intensity(intensity);
         }
 
+        let mut subtrees = Vec::with_capacity(self.subtrees.len());
+        for (id, subtree) in self.subtrees {
+            let (nested_supervisor, nested_actors) = subtree.build()?.into_parts();
+            supervisor = supervisor.supervisor(id.clone(), nested_supervisor);
+            subtrees.push((id, nested_actors));
+        }
+
         match self.graph {
             Some(graph) => {
-                let actors = SupervisedActors::new(graph)
+                let supervised = SupervisedActors::new(graph)
                     .restart(self.restart)
                     .shutdown(self.shutdown);
-                actors.build_runtime(supervisor)
+                supervised.build_runtime_with_subtrees(supervisor, subtrees)
             }
             None => {
                 let supervisor = supervisor.build()?;
-                Ok(Runtime::with_actors(
+                Ok(Runtime::with_actor_tree(
                     supervisor,
                     RunnableActorFactory::new(),
                     Vec::new(),
+                    subtrees,
                 ))
             }
         }
@@ -169,6 +194,10 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("restart", &self.restart)
             .field("shutdown", &self.shutdown)
             .field("restart_intensity", &self.restart_intensity)
+            .field(
+                "subtrees",
+                &self.subtrees.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }

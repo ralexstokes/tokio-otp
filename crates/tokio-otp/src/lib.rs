@@ -60,8 +60,10 @@
 //! # Composition modes
 //!
 //! - **The integrated runtime** via [`Runtime::builder`]: per-actor
-//!   supervision with uniform policies and runtime actor creation. Omit
-//!   [`RuntimeBuilder::graph`] to start with no actors.
+//!   supervision with uniform policies, recursive actor-aware subtrees, and
+//!   runtime actor creation. Add nested builders with
+//!   [`RuntimeBuilder::subtree`], or omit [`RuntimeBuilder::graph`] to start
+//!   with no direct actors.
 //!
 //! - **Per-actor supervision** via [`SupervisedActors`]: each actor becomes its
 //!   own child in a supervisor, with individual restart and shutdown policies.

@@ -5,7 +5,7 @@ use tokio_supervisor::{
     ChildSpec, RestartIntensity, RestartPolicy, ShutdownPolicy, Supervisor, SupervisorBuilder,
 };
 
-use crate::runtime::{Runtime, actor_child_spec};
+use crate::runtime::{ActorSubtrees, Runtime, actor_child_spec};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ActorOverrides {
@@ -117,6 +117,14 @@ impl SupervisedActors {
         self,
         builder: SupervisorBuilder,
     ) -> Result<Runtime, tokio_supervisor::SupervisorBuildError> {
+        self.build_runtime_with_subtrees(builder, Vec::new())
+    }
+
+    pub(crate) fn build_runtime_with_subtrees(
+        self,
+        builder: SupervisorBuilder,
+        subtrees: ActorSubtrees,
+    ) -> Result<Runtime, tokio_supervisor::SupervisorBuildError> {
         let actor_factory = self.graph.dynamic_factory();
         let actors = self.graph.actors().to_vec();
         let children = self.actor_children();
@@ -125,7 +133,12 @@ impl SupervisedActors {
             .fold(builder, |builder, child| builder.child(child));
         let supervisor = builder.build()?;
 
-        Ok(Runtime::with_actors(supervisor, actor_factory, actors))
+        Ok(Runtime::with_actor_tree(
+            supervisor,
+            actor_factory,
+            actors,
+            subtrees,
+        ))
     }
 
     fn actor_children(&self) -> Vec<ChildSpec> {
