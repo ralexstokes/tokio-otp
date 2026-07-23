@@ -90,12 +90,19 @@ impl IntoFuture for RestartMonitor {
 ///
 /// The watch tracks [`SupervisorSnapshot::total_restarts`] over the lossless
 /// snapshot `watch` channel. The channel conflates intermediate snapshots but
-/// never lags, and the counter is cumulative, so no restart is ever silently
-/// missed: a batch of conflated updates is reported as a single delta covering
-/// every restart in the batch. This makes it a sound control input for safety
-/// mechanisms such as aggregate restart breakers — unlike counting
+/// never lags, and the counter is cumulative, so none of the restarts the
+/// counter covers is ever silently missed: a batch of conflated updates is
+/// reported as a single delta covering every restart in the batch. This makes
+/// it a sound control input for safety mechanisms such as aggregate restart
+/// breakers — unlike counting
 /// [`SupervisorEvent`](crate::SupervisorEvent)s from the lossy broadcast
 /// channel.
+///
+/// The counter's scope is the watched supervisor's **direct children**:
+/// restarts inside a nested supervisor are observed by watching that
+/// supervisor's own handle, and under group strategies sibling respawns are
+/// not counted. See [`SupervisorSnapshot::total_restarts`] for the exact
+/// contract.
 ///
 /// The baseline is captured when the watch is created; restarts recorded
 /// before that are not reported.
@@ -133,9 +140,16 @@ impl RestartWatch {
     /// watched supervisor's stable identity can never produce another
     /// incarnation: the root supervisor stopped, the watched supervisor (or
     /// an ancestor) was removed, or it stopped by a decision no ancestor
-    /// reincarnation can undo. A nested supervisor that is merely stopped
-    /// under a live, restartable ancestor keeps the watch open — a later
-    /// ancestor restart revives it and the watch resumes reporting.
+    /// reincarnation can undo. `None` arrives eagerly (at the terminal event
+    /// itself) for removal, for `OneForOne` stops, for
+    /// [`RestartPolicy::Never`](crate::RestartPolicy::Never) children, and
+    /// for a `RestForOne` first child; a child stopped at another position
+    /// of a group-strategy supervisor could still be revived by a
+    /// sibling-triggered group restart, so its watch closes only when that
+    /// possibility ends — at the latest when the supervisor stops. A nested
+    /// supervisor that is merely stopped under a live, restartable ancestor
+    /// keeps the watch open — a later ancestor restart revives it and the
+    /// watch resumes reporting.
     pub async fn next(&mut self) -> Option<u64> {
         loop {
             if let Some(delta) = self.observe() {

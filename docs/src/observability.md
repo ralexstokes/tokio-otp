@@ -63,7 +63,11 @@ tokio::spawn(async move {
 ```
 
 `RestartWatch` tracks the monotonic `total_restarts` counter over the lossless
-snapshot channel, so it cannot miss a restart the way an event subscriber can.
+snapshot channel, so unlike an event subscriber it cannot lose restarts to
+backpressure. Its scope is the watched supervisor's **direct children**: to
+cover a nested subtree, watch each nested supervisor's own handle
+(`handle.supervisor(id)`) — `total_restarts` does not aggregate across depth,
+whereas an event subscription forwards nested events (lossily).
 Nested supervisors carry the counter across their own incarnations, so a watch
 on a restart-stable handle keeps working through restarts of the watched
 supervisor itself, and `next()` returns `None` once the supervisor can never

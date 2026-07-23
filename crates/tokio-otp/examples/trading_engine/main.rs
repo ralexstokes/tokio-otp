@@ -199,9 +199,13 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     // The aggregate restart breaker is a safety mechanism, so it must not be
     // fed from the lossy event broadcast (`handle.subscribe()`), which can
     // drop `ChildRestarted` events under load. Instead it watches the venues
-    // subtree's cumulative `total_restarts` counter over the lossless snapshot
-    // watch channel: conflated updates still arrive as one delta covering
-    // every restart, so the breaker can never silently under-count.
+    // supervisor's cumulative `total_restarts` counter over the lossless
+    // snapshot watch channel: conflated updates still arrive as one delta
+    // covering every restart, so the breaker can never silently under-count.
+    // The counter covers the venues supervisor's direct children — exactly
+    // the flat venue actor set built above. If venues ever gains nested
+    // per-venue supervisors, watch each nested handle as well:
+    // `total_restarts` does not aggregate across depth.
     let mut venue_restarts = handle
         .supervisor("venues")
         .expect("venues supervisor")

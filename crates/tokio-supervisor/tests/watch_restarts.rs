@@ -900,6 +900,80 @@ async fn dynamic_never_supervisor_breaks_the_revival_chain() {
     shutdown(handle).await;
 }
 
+#[tokio::test]
+async fn rest_for_one_first_child_stop_is_final() {
+    let complete_head = Arc::new(Notify::new());
+    let complete_tail = Arc::new(Notify::new());
+
+    let handle = SupervisorBuilder::new()
+        .strategy(Strategy::RestForOne)
+        .supervisor(
+            "head",
+            SupervisorSpec::new(completing_supervisor(&complete_head))
+                .restart(RestartPolicy::OnFailure),
+        )
+        .supervisor(
+            "tail",
+            SupervisorSpec::new(completing_supervisor(&complete_tail))
+                .restart(RestartPolicy::OnFailure),
+        )
+        .build()
+        .expect("valid supervisor")
+        .spawn();
+
+    let head_handle = handle.supervisor("head").expect("head supervisor");
+    let tail_handle = handle.supervisor("tail").expect("tail supervisor");
+    let mut head_restarts = head_handle.watch_restarts();
+    let mut tail_restarts = tail_handle.watch_restarts();
+
+    // Under `RestForOne` a group restart respawns only the suffix from the
+    // failing position, so nothing can ever revive the first child: its
+    // clean, non-restarted stop is final and the watch must end eagerly,
+    // while the supervisor keeps running.
+    complete_head.notify_one();
+    let observed = timeout(common::EVENT_TIMEOUT, head_restarts.next())
+        .await
+        .expect("first child's watch should resolve eagerly");
+    assert_eq!(observed, None);
+    assert_eq!(
+        handle.snapshot().state,
+        tokio_supervisor::SupervisorStateView::Running
+    );
+
+    // A later position is conservatively kept open: an earlier sibling's
+    // failure could still revive it, so its watch closes only when the
+    // supervisor stops.
+    complete_tail.notify_one();
+    timeout(common::QUIET_TIMEOUT, tail_restarts.next())
+        .await
+        .expect_err("later-position stop must stay open while the supervisor runs");
+
+    shutdown(handle).await;
+    let observed = timeout(common::EVENT_TIMEOUT, tail_restarts.next())
+        .await
+        .expect("later-position watch should resolve after supervisor stop");
+    assert_eq!(observed, None);
+}
+
+fn completing_supervisor(complete: &Arc<Notify>) -> tokio_supervisor::Supervisor {
+    let complete = complete.clone();
+    SupervisorBuilder::new()
+        .auto_shutdown(tokio_supervisor::AutoShutdown::AnySignificant)
+        .child(
+            ChildSpec::new("worker", move |_ctx| {
+                let complete = complete.clone();
+                async move {
+                    complete.notified().await;
+                    Ok(())
+                }
+            })
+            .restart(RestartPolicy::OnFailure)
+            .significant(),
+        )
+        .build()
+        .expect("valid completing supervisor")
+}
+
 fn middle_supervisor(
     crash_leaf: &Arc<Notify>,
     crash_middle: &Arc<Notify>,

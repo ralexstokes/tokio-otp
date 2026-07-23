@@ -583,9 +583,17 @@ impl SupervisorHandle {
     /// The watch observes the monotonic
     /// [`SupervisorSnapshot::total_restarts`] counter over the lossless
     /// snapshot `watch` channel, so unlike counting [`subscribe`](Self::subscribe)
-    /// events it can never silently miss a restart — conflated updates are
-    /// reported as one delta covering every restart in the batch. Use it for
-    /// control logic such as aggregate restart breakers.
+    /// events it can never silently miss a restart the counter covers —
+    /// conflated updates are reported as one delta covering every restart in
+    /// the batch. Use it for control logic such as aggregate restart
+    /// breakers.
+    ///
+    /// The counter covers this supervisor's **direct children** only. To
+    /// observe a nested subtree, watch each nested supervisor's own handle
+    /// ([`supervisor`](Self::supervisor)) — `total_restarts` does not
+    /// aggregate across depth, and under group strategies sibling respawns
+    /// are not counted. See [`SupervisorSnapshot::total_restarts`] for the
+    /// exact contract.
     ///
     /// The baseline is captured here, synchronously: only restarts recorded
     /// after this call are reported.

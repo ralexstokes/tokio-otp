@@ -1078,11 +1078,23 @@ impl SupervisorRuntime {
             }
             // The exit will not be restarted. Under group strategies a
             // stopped non-`Never` child can still be respawned by a later
-            // sibling-triggered group restart, so only a `OneForOne` stop or
-            // a `Never` policy is final here.
-            if self.meta.strategy == Strategy::OneForOne
-                || matches!(restart_policy, RestartPolicy::Never)
-            {
+            // sibling-triggered group restart, so finality needs more than
+            // the exit itself: a `OneForOne` stop and a `Never` policy are
+            // always final, and under `RestForOne` so is a stop of the first
+            // child — a group restart respawns only the suffix from the
+            // failing position, and nothing precedes the first. Children at
+            // other group positions conservatively stay open (an earlier
+            // sibling's failure could revive them) until the supervisor
+            // stops.
+            let stop_is_final = match self.meta.strategy {
+                Strategy::OneForOne => true,
+                Strategy::OneForAll => matches!(restart_policy, RestartPolicy::Never),
+                Strategy::RestForOne => {
+                    matches!(restart_policy, RestartPolicy::Never)
+                        || self.child_order.first() == Some(&classified.key)
+                }
+            };
+            if stop_is_final {
                 self.mark_child_terminal(classified.key);
             }
         }

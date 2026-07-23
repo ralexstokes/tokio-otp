@@ -459,6 +459,10 @@ impl RuntimeHandle {
     /// Delegates to [`SupervisorHandle::watch_restarts`]: reliable,
     /// snapshot-backed observation of restart activity, suitable for control
     /// logic such as aggregate restart breakers.
+    ///
+    /// Covers the root supervisor's direct children only; watch a nested
+    /// supervisor via [`supervisor`](Self::supervisor) to observe its
+    /// subtree.
     pub fn watch_restarts(&self) -> RestartWatch {
         self.supervisor.watch_restarts()
     }
