@@ -26,7 +26,7 @@ pub(crate) struct ControlEndpoint {
 }
 
 impl ControlEndpoint {
-    async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
+    async fn add_child(&self, child: ChildSpec) -> Result<u64, ControlError> {
         self.send(|reply| SupervisorCommand::AddChild { child, reply })
             .await
     }
@@ -49,10 +49,10 @@ impl ControlEndpoint {
         .await
     }
 
-    async fn send(
+    async fn send<T>(
         &self,
-        command: impl FnOnce(oneshot::Sender<Result<(), ControlError>>) -> SupervisorCommand,
-    ) -> Result<(), ControlError> {
+        command: impl FnOnce(oneshot::Sender<Result<T, ControlError>>) -> SupervisorCommand,
+    ) -> Result<T, ControlError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(command(reply_tx))
@@ -380,7 +380,7 @@ impl RootHandle {
 pub(crate) enum SupervisorCommand {
     AddChild {
         child: ChildSpec,
-        reply: oneshot::Sender<Result<(), ControlError>>,
+        reply: oneshot::Sender<Result<u64, ControlError>>,
     },
     RemoveChild {
         id: String,
@@ -473,8 +473,12 @@ impl SupervisorHandle {
 
     /// Adds a new child to the supervisor at runtime.
     ///
-    /// Waits if the control channel is full.
-    pub async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
+    /// Waits if the control channel is full. On success, returns the membership
+    /// epoch assigned to the child by the supervisor. The epoch is allocated
+    /// atomically with insertion, so it identifies the membership created by
+    /// this specific call even if the same child id is later removed and
+    /// reused.
+    pub async fn add_child(&self, child: ChildSpec) -> Result<u64, ControlError> {
         self.control_endpoint()?.add_child(child).await
     }
 

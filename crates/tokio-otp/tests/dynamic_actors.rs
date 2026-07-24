@@ -157,6 +157,11 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
         .await
         .expect("replacement receives");
     assert_eq!(observed_rx.recv().await.as_deref(), Some("second"));
+    let replacement_snapshot_epoch = handle
+        .snapshot()
+        .child("sink")
+        .expect("replacement snapshot available")
+        .membership_epoch;
     let replacement_epoch = handle
         .actor_stats()
         .into_iter()
@@ -164,6 +169,7 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
         .expect("replacement stats available")
         .membership_epoch
         .expect("runtime stats include supervisor membership");
+    assert_eq!(replacement_epoch, replacement_snapshot_epoch);
     assert!(replacement_epoch > initial_epoch);
 
     handle.shutdown_and_wait().await.expect("clean shutdown");

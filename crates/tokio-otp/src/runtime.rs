@@ -338,7 +338,7 @@ impl SupervisorHandleExt for SupervisorHandle {
         );
 
         async move {
-            let result = self.add_child(child).await;
+            let result = self.add_child(child).await.map(|_| ());
             if result.is_err() {
                 termination.disarm();
             }
@@ -491,7 +491,7 @@ impl RuntimeHandle {
 
     /// Adds a new child to the supervisor at runtime.
     pub async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
-        self.supervisor.add_child(child).await
+        self.supervisor.add_child(child).await.map(|_| ())
     }
 
     /// Adds a nested supervisor at runtime.
@@ -582,14 +582,10 @@ impl RuntimeHandle {
             options.shutdown,
             options.restart_intensity,
         );
-        self.supervisor.add_child(child).await?;
-        if let (Some(membership_epoch), Some(registration_path)) = (
-            self.supervisor
-                .snapshot()
-                .child(actor.label())
-                .map(|child| child.membership_epoch),
-            registration_path.filter(|path| self.current_supervisor_path().as_ref() == Some(path)),
-        ) {
+        let membership_epoch = self.supervisor.add_child(child).await?;
+        if let Some(registration_path) =
+            registration_path.filter(|path| self.current_supervisor_path().as_ref() == Some(path))
+        {
             self.actors
                 .record_actor(actor, membership_epoch, registration_path);
         }

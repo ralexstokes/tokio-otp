@@ -594,7 +594,7 @@ impl SupervisorRuntime {
         }
     }
 
-    async fn add_child(&mut self, child: crate::child::ChildSpec) -> Result<(), ControlError> {
+    async fn add_child(&mut self, child: crate::child::ChildSpec) -> Result<u64, ControlError> {
         if self.state == SupervisorState::Stopping {
             return Err(ControlError::SupervisorStopping);
         }
@@ -626,13 +626,14 @@ impl SupervisorRuntime {
 
         let formatted_path = format_child_path(&self.meta.path_prefix, &id);
         let definition = Arc::new(child.into_definition());
+        let membership_epoch = self.next_child_instance;
         let key = self.children.insert(ChildEntry::new(
             id.clone(),
             formatted_path,
             definition,
             None,
             self.meta.default_restart_intensity,
-            self.next_child_instance,
+            membership_epoch,
         ));
         self.next_child_instance = self.next_child_instance.saturating_add(1);
         self.children_by_id.insert(id.clone(), key);
@@ -643,7 +644,7 @@ impl SupervisorRuntime {
             return Err(map_supervisor_error_to_control(error));
         }
 
-        Ok(())
+        Ok(membership_epoch)
     }
 
     async fn add_supervisor(
