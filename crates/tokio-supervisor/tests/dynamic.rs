@@ -61,6 +61,103 @@ async fn empty_supervisor_starts_empty_and_accepts_children() {
 }
 
 #[tokio::test]
+async fn dynamic_child_can_remove_itself_after_a_non_restarted_exit() {
+    let supervisor = SupervisorBuilder::new()
+        .build()
+        .expect("empty supervisor builds");
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+
+    handle
+        .add_child(
+            ChildSpec::new("temporary", |_ctx| async move { Ok(()) })
+                .restart(RestartPolicy::Never)
+                .remove_on_exit(true),
+        )
+        .await
+        .expect("temporary child added");
+
+    let mut exited = false;
+    loop {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildExited { id, .. } if id == "temporary" => exited = true,
+            SupervisorEvent::ChildRemoved { id, .. } if id == "temporary" => {
+                assert!(exited, "exit is published before membership removal");
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(handle.snapshot().child("temporary").is_none());
+
+    handle
+        .add_child(ChildSpec::new("temporary", |_ctx| async move { Ok(()) }))
+        .await
+        .expect("auto-removed child id is reusable");
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn temporary_dynamic_child_auto_removes_when_skipped_by_group_restart() {
+    let trigger = Arc::new(Notify::new());
+    let supervisor = SupervisorBuilder::new()
+        .strategy(tokio_supervisor::Strategy::OneForAll)
+        .build()
+        .expect("empty supervisor builds");
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+
+    handle
+        .add_child(
+            ChildSpec::new("temporary", |ctx| async move {
+                ctx.shutdown_token().cancelled().await;
+                Ok(())
+            })
+            .restart(RestartPolicy::Never)
+            .remove_on_exit(true),
+        )
+        .await
+        .expect("temporary child added");
+    handle
+        .add_child(
+            ChildSpec::new("trigger", {
+                let trigger = trigger.clone();
+                move |_ctx| {
+                    let trigger = trigger.clone();
+                    async move {
+                        trigger.notified().await;
+                        Err(common::test_error("restart group"))
+                    }
+                }
+            })
+            .shutdown(ShutdownPolicy::abort()),
+        )
+        .await
+        .expect("trigger child added");
+
+    trigger.notify_one();
+    loop {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildRemoved { id, .. } if id == "temporary" => break,
+            _ => {}
+        }
+    }
+    assert!(handle.snapshot().child("temporary").is_none());
+
+    handle
+        .add_child(ChildSpec::new("temporary", |_ctx| async move { Ok(()) }))
+        .await
+        .expect("group-removed child id is reusable");
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+}
+
+#[tokio::test]
 async fn remove_last_child_and_readd_same_id() {
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
     let initial_starts_tx = starts_tx.clone();

@@ -26,6 +26,7 @@ pub(crate) type ChildFuture = Pin<Box<dyn Future<Output = ChildResult> + Send + 
 pub(crate) struct ChildDefinition {
     pub(crate) id: String,
     pub(crate) restart: RestartPolicy,
+    pub(crate) remove_on_exit: bool,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) significant: bool,
@@ -64,6 +65,7 @@ pub struct ChildSpec {
 pub(crate) struct ChildSpecInner {
     pub(crate) id: String,
     pub(crate) restart: RestartPolicy,
+    pub(crate) remove_on_exit: bool,
     pub(crate) restart_intensity: Option<RestartIntensity>,
     pub(crate) shutdown_policy: ShutdownPolicy,
     pub(crate) significant: bool,
@@ -187,6 +189,7 @@ impl ChildSpec {
             inner: Arc::new(ChildSpecInner {
                 id: id.into(),
                 restart: RestartPolicy::default(),
+                remove_on_exit: false,
                 restart_intensity: None,
                 shutdown_policy: ShutdownPolicy::default(),
                 significant: false,
@@ -200,6 +203,18 @@ impl ChildSpec {
     #[must_use]
     pub fn restart(self, restart: RestartPolicy) -> Self {
         self.map_inner(|inner| inner.restart = restart)
+    }
+
+    /// Sets whether this child is removed after an exit that its restart
+    /// policy declines to restart.
+    ///
+    /// This defaults to `false`, preserving the terminal child in supervisor
+    /// snapshots. It is primarily useful for children added at runtime, where
+    /// removal also makes the child id available for reuse. Restarted exits do
+    /// not remove the child.
+    #[must_use]
+    pub fn remove_on_exit(self, remove_on_exit: bool) -> Self {
+        self.map_inner(|inner| inner.remove_on_exit = remove_on_exit)
     }
 
     /// Sets the shutdown policy for this child. See [`ShutdownPolicy`] for
@@ -273,6 +288,7 @@ impl ChildSpec {
         ChildDefinition {
             id: self.inner.id.clone(),
             restart: self.inner.restart,
+            remove_on_exit: self.inner.remove_on_exit,
             restart_intensity: self.inner.restart_intensity,
             shutdown_policy: self.inner.shutdown_policy,
             significant: self.inner.significant,
@@ -287,6 +303,7 @@ impl ChildDefinition {
         Self {
             id,
             restart: spec.restart,
+            remove_on_exit: false,
             restart_intensity: spec.restart_intensity,
             shutdown_policy: spec.shutdown_policy,
             significant: spec.significant,

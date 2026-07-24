@@ -568,7 +568,11 @@ impl SupervisorRuntime {
             }
             // Skipped by the group respawn and never restarted afterwards; if
             // this supervisor is the root, that judgment is final.
-            self.mark_child_terminal(key);
+            if self.children[key].runtime.definition.remove_on_exit {
+                self.finalize_removed_child(key);
+            } else {
+                self.mark_child_terminal(key);
+            }
             return true;
         }
         false
@@ -995,7 +999,12 @@ impl SupervisorRuntime {
                 channels.terminal();
             }
         }
-        self.send_event(SupervisorEvent::ChildRemoved { id: entry.id });
+        let id = entry.id.clone();
+        // Dropping a task definition may emit its terminal lifecycle signal.
+        // Do that before publishing removal so watches observe terminality
+        // before the child disappears from membership.
+        drop(entry);
+        self.send_event(SupervisorEvent::ChildRemoved { id });
     }
 
     async fn handle_joined_child(
@@ -1066,6 +1075,14 @@ impl SupervisorRuntime {
             if !self.children[classified.key].runtime.has_reported_ready {
                 self.children[classified.key].runtime.startup_aborted = true;
                 self.publish_snapshot();
+            }
+            if self.children[classified.key]
+                .runtime
+                .definition
+                .remove_on_exit
+            {
+                self.finalize_removed_child(classified.key);
+                return Ok(());
             }
             // The exit will not be restarted. Under group strategies a
             // stopped non-`Never` child can still be respawned by a later

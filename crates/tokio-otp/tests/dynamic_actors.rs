@@ -1,4 +1,13 @@
-use std::{future::pending, marker::PhantomData, sync::Arc, time::Duration};
+use std::{
+    future::pending,
+    io,
+    marker::PhantomData,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use tokio::{
     sync::{Notify, mpsc},
@@ -6,8 +15,9 @@ use tokio::{
 };
 use tokio_otp::{
     ActorContext, ActorOptions, ActorRef, ActorResult, ChildSpec, ControlError,
-    DynamicActorOptions, GraphBuilder, MailboxMode, MessageSize, RawActor, Runtime, SendError,
-    ShutdownPolicy, Strategy, SupervisedActors, SupervisorBuilder,
+    DynamicActorOptions, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef,
+    RawActor, RestartPolicy, Runtime, RuntimeHandle, SendError, ShutdownPolicy, Strategy,
+    SupervisedActors, SupervisorBuilder,
 };
 
 fn build_runtime(graph: tokio_otp::Graph) -> Runtime {
@@ -37,6 +47,99 @@ impl<M: Send + 'static> RawActor for Drain<M> {
         while ctx.recv().await.is_some() {}
         Ok(())
     }
+}
+
+#[derive(Clone)]
+struct GatedExit {
+    release: Arc<Notify>,
+    fail: bool,
+}
+
+impl RawActor for GatedExit {
+    type Msg = ();
+
+    async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
+        self.release.notified().await;
+        if self.fail {
+            Err(io::Error::other("dynamic actor failed").into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RestartOnce {
+    starts: Arc<AtomicUsize>,
+}
+
+impl RawActor for RestartOnce {
+    type Msg = ();
+
+    async fn run(&mut self, ctx: ActorContext<()>) -> ActorResult {
+        if self.starts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(io::Error::other("restart me").into())
+        } else {
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }
+    }
+}
+
+enum WatchMsg {
+    Watch(ActorRef<()>),
+    Event(MonitorEvent),
+}
+
+#[derive(Clone)]
+struct Watcher {
+    observed: mpsc::UnboundedSender<MonitorEvent>,
+}
+
+impl RawActor for Watcher {
+    type Msg = WatchMsg;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let mut watch: Option<MonitorRef> = None;
+        while let Some(message) = ctx.recv().await {
+            match message {
+                WatchMsg::Watch(target) => {
+                    watch = Some(ctx.watch(&target, WatchMsg::Event));
+                }
+                WatchMsg::Event(event) => {
+                    self.observed
+                        .send(event)
+                        .expect("monitor receiver remains alive");
+                }
+            }
+        }
+        drop(watch);
+        Ok(())
+    }
+}
+
+async fn wait_for_child(handle: &RuntimeHandle, id: &str, present: bool) {
+    timeout(Duration::from_secs(1), async {
+        let mut snapshots = handle.subscribe_snapshots();
+        loop {
+            if snapshots.borrow().child(id).is_some() == present {
+                return;
+            }
+            snapshots
+                .changed()
+                .await
+                .expect("runtime remains available");
+        }
+    })
+    .await
+    .expect("child membership reached expected state");
+}
+
+async fn next_monitor_event(events: &mut mpsc::UnboundedReceiver<MonitorEvent>) -> MonitorEvent {
+    timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("monitor event arrived")
+        .expect("monitor sender remains alive")
 }
 
 struct SizedMessage(Vec<u8>);
@@ -138,6 +241,241 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
         .await
         .expect("replacement receives");
     assert_eq!(observed_rx.recv().await.as_deref(), Some("second"));
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn never_actor_auto_removal_preserves_monitor_order_and_reuses_id() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let mut graph = GraphBuilder::new();
+    let watcher = graph.actor("watcher", move || Watcher {
+        observed: observed_tx.clone(),
+    });
+    let handle = build_runtime(graph.build().expect("valid graph")).spawn();
+    let release = Arc::new(Notify::new());
+    let target = handle
+        .add_actor(
+            "temporary",
+            {
+                let release = release.clone();
+                move || GatedExit {
+                    release: release.clone(),
+                    fail: false,
+                }
+            },
+            DynamicActorOptions::new().restart(RestartPolicy::Never),
+        )
+        .await
+        .expect("temporary actor added");
+
+    watcher
+        .send(WatchMsg::Watch(target.clone()))
+        .await
+        .expect("watch requested");
+    assert!(matches!(
+        next_monitor_event(&mut observed_rx).await,
+        MonitorEvent::Up { ref actor_id, .. } if actor_id == "temporary"
+    ));
+
+    release.notify_one();
+    assert!(matches!(
+        next_monitor_event(&mut observed_rx).await,
+        MonitorEvent::Down(ref down) if down.actor_id == "temporary"
+    ));
+    assert!(matches!(
+        next_monitor_event(&mut observed_rx).await,
+        MonitorEvent::Terminated { ref actor_id, .. } if actor_id == "temporary"
+    ));
+    wait_for_child(&handle, "temporary", false).await;
+    assert!(matches!(
+        target.send(()).await,
+        Err(SendError::ActorTerminated { actor_id, .. }) if actor_id == "temporary"
+    ));
+
+    handle
+        .add_actor("temporary", Drain::<()>::new, DynamicActorOptions::new())
+        .await
+        .expect("auto-removed actor id is reusable");
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn never_actor_auto_removes_after_failure() {
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+    let release = Arc::new(Notify::new());
+    let target = handle
+        .add_actor(
+            "temporary",
+            {
+                let release = release.clone();
+                move || GatedExit {
+                    release: release.clone(),
+                    fail: true,
+                }
+            },
+            DynamicActorOptions::new().restart(RestartPolicy::Never),
+        )
+        .await
+        .expect("temporary actor added");
+
+    release.notify_one();
+    wait_for_child(&handle, "temporary", false).await;
+    assert!(matches!(
+        target.send(()).await,
+        Err(SendError::ActorTerminated { actor_id, .. }) if actor_id == "temporary"
+    ));
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn remove_on_exit_defaults_and_overrides_follow_the_final_restart_policy() {
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+
+    let retained_release = Arc::new(Notify::new());
+    handle
+        .add_actor(
+            "transient-default",
+            {
+                let release = retained_release.clone();
+                move || GatedExit {
+                    release: release.clone(),
+                    fail: false,
+                }
+            },
+            DynamicActorOptions::new().restart(RestartPolicy::OnFailure),
+        )
+        .await
+        .expect("transient actor added");
+    retained_release.notify_one();
+    wait_for_child(&handle, "transient-default", true).await;
+    timeout(Duration::from_secs(1), async {
+        let mut snapshots = handle.subscribe_snapshots();
+        loop {
+            if snapshots
+                .borrow()
+                .child("transient-default")
+                .is_some_and(|child| child.last_exit.is_some())
+            {
+                break;
+            }
+            snapshots
+                .changed()
+                .await
+                .expect("runtime remains available");
+        }
+    })
+    .await
+    .expect("transient exit recorded");
+
+    let removed_release = Arc::new(Notify::new());
+    handle
+        .add_actor(
+            "transient-override",
+            {
+                let release = removed_release.clone();
+                move || GatedExit {
+                    release: release.clone(),
+                    fail: false,
+                }
+            },
+            DynamicActorOptions::new()
+                .remove_on_exit(true)
+                .restart(RestartPolicy::OnFailure),
+        )
+        .await
+        .expect("transient override actor added");
+    removed_release.notify_one();
+    wait_for_child(&handle, "transient-override", false).await;
+
+    let never_release = Arc::new(Notify::new());
+    handle
+        .add_actor(
+            "never-override",
+            {
+                let release = never_release.clone();
+                move || GatedExit {
+                    release: release.clone(),
+                    fail: false,
+                }
+            },
+            DynamicActorOptions::new()
+                .remove_on_exit(false)
+                .restart(RestartPolicy::Never),
+        )
+        .await
+        .expect("never override actor added");
+    never_release.notify_one();
+    timeout(Duration::from_secs(1), async {
+        let mut snapshots = handle.subscribe_snapshots();
+        loop {
+            if snapshots
+                .borrow()
+                .child("never-override")
+                .is_some_and(|child| child.last_exit.is_some())
+            {
+                break;
+            }
+            snapshots
+                .changed()
+                .await
+                .expect("runtime remains available");
+        }
+    })
+    .await
+    .expect("never exit retained by override");
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn remove_on_exit_does_not_remove_an_actor_that_restarts() {
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+    let starts = Arc::new(AtomicUsize::new(0));
+    handle
+        .add_actor(
+            "restart-once",
+            {
+                let starts = starts.clone();
+                move || RestartOnce {
+                    starts: starts.clone(),
+                }
+            },
+            DynamicActorOptions::new()
+                .restart(RestartPolicy::OnFailure)
+                .remove_on_exit(true),
+        )
+        .await
+        .expect("restartable actor added");
+
+    timeout(Duration::from_secs(1), async {
+        let mut snapshots = handle.subscribe_snapshots();
+        loop {
+            if snapshots
+                .borrow()
+                .child("restart-once")
+                .is_some_and(|child| child.generation >= 1)
+            {
+                break;
+            }
+            snapshots
+                .changed()
+                .await
+                .expect("runtime remains available");
+        }
+    })
+    .await
+    .expect("actor restarted");
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
 
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }

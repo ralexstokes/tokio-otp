@@ -161,6 +161,7 @@ impl SupervisedActors {
             overrides.restart.unwrap_or(self.default_restart),
             overrides.shutdown.unwrap_or(self.default_shutdown),
             overrides.restart_intensity,
+            false,
         )
     }
 }
