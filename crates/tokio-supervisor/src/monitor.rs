@@ -234,6 +234,7 @@ mod tests {
             total_restarts: 1,
             children: vec![crate::ChildSnapshot {
                 id: "worker".to_owned(),
+                membership_epoch: 0,
                 generation: 1,
                 started: true,
                 startup_aborted: false,
