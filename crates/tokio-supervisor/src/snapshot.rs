@@ -69,6 +69,10 @@ pub struct ChildSnapshot {
     /// same membership retain the epoch. Epochs are scoped to direct children
     /// of one supervisor incarnation; nested supervisors maintain independent
     /// sequences. The counter saturates at [`u64::MAX`].
+    ///
+    /// With the `serde` feature, snapshots serialized before this field was
+    /// introduced deserialize it as zero. Such legacy data is therefore
+    /// indistinguishable from a genuine first membership.
     #[cfg_attr(feature = "serde", serde(default))]
     pub membership_epoch: u64,
     /// Current generation counter. Incremented on each restart.
