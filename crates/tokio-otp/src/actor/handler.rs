@@ -2,7 +2,7 @@ use std::future::Future;
 
 use crate::actor::{
     context::ActorContext,
-    raw::{ActorResult, RawActor},
+    raw::{ActorResult, BoxError, Flow, RawActor},
 };
 
 /// How the provided [`Actor`] receive loop treats messages still
@@ -49,6 +49,11 @@ pub enum DrainPolicy {
 /// Hand-writing [`RawActor::run`] remains the escape hatch for actors that need
 /// custom loop control.
 ///
+/// A [`Flow::Stop`] exit is normal for monitoring and supervision. An
+/// [`Always`](tokio_supervisor::RestartPolicy::Always) child restarts after it;
+/// [`OnFailure`](tokio_supervisor::RestartPolicy::OnFailure) and
+/// [`Never`](tokio_supervisor::RestartPolicy::Never) children do not.
+///
 /// # Incarnation construction
 ///
 /// Registration takes a reusable [`ActorFactory`](crate::ActorFactory), whose
@@ -61,6 +66,9 @@ pub trait Actor: Send + Sync + 'static {
 
     /// Handles one received message.
     ///
+    /// Returning [`Flow::Continue`] receives the next message. Returning
+    /// [`Flow::Stop`] requests a clean stop; the actor's [`DrainPolicy`] is
+    /// applied to the queued mailbox before [`on_stop`](Self::on_stop) runs.
     /// Returning `Err` fails the actor exactly like [`RawActor::run`] returning
     /// `Err`.
     fn handle(
@@ -71,25 +79,27 @@ pub trait Actor: Send + Sync + 'static {
 
     /// Runs once before the first message of each actor run.
     ///
-    /// This is the place to acquire per-incarnation resources; an error here
+    /// This is the place to acquire per-incarnation resources. Returning
+    /// [`Flow::Stop`] stops cleanly without handling a message. An error here
     /// fails the run like a [`handle`](Self::handle) error, so under
     /// supervision it is an ordinary restartable failure.
     fn on_start(
         &mut self,
         _ctx: &ActorContext<Self::Msg>,
     ) -> impl Future<Output = ActorResult> + Send {
-        async { Ok(()) }
+        async { Ok(Flow::Continue) }
     }
 
     /// Runs once after the receive loop exits cleanly.
     ///
-    /// This hook also runs after a drain. It is not called when
+    /// This hook also runs after a drain and cannot change the flow decision.
+    /// It is not called when
     /// [`handle`](Self::handle) or [`on_start`](Self::on_start) returns an
     /// error.
     fn on_stop(
         &mut self,
         _ctx: &ActorContext<Self::Msg>,
-    ) -> impl Future<Output = ActorResult> + Send {
+    ) -> impl Future<Output = Result<(), BoxError>> + Send {
         async { Ok(()) }
     }
 
@@ -107,29 +117,17 @@ impl<H: Actor> RawActor for H {
     }
 
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
-        self.on_start(&ctx).await?;
+        let start_flow = self.on_start(&ctx).await?;
         ctx.mark_ready();
 
-        loop {
+        let mut stopping = start_flow == Flow::Stop;
+        while !stopping {
             let message = if let Some(message) = ctx.take_continuation() {
                 Some(message)
             } else {
                 tokio::select! {
                     biased;
                     _ = ctx.shutdown.cancelled() => {
-                        if self.drain_policy() == DrainPolicy::Drain {
-                            ctx.mailbox.close();
-                            loop {
-                                let message = match ctx.take_continuation() {
-                                    Some(message) => Some(message),
-                                    None => ctx.mailbox.recv().await,
-                                };
-                                let Some(message) = message else { break };
-                                ctx.myself.record_received();
-                                ctx.observability.emit_message_received(&ctx.id);
-                                self.handle(message, &ctx).await?;
-                            }
-                        }
                         break;
                     }
                     message = ctx.mailbox.recv() => message,
@@ -141,9 +139,22 @@ impl<H: Actor> RawActor for H {
             };
             ctx.myself.record_received();
             ctx.observability.emit_message_received(&ctx.id);
-            self.handle(message, &ctx).await?;
+            stopping = self.handle(message, &ctx).await? == Flow::Stop;
         }
 
-        self.on_stop(&ctx).await
+        if self.drain_policy() == DrainPolicy::Drain {
+            ctx.mailbox.close();
+            while let Some(message) = ctx.mailbox.recv().await {
+                ctx.myself.record_received();
+                ctx.observability.emit_message_received(&ctx.id);
+                // Once stopping begins, flow values do not change the drain
+                // decision. Continuations queued by drain handlers are left
+                // for the context to drop with the incarnation.
+                self.handle(message, &ctx).await?;
+            }
+        }
+
+        self.on_stop(&ctx).await?;
+        Ok(Flow::Stop)
     }
 }

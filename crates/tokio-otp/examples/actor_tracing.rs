@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use tokio::sync::mpsc;
-use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder};
+use tokio_otp::{Actor, ActorContext, ActorResult, GraphBuilder, prelude::Continue};
 
 mod support;
 
@@ -21,7 +21,7 @@ impl Actor for Worker {
         tracing::info!(message, "worker received message");
         ctx.run_blocking(|_token| ()).await;
         self.completed.send(()).expect("receiver alive");
-        Ok(())
+        Ok(Continue)
     }
 }
 

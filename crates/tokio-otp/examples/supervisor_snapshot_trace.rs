@@ -11,6 +11,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, SupervisedActors,
+    prelude::Continue,
 };
 use tokio_supervisor::{RestartIntensity, Strategy, SupervisorBuilder};
 
@@ -25,7 +26,7 @@ impl Actor for Frontend {
     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
         let worker = self.worker.clone();
         worker.send(message).await?;
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -41,16 +42,16 @@ impl Actor for Worker {
 
     async fn on_start(&mut self, _ctx: &ActorContext<String>) -> ActorResult {
         self.run = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(())
+        Ok(Continue)
     }
 
     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
         println!("worker generation {} received `{message}`", self.run);
         if message == "fail-worker" {
-            return Err::<(), BoxError>(Box::new(io::Error::other("simulated failure")));
+            return Err::<_, BoxError>(Box::new(io::Error::other("simulated failure")));
         }
         let _ = self.processed.send(message);
-        Ok(())
+        Ok(Continue)
     }
 }
 

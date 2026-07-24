@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_otp::{
     ActorContext, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Reply, SendError,
-    SupervisedActors,
+    SupervisedActors, prelude::Continue,
 };
 use tokio_supervisor::{
     BackoffPolicy, ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, Strategy,
@@ -45,7 +45,7 @@ impl RawActor for Frontend {
             let worker = self.worker.clone();
             worker.send(message).await?;
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -65,10 +65,10 @@ impl RawActor for Worker {
             self.observed.send(message).expect("receiver alive");
             if run == 0 {
                 send_once(&self.failed, ());
-                return Err::<(), BoxError>(Box::new(io::Error::other("boom")));
+                return Err::<_, BoxError>(Box::new(io::Error::other("boom")));
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -155,13 +155,13 @@ impl RawActor for CleanThenReceive {
         let run = self.runs.fetch_add(1, Ordering::SeqCst);
         if run == 0 {
             send_once(&self.first_exited, ());
-            return Ok(());
+            return Ok(Continue);
         }
 
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("receiver alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -232,7 +232,7 @@ impl RawActor for NotifyCleanExit {
 
     async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
         send_once(&self.exited, ());
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -311,13 +311,13 @@ impl RawActor for RestartingRpc {
             match message {
                 RpcMsg::FailOnce if run == 0 => {
                     send_once(&self.failed, ());
-                    return Err::<(), BoxError>(Box::new(io::Error::other("boom")));
+                    return Err::<_, BoxError>(Box::new(io::Error::other("boom")));
                 }
                 RpcMsg::FailOnce => {}
                 RpcMsg::Get(reply) => reply.send("ok".to_owned()),
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 

@@ -156,7 +156,7 @@ impl Actor for Router {
                 }
             }
         }
-        Ok(())
+        Ok(tokio_otp::prelude::Continue)
     }
 }
 ```

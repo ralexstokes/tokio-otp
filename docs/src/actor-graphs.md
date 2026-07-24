@@ -10,6 +10,13 @@ desk sends orders to the press, the front desk owns an `ActorRef<Order>`.
 Actor names exist too, but only as *labels* for tracing, stats, and
 supervisor child ids — addressing is always a typed ref.
 
+Handler methods return `Ok(Continue)` to receive another message or `Ok(Stop)`
+to finish cleanly. A clean stop follows the same drain policy and `on_stop`
+hook as an external stop: `Discard` drops the queued mailbox, `Drain` handles
+it, and queued `continue_with` continuations are dropped in either case. It is
+a normal exit to watches and supervision. `RestartPolicy::Always` restarts it;
+`OnFailure` and `Never` do not.
+
 The usual static graph is a struct whose fields are the actors. Deriving
 `Topology` gives that struct a `graph` method; its wiring closure receives a
 refs struct with one typed `ActorRef` per field, so cycles and forward
@@ -17,6 +24,7 @@ references do not require string lookup. Refs you need outside the graph are
 captured from the same closure:
 
 ```rust,no_run
+use tokio_otp::prelude::Continue;
 use tokio_otp::{ActorContext, ActorRef, ActorResult, Actor, GraphBuilder, Reply, Runtime, Topology};
 
 struct Order(String);
@@ -36,7 +44,7 @@ impl Actor for FrontDesk {
 
     async fn handle(&mut self, order: Order, _ctx: &ActorContext<Order>) -> ActorResult {
         self.press.send(order).await?;
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -51,7 +59,7 @@ impl Actor for Press {
         self.shipping
             .send(ShippingMsg::Ship(Parcel(format!("printed[{order}]"))))
             .await?;
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -75,7 +83,7 @@ impl Actor for Shipping {
             }
             ShippingMsg::Total(reply) => reply.send(self.shipped),
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 

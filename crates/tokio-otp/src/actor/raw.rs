@@ -7,8 +7,23 @@ use crate::actor::context::ActorContext;
 /// This is identical to and interchangeable with `tokio_supervisor::BoxError`.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// The result type returned by every actor function.
-pub type ActorResult = Result<(), BoxError>;
+/// Controls whether a handler actor continues receiving messages or stops
+/// cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Flow {
+    /// Continue receiving messages.
+    Continue,
+    /// Stop the actor cleanly.
+    Stop,
+}
+
+/// The result type returned by actor run, startup, and message functions.
+///
+/// Handler-style actors use [`Flow`] to continue or request a clean stop. A
+/// custom [`RawActor`] owns its receive loop, so its final flow value is not
+/// interpreted by the runtime; both variants are clean exits.
+pub type ActorResult = Result<Flow, BoxError>;
 
 /// Async actor interface with a typed mailbox.
 ///

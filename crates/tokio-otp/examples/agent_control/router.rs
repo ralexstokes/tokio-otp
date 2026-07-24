@@ -8,7 +8,10 @@ use std::{
     },
 };
 
-use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, RuntimeHandle};
+use tokio_otp::{
+    Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, RuntimeHandle,
+    prelude::Continue,
+};
 
 use crate::{
     messages::{
@@ -224,6 +227,6 @@ impl Actor for Router {
                 }
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }

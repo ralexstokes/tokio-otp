@@ -7,7 +7,9 @@ use tokio::{
     },
     time::{sleep, timeout},
 };
-use tokio_otp::{ActorContext, ActorResult, GraphBuilder, RawActor, RebindPolicy, SendError};
+use tokio_otp::{
+    ActorContext, ActorResult, GraphBuilder, RawActor, RebindPolicy, SendError, prelude::Continue,
+};
 
 #[derive(Clone)]
 struct OneMessageSink {
@@ -21,7 +23,7 @@ impl RawActor for OneMessageSink {
         if let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("receiver alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 

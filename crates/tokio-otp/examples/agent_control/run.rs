@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, CancellationToken};
+use tokio_otp::{
+    Actor, ActorContext, ActorRef, ActorResult, CancellationToken,
+    prelude::{Continue, Stop},
+};
 
 use crate::{
     messages::{
@@ -80,7 +83,7 @@ impl AgentRun {
             }),
         )
         .await??;
-        Ok(())
+        Ok(Continue)
     }
 
     fn start_model(&self, ctx: &ActorContext<RunMsg>) {
@@ -156,7 +159,7 @@ impl AgentRun {
                 })
                 .await;
         });
-        Ok(())
+        Ok(Continue)
     }
 
     async fn finish(&self, output: RunOutput) -> ActorResult {
@@ -167,7 +170,7 @@ impl AgentRun {
                 output,
             })
             .await?;
-        Ok(())
+        Ok(Stop)
     }
 }
 
@@ -176,7 +179,7 @@ impl Actor for AgentRun {
 
     async fn on_start(&mut self, ctx: &ActorContext<Self::Msg>) -> ActorResult {
         ctx.continue_with(RunMsg::Step);
-        Ok(())
+        Ok(Continue)
     }
 
     async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
@@ -184,7 +187,7 @@ impl Actor for AgentRun {
             RunMsg::Step => self.start_model(ctx),
             RunMsg::ModelResult { turn, result } => {
                 if turn != self.turn {
-                    return Ok(());
+                    return Ok(Continue);
                 }
                 let turn = match result {
                     Ok(turn) => turn,
@@ -194,8 +197,7 @@ impl Actor for AgentRun {
                             state: "model step cancelled".into(),
                         })
                         .await?;
-                        self.finish(RunOutput::Cancelled).await?;
-                        return Ok(());
+                        return self.finish(RunOutput::Cancelled).await;
                     }
                     Err(ModelError::RateLimited | ModelError::Deadline) => {
                         self.append(JournalEntry::Checkpoint {
@@ -226,14 +228,14 @@ impl Actor for AgentRun {
                             text: plan.clone(),
                         })
                         .await?;
-                        self.finish(RunOutput::Planned(plan)).await?;
+                        return self.finish(RunOutput::Planned(plan)).await;
                     }
                     ModelAction::Tools(tools) => {
                         self.tools = tools;
                         self.start_tool(0, ctx).await?;
                     }
                     ModelAction::Complete(output) => {
-                        self.finish(RunOutput::Engineered(output)).await?;
+                        return self.finish(RunOutput::Engineered(output)).await;
                     }
                     ModelAction::Review(approved) => {
                         self.append(JournalEntry::Review {
@@ -241,7 +243,7 @@ impl Actor for AgentRun {
                             approved,
                         })
                         .await?;
-                        self.finish(RunOutput::Reviewed(approved)).await?;
+                        return self.finish(RunOutput::Reviewed(approved)).await;
                     }
                 }
             }
@@ -268,6 +270,6 @@ impl Actor for AgentRun {
                 }
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }

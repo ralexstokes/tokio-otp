@@ -12,7 +12,7 @@ use tokio::{
 };
 use tokio_otp::{
     ActorContext, ActorResult, CallError, Graph, GraphBuilder, RawActor, RebindPolicy, Reply,
-    RunnableActor,
+    RunnableActor, prelude::Continue,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -63,7 +63,7 @@ impl RawActor for ReplyImmediately {
         while let Some(Request::Get(reply)) = ctx.recv().await {
             reply.send("ok");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -117,7 +117,7 @@ impl RawActor for GatedMailbox {
                 }
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -184,7 +184,7 @@ impl RawActor for DelayedReply {
             reply.send("late");
             self.replied.send(()).expect("test receiver alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -240,7 +240,7 @@ impl RawActor for ExitWithoutReceiving {
     async fn run(&mut self, _ctx: ActorContext<Request>) -> ActorResult {
         self.started.send(()).expect("test receiver alive");
         self.exit.notified().await;
-        Ok(())
+        Ok(Continue)
     }
 }
 

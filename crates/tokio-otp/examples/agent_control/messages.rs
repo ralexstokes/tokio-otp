@@ -286,9 +286,6 @@ pub enum SessionMsg {
         role: Role,
         event: MonitorEvent,
     },
-    RunRemoved {
-        id: String,
-    },
     PauseChanged {
         paused: bool,
     },

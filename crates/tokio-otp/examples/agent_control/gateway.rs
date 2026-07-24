@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DrainPolicy, RawActor};
+use tokio_otp::{
+    Actor, ActorContext, ActorRef, ActorResult, DrainPolicy, RawActor, prelude::Continue,
+};
 
 use crate::{
     chat::{ChatEvent, ChatSim},
@@ -31,7 +33,7 @@ impl Actor for Outbound {
                 self.chat.deliver_reply(chat, text);
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 
     fn drain_policy(&self) -> DrainPolicy {
@@ -62,7 +64,7 @@ impl Actor for Progress {
         // This models a finite-rate transport and makes mailbox conflation
         // observable during the scripted flood.
         tokio::time::sleep(Duration::from_millis(1)).await;
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -115,7 +117,7 @@ impl Inbound {
                     .await?;
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 
     async fn bridge_message(&self, message: InboundMsg) -> ActorResult {
@@ -143,18 +145,20 @@ impl RawActor for Inbound {
             tokio::select! {
                 biased;
                 message = ctx.recv() => match message {
-                    Some(message) => self.bridge_message(message).await?,
+                    Some(message) => {
+                        self.bridge_message(message).await?;
+                    }
                     None => {
                         self.chat.release_session();
-                        return Ok(());
+                        return Ok(Continue);
                     }
                 },
                 event = session.recv() => match event {
                     Some(ChatEvent::Delivery(delivery)) => {
-                        self.bridge_message(InboundMsg::Delivery(delivery)).await?
+                        self.bridge_message(InboundMsg::Delivery(delivery)).await?;
                     }
                     Some(ChatEvent::Disconnected) | None => {
-                        self.bridge_message(InboundMsg::Disconnected).await?
+                        self.bridge_message(InboundMsg::Disconnected).await?;
                     }
                 }
             }

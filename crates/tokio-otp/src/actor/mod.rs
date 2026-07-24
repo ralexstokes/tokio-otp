@@ -25,4 +25,4 @@ pub use factory::ActorFactory;
 pub use graph::{ActorRunError, Graph, RunnableActor, RunnableActorFactory};
 pub use handler::{Actor, DrainPolicy};
 pub use monitor::{Down, DownReason, MonitorEvent, MonitorRef};
-pub use raw::{ActorResult, BoxError, RawActor};
+pub use raw::{ActorResult, BoxError, Flow, RawActor};

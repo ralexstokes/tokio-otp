@@ -9,7 +9,7 @@ use std::{
 };
 
 use tokio::time::Instant;
-use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult};
+use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, prelude::Continue};
 
 use crate::{
     messages::{
@@ -49,7 +49,7 @@ impl Guard {
 
     async fn set_paused(&mut self, paused: bool, ctx: &ActorContext<GuardMsg>) -> ActorResult {
         if self.report.paused == paused {
-            return Ok(());
+            return Ok(Continue);
         }
         self.report.paused = paused;
         self.gate.store(!paused, Ordering::Release);
@@ -58,7 +58,7 @@ impl Guard {
             self.backoff_multiplier = 1;
             ctx.send_after(GuardMsg::Probe, PROBE_BACKOFF_BASE);
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -84,7 +84,9 @@ impl Actor for Guard {
                     self.set_paused(true, ctx).await?;
                 }
             }
-            GuardMsg::BudgetExceeded => self.set_paused(true, ctx).await?,
+            GuardMsg::BudgetExceeded => {
+                self.set_paused(true, ctx).await?;
+            }
             GuardMsg::BridgeRestarts { total } => self.report.bridge_restarts = total,
             GuardMsg::Probe => {
                 self.report.probes += 1;
@@ -109,6 +111,6 @@ impl Actor for Guard {
             GuardMsg::Paused { reply } => reply.send(self.report.paused),
             GuardMsg::Report { reply } => reply.send(self.report.clone()),
         }
-        Ok(())
+        Ok(Continue)
     }
 }

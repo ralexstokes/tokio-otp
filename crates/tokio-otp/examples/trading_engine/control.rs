@@ -51,6 +51,6 @@ impl Actor for Control {
             }
             ControlMsg::EmergencyCancelAll { reply } => reply.send(self.cancel_all().await),
         }
-        Ok(())
+        Ok(Continue)
     }
 }

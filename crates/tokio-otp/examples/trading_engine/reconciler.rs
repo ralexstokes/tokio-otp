@@ -107,7 +107,7 @@ impl Actor for Reconciler {
         for venue in self.feeds.keys().copied() {
             self.watch(venue, ctx);
         }
-        Ok(())
+        Ok(Continue)
     }
 
     async fn handle(
@@ -157,7 +157,7 @@ impl Actor for Reconciler {
             }
             ReconcilerMsg::StaleSweep { generation } => {
                 if generation != self.sweep_generation {
-                    return Ok(());
+                    return Ok(Continue);
                 }
                 let now = Instant::now();
                 let stale = self
@@ -192,6 +192,6 @@ impl Actor for Reconciler {
                 });
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }

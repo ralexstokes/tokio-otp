@@ -13,6 +13,7 @@ use tokio::{
 };
 use tokio_otp::{
     ActorContext, ActorFactory, ActorRef, ActorResult, BoxError, GraphBuilder, RawActor, Runtime,
+    prelude::Continue,
 };
 use tokio_supervisor::{Strategy, SupervisorBuilder};
 
@@ -42,7 +43,7 @@ impl RawActor for OneShot {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -85,7 +86,7 @@ impl RawActor for CancelledTimer {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -120,7 +121,7 @@ impl RawActor for StateTimeout {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -158,7 +159,7 @@ impl RawActor for ReplacedStateTimeout {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -202,7 +203,7 @@ impl RawActor for ClearedStateTimeout {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -240,7 +241,7 @@ impl RawActor for SequentialStateTimeouts {
                 ctx.state_timeout("second", Duration::from_millis(20));
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -282,7 +283,7 @@ impl RawActor for ClearsEmptyStateTimeout {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -322,7 +323,7 @@ impl RawActor for Interval {
                 timer.cancel();
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -364,14 +365,14 @@ impl RawActor for RestartingTimer {
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
             let _old_timer = ctx.send_after("old", Duration::from_millis(150));
-            return Err::<(), BoxError>(Box::new(io::Error::other("restart")));
+            return Err::<_, BoxError>(Box::new(io::Error::other("restart")));
         }
 
         let _new_timer = ctx.send_after("new", Duration::from_millis(10));
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -413,14 +414,14 @@ impl RawActor for RestartingStateTimeout {
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
             let _old = ctx.state_timeout("old", Duration::from_millis(150));
-            return Err::<(), BoxError>(Box::new(io::Error::other("restart")));
+            return Err::<_, BoxError>(Box::new(io::Error::other("restart")));
         }
 
         let _new = ctx.state_timeout("new", Duration::from_millis(10));
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -480,7 +481,7 @@ impl RawActor for BackpressureInterval {
         self.observed.send(messages).expect("observer alive");
 
         while ctx.recv().await.is_some() {}
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -557,7 +558,7 @@ impl RawActor for Sink {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -595,7 +596,7 @@ impl RawActor for CrossScheduler {
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         let _timer = ctx.send_after_to(&self.target, "cross", Duration::from_millis(20));
         while ctx.recv().await.is_some() {}
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -636,12 +637,12 @@ impl RawActor for RestartingCrossScheduler {
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
             let _old = ctx.send_after_to(&self.target, "old", Duration::from_millis(150));
-            return Err::<(), BoxError>(Box::new(io::Error::other("restart")));
+            return Err::<_, BoxError>(Box::new(io::Error::other("restart")));
         }
 
         let _new = ctx.send_after_to(&self.target, "new", Duration::from_millis(10));
         while ctx.recv().await.is_some() {}
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -685,7 +686,7 @@ impl RawActor for CrossInterval {
         while ctx.recv().await.is_some() {
             timer.cancel();
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 

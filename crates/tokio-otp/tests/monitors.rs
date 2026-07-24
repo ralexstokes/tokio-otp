@@ -7,6 +7,7 @@ use tokio::{
 use tokio_otp::{
     ActorContext, ActorRef, ActorResult, Down, DownReason, GraphBuilder, MonitorEvent, MonitorRef,
     RawActor, RebindPolicy, RunnableActor, RunnableActorFactory, SupervisedActors,
+    prelude::Continue,
 };
 use tokio_supervisor::{ShutdownPolicy, SupervisorBuilder};
 use tokio_util::sync::CancellationToken;
@@ -28,7 +29,7 @@ impl RawActor for Peer {
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         self.started.send(()).expect("start receiver alive");
         match ctx.recv().await {
-            Some(PeerMessage::Stop) | None => Ok(()),
+            Some(PeerMessage::Stop) | None => Ok(Continue),
             Some(PeerMessage::Panic) => panic!("deliberate peer panic"),
         }
     }
@@ -65,7 +66,7 @@ impl RawActor for Observer {
                 ObserverMessage::Crash => panic!("deliberate observer panic"),
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -627,7 +628,7 @@ impl RawActor for GatedObserver {
                 break;
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -723,7 +724,7 @@ impl RawActor for UnitObserver {
         while let Some(event) = ctx.recv().await {
             self.observed.send(event).expect("observer receiver alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -792,7 +793,7 @@ impl RawActor for PanickingMapper {
         });
         self.started.send(()).expect("start receiver alive");
         while ctx.recv().await.is_some() {}
-        Ok(())
+        Ok(Continue)
     }
 }
 

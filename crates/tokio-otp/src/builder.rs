@@ -30,7 +30,7 @@ use crate::{runtime::Runtime, supervised_actors::SupervisedActors};
 ///
 ///     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
 ///         println!("{message}");
-///         Ok(())
+///         Ok(tokio_otp::prelude::Continue)
 ///     }
 /// }
 ///
