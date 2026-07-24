@@ -56,21 +56,27 @@ use tokio_otp::SupervisorHandleExt as _;
 let restart_watch = handle
     .supervisor("venues")
     .unwrap()
-    .watch_restarts_to(&breaker, |count| {
-        HealthMsg::RestartsObserved { count }
+    .watch_restarts_to(&breaker, |total| {
+        HealthMsg::RestartsObserved { total }
     });
 ```
 
 `watch_restarts_to` drives a `RestartWatch` over the monotonic
-`total_restarts` counter and sends each newly observed count through the
-target's ordinary mailbox policy. Unlike an event subscriber it cannot lose
-restarts to broadcast lag or mailbox backpressure: one observation may cover
-several restarts when snapshots were conflated, but the cumulative counter
-preserves the total. Keep the returned `RestartWatchRef` alive for as long as
-the pump is needed. Dropping or cancelling it stops the pump; it also stops
-when the target permanently terminates or the watched supervisor reaches a
-terminal state. An actor restart is not terminal, so the pump follows the
-stable ref into the next incarnation.
+`total_restarts` counter and sends a cumulative total (starting at zero when
+the pump is created) through the target's ordinary mailbox policy. Treat the
+value as idempotent state, not an additive delta. That contract survives both
+snapshot conflation and a latest-wins target mailbox: a newer message already
+contains every restart represented by the older one. After a target restart,
+the pump sends the latest total again so the fresh incarnation can restore its
+state. As with every actor send, acceptance is not an acknowledgement that the
+handler processed the message; use an application-level acknowledgement when
+processing itself must be confirmed.
+
+Keep the returned `RestartWatchRef` alive for as long as the pump is needed.
+Dropping or cancelling it stops the pump; it also stops when the target
+permanently terminates or the watched supervisor reaches a terminal state,
+even if delivery is currently waiting for mailbox capacity. An actor restart
+is not terminal, so the pump follows the stable ref into the next incarnation.
 
 Its scope is the watched supervisor's **direct children**: to cover a nested
 subtree, watch each nested supervisor's own handle (`handle.supervisor(id)`) —

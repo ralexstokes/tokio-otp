@@ -203,13 +203,15 @@ pub trait SupervisorHandleExt: sealed::Sealed {
         options: DynamicActorOptions,
     ) -> impl Future<Output = Result<(), ControlError>> + Send;
 
-    /// Pumps this supervisor's newly recorded restart counts into `target`.
+    /// Pumps this supervisor's cumulative restart count into `target`.
     ///
     /// This is the actor-mailbox form of [`SupervisorHandle::watch_restarts`].
-    /// Each observation is passed to `map` and delivered with the target's
-    /// ordinary mailbox policy. Snapshot conflation and mailbox backpressure
-    /// may combine several restarts into one count, but no restart covered by
-    /// [`SupervisorSnapshot::total_restarts`] is silently lost.
+    /// Each observation is the cumulative number of restarts since this watch
+    /// was created. It is passed to `map` and delivered with the target's
+    /// ordinary mailbox policy. Cumulative values make latest-wins conflation
+    /// safe, and the latest value is sent again after a target restart so a
+    /// fresh incarnation can restore its state. Consumers should therefore
+    /// treat observations as idempotent totals, not additive deltas.
     ///
     /// The pump stops when the returned [`RestartWatchRef`] is dropped or
     /// cancelled, when the watched supervisor reaches a terminal state, or
@@ -306,19 +308,40 @@ where
 
     tokio::spawn(async move {
         let _cancel_on_exit = CancelRestartWatchOnDrop(task_cancellation.clone());
-        while let Some(count) = tokio::select! {
+        let Some(mut total) = (tokio::select! {
             biased;
             () = task_cancellation.cancelled() => None,
             () = target.wait_terminated() => None,
             count = restarts.next() => count,
-        } {
-            let sent = tokio::select! {
+        }) else {
+            return;
+        };
+
+        loop {
+            let accepted_by = tokio::select! {
                 biased;
                 () = task_cancellation.cancelled() => break,
-                sent = target.send(map(count)) => sent,
+                () = restarts.closed() => break,
+                () = target.wait_terminated() => break,
+                sent = target.send_to_incarnation(map(total)) => match sent {
+                    Ok(mailbox) => mailbox,
+                    Err(_) => break,
+                },
             };
-            if sent.is_err() {
-                break;
+
+            tokio::select! {
+                biased;
+                () = task_cancellation.cancelled() => break,
+                restarted = target.wait_incarnation_changed(&accepted_by) => {
+                    if !restarted {
+                        break;
+                    }
+                    // Re-send the cumulative total to the fresh incarnation.
+                }
+                count = restarts.next() => match count {
+                    Some(count) => total = total.saturating_add(count),
+                    None => break,
+                },
             }
         }
     });
@@ -586,13 +609,15 @@ impl RuntimeHandle {
         self.supervisor.watch_restarts()
     }
 
-    /// Pumps newly recorded restart counts into `target`.
+    /// Pumps the cumulative restart count into `target`.
     ///
     /// This is the actor-mailbox form of [`watch_restarts`](Self::watch_restarts).
-    /// Each observation is passed to `map` and delivered with the target's
-    /// ordinary mailbox policy. Snapshot conflation and mailbox backpressure
-    /// may combine several restarts into one count, but no restart covered by
-    /// [`SupervisorSnapshot::total_restarts`] is silently lost.
+    /// Each observation is the cumulative number of restarts since this watch
+    /// was created. It is passed to `map` and delivered with the target's
+    /// ordinary mailbox policy. Cumulative values make latest-wins conflation
+    /// safe, and the latest value is sent again after a target restart so a
+    /// fresh incarnation can restore its state. Consumers should therefore
+    /// treat observations as idempotent totals, not additive deltas.
     ///
     /// The pump stops when the returned [`RestartWatchRef`] is dropped or
     /// cancelled, when this runtime reaches a terminal state, or when the

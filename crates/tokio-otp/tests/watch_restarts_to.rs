@@ -1,9 +1,14 @@
 use std::{io, time::Duration};
 
-use tokio::{sync::mpsc, time::timeout};
+use std::sync::Arc;
+
+use tokio::{
+    sync::{Notify, mpsc},
+    time::timeout,
+};
 use tokio_otp::{
-    Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, RestartPolicy, Runtime,
-    RuntimeHandle, SupervisorHandleExt,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ChildSpec, DynamicActorOptions,
+    MailboxMode, RestartPolicy, Runtime, RuntimeHandle, SupervisorBuilder, SupervisorHandleExt,
 };
 
 struct Sink {
@@ -73,6 +78,52 @@ async fn crash_once(handle: &RuntimeHandle, crasher: &ActorRef<()>) {
         .await
         .expect("crasher restarted in time")
         .expect("crasher restarted");
+}
+
+async fn wait_until(mut predicate: impl FnMut() -> bool) {
+    timeout(Duration::from_secs(1), async {
+        while !predicate() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("condition became true");
+}
+
+enum BlockingSinkMsg {
+    Block,
+    RestartTotal(u64),
+}
+
+struct BlockingSink {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    observed: mpsc::UnboundedSender<u64>,
+    crash_after_release: bool,
+}
+
+impl Actor for BlockingSink {
+    type Msg = BlockingSinkMsg;
+
+    async fn handle(
+        &mut self,
+        message: BlockingSinkMsg,
+        _ctx: &ActorContext<BlockingSinkMsg>,
+    ) -> ActorResult {
+        match message {
+            BlockingSinkMsg::Block => {
+                self.entered.notify_one();
+                self.release.notified().await;
+                if self.crash_after_release {
+                    return Err(io::Error::other("sink crash requested").into());
+                }
+            }
+            BlockingSinkMsg::RestartTotal(total) => {
+                self.observed.send(total).expect("observer alive");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -149,5 +200,199 @@ async fn restart_watch_stops_when_target_terminates() {
     .await
     .expect("watch stopped after target termination");
 
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn cumulative_totals_survive_conflating_target_mailbox() {
+    let runtime = Runtime::builder().build().expect("runtime builds");
+    let handle = runtime.spawn();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (observed_tx, mut observed) = mpsc::unbounded_channel();
+    let sink = handle
+        .add_actor_with_options(
+            "sink",
+            {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move || BlockingSink {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                    observed: observed_tx.clone(),
+                    crash_after_release: false,
+                }
+            },
+            ActorOptions::new().mailbox(MailboxMode::Conflate),
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("sink added");
+    let crasher = handle
+        .add_actor("crasher", || Crasher, DynamicActorOptions::default())
+        .await
+        .expect("crasher added");
+    handle.wait_started().await.expect("actors started");
+    sink.send(BlockingSinkMsg::Block)
+        .await
+        .expect("block request delivered");
+    entered.notified().await;
+
+    let watch = handle.watch_restarts_to(&sink, BlockingSinkMsg::RestartTotal);
+    crash_once(&handle, &crasher).await;
+    wait_until(|| sink.stats().messages_accepted >= 2).await;
+    crash_once(&handle, &crasher).await;
+    wait_until(|| sink.stats().messages_conflated >= 1).await;
+
+    release.notify_one();
+    assert_eq!(
+        timeout(Duration::from_secs(1), observed.recv())
+            .await
+            .expect("cumulative restart total delivered"),
+        Some(2)
+    );
+
+    drop(watch);
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn latest_total_is_resent_after_target_restart() {
+    let runtime = Runtime::builder().build().expect("runtime builds");
+    let handle = runtime.spawn();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (observed_tx, mut observed) = mpsc::unbounded_channel();
+    let sink = handle
+        .add_actor(
+            "sink",
+            {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move || BlockingSink {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                    observed: observed_tx.clone(),
+                    crash_after_release: true,
+                }
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("sink added");
+    let crasher = handle
+        .add_actor("crasher", || Crasher, DynamicActorOptions::default())
+        .await
+        .expect("crasher added");
+    handle.wait_started().await.expect("actors started");
+    sink.send(BlockingSinkMsg::Block)
+        .await
+        .expect("block request delivered");
+    entered.notified().await;
+
+    let watch = handle.watch_restarts_to(&sink, BlockingSinkMsg::RestartTotal);
+    crash_once(&handle, &crasher).await;
+    wait_until(|| sink.stats().messages_accepted >= 2).await;
+    let restarted = handle.monitor_restart("sink").expect("sink is monitored");
+    release.notify_one();
+    timeout(Duration::from_secs(1), restarted)
+        .await
+        .expect("sink restarted in time")
+        .expect("sink restarted");
+
+    let restored = timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(total) = observed.recv().await
+                && total >= 2
+            {
+                return total;
+            }
+        }
+    })
+    .await
+    .expect("latest total restored to new incarnation");
+    assert_eq!(restored, 2);
+
+    drop(watch);
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn watched_supervisor_termination_cancels_backpressured_delivery() {
+    let runtime = Runtime::builder().build().expect("runtime builds");
+    let handle = runtime.spawn();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let (observed_tx, _observed) = mpsc::unbounded_channel();
+    let sink = handle
+        .add_actor(
+            "sink",
+            {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move || BlockingSink {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                    observed: observed_tx.clone(),
+                    crash_after_release: false,
+                }
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("sink added");
+
+    let crash = Arc::new(Notify::new());
+    let nested = SupervisorBuilder::new()
+        .child(
+            ChildSpec::new("crasher", {
+                let crash = Arc::clone(&crash);
+                move |ctx| {
+                    let crash = Arc::clone(&crash);
+                    async move {
+                        tokio::select! {
+                            () = ctx.shutdown_token().cancelled() => Ok(()),
+                            () = crash.notified() => Err(io::Error::other("crash requested").into()),
+                        }
+                    }
+                }
+            })
+            .restart(RestartPolicy::OnFailure),
+        )
+        .build()
+        .expect("nested supervisor builds");
+    handle
+        .add_supervisor("watched", nested)
+        .await
+        .expect("nested supervisor added");
+    let watched = handle.supervisor("watched").expect("nested handle");
+
+    sink.send(BlockingSinkMsg::Block)
+        .await
+        .expect("block request delivered");
+    entered.notified().await;
+    let capacity = sink.stats().mailbox_capacity;
+    for _ in 0..capacity {
+        sink.send(BlockingSinkMsg::RestartTotal(0))
+            .await
+            .expect("mailbox filler accepted");
+    }
+
+    let watch = watched.watch_restarts_to(&sink, BlockingSinkMsg::RestartTotal);
+    let restarted = watched
+        .monitor_restart("crasher")
+        .expect("nested child monitored");
+    crash.notify_one();
+    timeout(Duration::from_secs(1), restarted)
+        .await
+        .expect("nested child restarted in time")
+        .expect("nested child restarted");
+    handle
+        .remove_child("watched")
+        .await
+        .expect("watched supervisor removed");
+    wait_until(|| watch.is_cancelled()).await;
+
+    release.notify_one();
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }

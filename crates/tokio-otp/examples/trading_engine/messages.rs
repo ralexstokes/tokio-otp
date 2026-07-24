@@ -187,7 +187,7 @@ pub enum ControlMsg {
 
 #[derive(Debug)]
 pub enum HealthMsg {
-    RestartsObserved { count: u64 },
+    RestartsObserved { total: u64 },
     ResetBreaker,
     Tripped { reply: Reply<bool> },
 }

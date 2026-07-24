@@ -331,7 +331,7 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     let restart_watch = handle
         .supervisor("venues")
         .expect("venues supervisor")
-        .watch_restarts_to(&health, |count| HealthMsg::RestartsObserved { count });
+        .watch_restarts_to(&health, |total| HealthMsg::RestartsObserved { total });
 
     Ok(App {
         handle,
