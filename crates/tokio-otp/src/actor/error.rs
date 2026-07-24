@@ -1,5 +1,11 @@
 use thiserror::Error;
 
+/// Indicates that an [`ActorContext::step`](crate::ActorContext::step)
+/// future did not complete before its required deadline.
+#[derive(Debug, Error, Clone, Copy, Eq, PartialEq)]
+#[error("actor step deadline elapsed")]
+pub struct StepDeadline;
+
 /// Errors returned by [`ActorContext::try_recv`](crate::ActorContext::try_recv).
 ///
 /// This crate-owned type keeps the actor mailbox API independent of Tokio's

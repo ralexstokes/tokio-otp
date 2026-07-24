@@ -258,7 +258,7 @@ pub mod prelude {
         Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, BoxError,
         CallError, CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder,
         MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, RestartWatchRef,
-        Runtime, RuntimeBuilder, RuntimeHandle, SendError, TimerRef,
+        Runtime, RuntimeBuilder, RuntimeHandle, SendError, StepDeadline, StepHandle, TimerRef,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
@@ -275,8 +275,8 @@ pub use actor::{
     Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, ActorRunError,
     ActorSlot, ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, Graph,
     GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor,
-    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, SupervisorPathSegment,
-    TimerRef, TryRecvError,
+    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, StepDeadline, StepHandle,
+    SupervisorPathSegment, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{

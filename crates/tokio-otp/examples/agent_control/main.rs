@@ -51,7 +51,7 @@
 //!    │                                                │ add/watch/remove
 //!    │                                                ▼
 //!    │                                    run:<chat>:<task>:<role>
-//!    │                                     │ model turn on spawned task
+//!    │                                     │ model turn in bounded step
 //!    │                                     │ tool calls: ToolIntent journaled,
 //!    │                                     ▼ then Execute under deadline
 //!    │                                  tool_host ──(timeout? Query key)──▶ run
@@ -78,7 +78,7 @@
 //!
 //! run:<chat>:<task>:<role>   (transient child, restart = Never)
 //!   add_actor_with_options ─▶ continue_with(Step)
-//!     ─▶ model turn on a spawned task (cancel token + deadline) ─▶ ModelResult
+//!     ─▶ model turn in a context-owned step (cancel token + deadline) ─▶ ModelResult
 //!     ─▶ tool loop: journal ToolIntent ─▶ Execute (bounded) ─▶ ToolResult,
 //!         reconciling an unknown outcome through an idempotency-key Query
 //!     ─▶ RunFinished{output} to the session, which removes the child
@@ -541,27 +541,16 @@ async fn phase_5(app: &App) -> Result<(), AnyError> {
 }
 
 async fn phase_6(app: &App) -> Result<(), AnyError> {
-    let failures_before = guard_report(&app.guard).await?.run_failures_by_chat;
-    let failures_for = |map: &std::collections::HashMap<ChatId, usize>, chat: ChatId| {
-        map.get(chat).copied().unwrap_or(0)
-    };
+    let failures_before = guard_report(&app.guard).await?.run_failures;
     app.model.set_rate_limited(true);
     app.chat.inject_user_message(CHAT_A, "OK outage-a");
     app.chat.inject_user_message(CHAT_B, "OK outage-b");
     await_until(|| async { paused(&app.guard).await.unwrap_or(false) }).await?;
     assert!(!app.gate.load(Ordering::Acquire));
-    // Both sessions' failures reach the guard (the trip itself may have been
-    // two failures from one chat's retry loop), and the pause fan-out lands a
-    // notice on both chats.
-    await_until(|| async {
-        guard_report(&app.guard).await.is_ok_and(|report| {
-            failures_for(&report.run_failures_by_chat, CHAT_A)
-                > failures_for(&failures_before, CHAT_A)
-                && failures_for(&report.run_failures_by_chat, CHAT_B)
-                    > failures_for(&failures_before, CHAT_B)
-        })
-    })
-    .await?;
+    // Either session's retry loop may supply both failures that trip the
+    // breaker before the other session starts. Pin the causal aggregate and
+    // verify the cluster-wide pause separately through both chats' notices.
+    assert!(guard_report(&app.guard).await?.run_failures > failures_before);
     await_until(|| async {
         [CHAT_A, CHAT_B].iter().all(|chat| {
             app.chat

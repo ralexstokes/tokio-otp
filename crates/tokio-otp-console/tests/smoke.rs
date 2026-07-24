@@ -62,6 +62,7 @@ fn actor_stats() -> Vec<ActorStatsView> {
         messages_conflated: 3,
         message_bytes_accepted: None,
         sends_rejected: 1,
+        outstanding_steps: 0,
         mailbox_depth: 3,
         mailbox_capacity: 32,
     }]
@@ -352,6 +353,7 @@ async fn ws_sends_snapshot_then_stats_on_connect() {
             "messages_accepted": 10,
             "messages_conflated": 3,
             "sends_rejected": 1,
+            "outstanding_steps": 0,
             "mailbox_depth": 3,
             "mailbox_capacity": 32,
         }])

@@ -118,9 +118,15 @@ pub enum RouterMsg {
     SubmitResolved {
         key: OrderKey,
         disposition: SubmitDisposition,
+        submitted: SubmitResult,
+        reply: Reply<SubmitResult>,
     },
     Cancel {
         key: OrderKey,
+        reply: Reply<CancelOutcome>,
+    },
+    CancelResolved {
+        outcome: CancelOutcome,
         reply: Reply<CancelOutcome>,
     },
     ReconcileAll {

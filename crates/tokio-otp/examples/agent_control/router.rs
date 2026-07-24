@@ -8,12 +8,14 @@ use std::{
     },
 };
 
-use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, RuntimeHandle};
+use tokio_otp::{
+    Actor, ActorContext, ActorRef, ActorResult, ControlError, DynamicActorOptions, RuntimeHandle,
+};
 
 use crate::{
     messages::{
-        BudgetMsg, ChatId, GuardMsg, JournalMsg, OutboundMsg, PendingInput, ProgressMsg, Proof,
-        RouterMsg, SessionMsg, ToolHostMsg,
+        BudgetMsg, ChatId, GuardMsg, JournalMsg, OutboundMsg, PHASE_TIMEOUT, PendingInput,
+        ProgressMsg, Proof, RouterMsg, SessionMsg, ToolHostMsg,
     },
     model::ModelClient,
     session::SessionFactory,
@@ -25,7 +27,6 @@ enum SessionSlot {
         generation: u64,
     },
     Evicting {
-        generation: u64,
         buffered: Vec<PendingInput>,
     },
 }
@@ -119,16 +120,32 @@ impl Router {
         Ok(actor)
     }
 
-    fn pipeline_remove(&self, chat: ChatId, generation: u64, ctx: &ActorContext<RouterMsg>) {
+    fn pipeline_remove(&self, chat: ChatId, ctx: &ActorContext<RouterMsg>) {
         let sessions = self.sessions_handle.as_ref().expect("router bound").clone();
-        let myself = ctx.myself();
-        tokio::spawn(async move {
-            // Removal is pipelined so an idle eviction never head-of-line
-            // blocks unrelated routing work (the same hazard documented for
-            // the trading example's order router).
-            let _ = sessions.remove_child(format!("session:{chat}")).await;
-            let _ = myself.send(RouterMsg::Removed { chat, generation }).await;
-        });
+        ctx.step(
+            PHASE_TIMEOUT,
+            async move {
+                // Removal is pipelined so an idle eviction never head-of-line
+                // blocks unrelated routing work (the same hazard documented for
+                // the trading example's order router).
+                sessions.remove_child(format!("session:{chat}")).await
+            },
+            move |outcome| {
+                if matches!(
+                    outcome,
+                    Ok(Ok(()))
+                        | Ok(Err(ControlError::UnknownChildId(_)))
+                        | Ok(Err(ControlError::ShutdownTimedOut(_)))
+                ) {
+                    RouterMsg::Removed { chat }
+                } else {
+                    // A step deadline abandons only our wait. The supervisor
+                    // may still be removing this id, so reconcile before a
+                    // buffered message is allowed to re-add it.
+                    RouterMsg::RetryRemove { chat }
+                }
+            },
+        );
     }
 }
 
@@ -153,7 +170,7 @@ impl Actor for Router {
                             })
                             .await?;
                     }
-                    Some(SessionSlot::Evicting { buffered, .. }) => {
+                    Some(SessionSlot::Evicting { buffered }) => {
                         buffered.push(input);
                         self.proof
                             .lock()
@@ -180,19 +197,15 @@ impl Actor for Router {
                     self.sessions.insert(
                         chat,
                         SessionSlot::Evicting {
-                            generation,
                             buffered: Vec::new(),
                         },
                     );
-                    self.pipeline_remove(chat, generation, ctx);
+                    self.pipeline_remove(chat, ctx);
                 }
             }
-            RouterMsg::Removed { chat, generation } => {
+            RouterMsg::Removed { chat } => {
                 let buffered = match self.sessions.remove(chat) {
-                    Some(SessionSlot::Evicting {
-                        generation: current,
-                        buffered,
-                    }) if current == generation => buffered,
+                    Some(SessionSlot::Evicting { buffered }) => buffered,
                     Some(other) => {
                         self.sessions.insert(chat, other);
                         Vec::new()
@@ -209,6 +222,11 @@ impl Actor for Router {
                             })
                             .await?;
                     }
+                }
+            }
+            RouterMsg::RetryRemove { chat } => {
+                if matches!(self.sessions.get(chat), Some(SessionSlot::Evicting { .. })) {
+                    self.pipeline_remove(chat, ctx);
                 }
             }
             RouterMsg::PauseChanged { paused } => {
