@@ -107,9 +107,11 @@ impl std::future::Future for SlowDropFuture {
 impl Drop for SlowDropFuture {
     fn drop(&mut self) {
         self.drop_started.store(true, Ordering::Release);
-        while !self.release_drop.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
+        tokio::task::block_in_place(|| {
+            while !self.release_drop.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
     }
 }
 
