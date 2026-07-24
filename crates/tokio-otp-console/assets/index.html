@@ -554,7 +554,17 @@
     return el("span", "badge " + stateBadgeClass(state), state || "Unknown");
   }
 
-  function nodeRow(child) {
+  function sameSupervisorPath(actual, expected) {
+    if (!actual || actual.length !== expected.length) return false;
+    return actual.every(function (segment, index) {
+      const wanted = expected[index];
+      return segment.id === wanted.id &&
+        segment.membership_epoch === wanted.membership_epoch &&
+        segment.generation === wanted.generation;
+    });
+  }
+
+  function nodeRow(child, supervisorPath) {
     const row = el("span", "node-main");
     row.appendChild(el("span", "node-id", child.id));
     row.appendChild(stateBadge(child.state));
@@ -569,6 +579,7 @@
 
     const actor = actorStats.find(function (stats) {
       return stats.actor_id === child.id &&
+        (stats.supervisor_path == null || sameSupervisorPath(stats.supervisor_path, supervisorPath)) &&
         (stats.membership_epoch == null || stats.membership_epoch === child.membership_epoch);
     });
     if (actor) {
@@ -588,12 +599,12 @@
     return row;
   }
 
-  function renderChild(child, parentPath) {
+  function renderChild(child, parentPath, supervisorPath) {
     const path = parentPath + "/" + child.id;
 
     if (!child.supervisor) {
       const leaf = el("div", "node-row node-leaf");
-      leaf.appendChild(nodeRow(child));
+      leaf.appendChild(nodeRow(child, supervisorPath));
       return leaf;
     }
 
@@ -608,16 +619,21 @@
     });
 
     const sum = el("summary", "node-row");
-    sum.appendChild(nodeRow(child));
+    sum.appendChild(nodeRow(child, supervisorPath));
     det.appendChild(sum);
 
     const nested = el("div", "node-nested");
-    nested.appendChild(renderSupervisor(child.supervisor, path));
+    const nestedSupervisorPath = supervisorPath.concat([{
+      id: child.id,
+      membership_epoch: child.membership_epoch,
+      generation: child.generation
+    }]);
+    nested.appendChild(renderSupervisor(child.supervisor, path, nestedSupervisorPath));
     det.appendChild(nested);
     return det;
   }
 
-  function renderSupervisor(sup, parentPath) {
+  function renderSupervisor(sup, parentPath, supervisorPath) {
     const frag = document.createDocumentFragment();
 
     const header = el("div", "sup-header");
@@ -629,7 +645,7 @@
     const children = el("div", "sup-children");
     if (sup.children && sup.children.length > 0) {
       sup.children.forEach(function (c) {
-        children.appendChild(renderChild(c, parentPath));
+        children.appendChild(renderChild(c, parentPath, supervisorPath));
       });
     } else {
       children.appendChild(el("div", "node-row node-leaf", "no children"));
@@ -645,7 +661,7 @@
       root.appendChild(emptyState("Waiting for snapshot…"));
       return;
     }
-    root.appendChild(renderSupervisor(snapshot, ""));
+    root.appendChild(renderSupervisor(snapshot, "", []));
   }
 
   // --- Rendering: Overview ---

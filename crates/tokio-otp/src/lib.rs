@@ -276,7 +276,7 @@ pub use actor::{
     ActorSlot, ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, Graph,
     GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor,
     RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, StepDeadline, StepHandle,
-    TimerRef, TryRecvError,
+    SupervisorPathSegment, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
