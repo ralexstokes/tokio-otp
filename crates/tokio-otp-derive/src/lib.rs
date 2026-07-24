@@ -51,7 +51,7 @@ use syn::{
 /// #         _: FrontendMsg,
 /// #         _: &ActorContext<FrontendMsg>,
 /// #     ) -> ActorResult {
-/// #         Ok(())
+/// #         Ok(tokio_otp::prelude::Continue)
 /// #     }
 /// # }
 /// #
@@ -62,7 +62,7 @@ use syn::{
 /// # impl Actor for Parser {
 /// #     type Msg = ParserMsg;
 /// #     async fn handle(&mut self, _: ParserMsg, _: &ActorContext<ParserMsg>) -> ActorResult {
-/// #         Ok(())
+/// #         Ok(tokio_otp::prelude::Continue)
 /// #     }
 /// # }
 /// #
@@ -70,7 +70,7 @@ use syn::{
 /// # impl Actor for Sink {
 /// #     type Msg = SinkMsg;
 /// #     async fn handle(&mut self, _: SinkMsg, _: &ActorContext<SinkMsg>) -> ActorResult {
-/// #         Ok(())
+/// #         Ok(tokio_otp::prelude::Continue)
 /// #     }
 /// # }
 /// #
@@ -172,7 +172,7 @@ use syn::{
 /// # impl RawActor for SnapshotActor {
 /// #     type Msg = Snapshot;
 /// #     async fn run(&mut self, _: ActorContext<Snapshot>) -> ActorResult {
-/// #         Ok(())
+/// #         Ok(tokio_otp::prelude::Continue)
 /// #     }
 /// # }
 /// #[derive(tokio_otp::Topology)]

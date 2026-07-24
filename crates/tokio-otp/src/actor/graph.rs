@@ -29,10 +29,11 @@ use crate::actor::{
     factory::ActorFactory,
     monitor::{DownReason, MonitorExitGuard},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
-    raw::{ActorResult, BoxError, RawActor},
+    raw::{BoxError, RawActor},
 };
 
-pub(crate) type BoxedActorFuture = Pin<Box<dyn Future<Output = ActorResult> + Send + 'static>>;
+pub(crate) type BoxedActorFuture =
+    Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send + 'static>>;
 
 pub(crate) struct RunnerStart {
     pub(crate) shutdown: CancellationToken,
@@ -114,7 +115,7 @@ where
                 DownReason::Failure
             };
             monitor_exit.report(reason);
-            result
+            result.map(|_| ())
         })
     }
 }

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use tokio_otp::{Actor, ActorContext, ActorResult, DrainPolicy};
+use tokio_otp::{Actor, ActorContext, ActorResult, DrainPolicy, prelude::Continue};
 
 use crate::messages::{AppendAck, JournalEntry, JournalMsg, JournalReport, StoredEntry};
 
@@ -51,7 +51,7 @@ impl Actor for Journal {
                 duplicate_appends: self.duplicates,
             }),
         }
-        Ok(())
+        Ok(Continue)
     }
 
     fn drain_policy(&self) -> DrainPolicy {

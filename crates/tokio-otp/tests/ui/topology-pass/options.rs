@@ -11,7 +11,7 @@ impl RawActor for MailboxWorker {
     type Msg = MailboxMessage;
 
     async fn run(&mut self, _: ActorContext<MailboxMessage>) -> ActorResult {
-        Ok(())
+        Ok(tokio_otp::prelude::Continue)
     }
 }
 
@@ -30,7 +30,7 @@ impl RawActor for SizedWorker {
     type Msg = SizedMessage;
 
     async fn run(&mut self, _: ActorContext<SizedMessage>) -> ActorResult {
-        Ok(())
+        Ok(tokio_otp::prelude::Continue)
     }
 }
 

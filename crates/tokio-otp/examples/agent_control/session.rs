@@ -1,7 +1,7 @@
 //! Dynamic conversation orchestrator and owner of transient role-run children.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -10,8 +10,8 @@ use std::{
 
 use tokio::time::Instant;
 use tokio_otp::{
-    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, CancellationToken, ControlError,
-    DrainPolicy, DynamicActorOptions, RestartPolicy, RuntimeHandle, TimerRef,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, CancellationToken, DrainPolicy,
+    DynamicActorOptions, RestartPolicy, RuntimeHandle, TimerRef, prelude::Continue,
 };
 
 use crate::{
@@ -25,14 +25,13 @@ use crate::{
 };
 
 struct ActiveRun {
-    id: String,
     task: TaskId,
     role: Role,
     attempt: u64,
     input: PendingInput,
     cancel: CancellationToken,
     failure_reported: bool,
-    retry_after_remove: bool,
+    retry_after_termination: bool,
 }
 
 pub struct Session {
@@ -52,7 +51,6 @@ pub struct Session {
     proof: Proof,
     transcript_len: usize,
     pending: VecDeque<PendingInput>,
-    pending_removals: HashSet<String>,
     active: Option<ActiveRun>,
     heartbeat: Option<TimerRef>,
     idle_generation: u64,
@@ -99,7 +97,6 @@ impl tokio_otp::ActorFactory for SessionFactory {
             proof: self.proof.clone(),
             transcript_len: 0,
             pending: VecDeque::new(),
-            pending_removals: HashSet::new(),
             active: None,
             heartbeat: None,
             idle_generation: 0,
@@ -117,7 +114,7 @@ impl Session {
                 reply,
             })
             .await?;
-        Ok(())
+        Ok(Continue)
     }
 
     fn arm_idle(&mut self, ctx: &ActorContext<SessionMsg>) {
@@ -152,7 +149,7 @@ impl Session {
             Role::Engineer => "engineer",
             Role::Reviewer => "reviewer",
         };
-        let id = format!("run:{}:{task}:{role_name}", self.chat);
+        let id = format!("run:{}:{task}:{role_name}:{attempt}", self.chat);
         let run_ref = self
             .sessions
             .add_actor_with_options(
@@ -181,14 +178,13 @@ impl Session {
             event,
         });
         self.active = Some(ActiveRun {
-            id,
             task,
             role,
             attempt,
             input,
             cancel,
             failure_reported: false,
-            retry_after_remove: false,
+            retry_after_termination: false,
         });
         *self
             .proof
@@ -197,7 +193,7 @@ impl Session {
             .run_started
             .entry(self.chat)
             .or_default() += 1;
-        Ok(())
+        Ok(Continue)
     }
 
     async fn start_input(
@@ -207,33 +203,6 @@ impl Session {
     ) -> ActorResult {
         let task = self.task_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         self.start_run(task, Role::Planner, 0, input, ctx).await
-    }
-
-    fn pipeline_remove(&mut self, id: String, ctx: &ActorContext<SessionMsg>) {
-        if !self.pending_removals.insert(id.clone()) {
-            return;
-        }
-        let sessions = self.sessions.clone();
-        let message_id = id.clone();
-        ctx.step(
-            PHASE_TIMEOUT,
-            async move { sessions.remove_child(id.clone()).await },
-            move |outcome| {
-                if matches!(
-                    outcome,
-                    Ok(Ok(()))
-                        | Ok(Err(ControlError::UnknownChildId(_)))
-                        | Ok(Err(ControlError::ShutdownTimedOut(_)))
-                ) {
-                    SessionMsg::RunRemoved { id: message_id }
-                } else {
-                    // A step deadline does not cancel a removal already
-                    // accepted by the supervisor. Reconcile until the id is
-                    // confirmed absent before starting the retry attempt.
-                    SessionMsg::RetryRunRemove { id: message_id }
-                }
-            },
-        );
     }
 
     async fn complete_task(
@@ -246,11 +215,12 @@ impl Session {
             "task {task} complete (approved={approved}, prior-context={})",
             self.transcript_len.saturating_sub(1)
         );
-        self.append(JournalEntry::Reply {
-            task,
-            text: text.clone(),
-        })
-        .await?;
+        let _ = self
+            .append(JournalEntry::Reply {
+                task,
+                text: text.clone(),
+            })
+            .await?;
         self.outbound
             .send(OutboundMsg::Reply {
                 chat: self.chat,
@@ -267,7 +237,7 @@ impl Session {
             .insert(self.chat, Instant::now());
         self.active = None;
         self.arm_idle(ctx);
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -280,10 +250,10 @@ impl Actor for Session {
         proof.session_generations.insert(self.chat, self.generation);
         drop(proof);
         ctx.continue_with(SessionMsg::Rehydrate);
-        Ok(())
+        Ok(Continue)
     }
 
-    async fn on_stop(&mut self, _ctx: &ActorContext<Self::Msg>) -> ActorResult {
+    async fn on_stop(&mut self, _ctx: &ActorContext<Self::Msg>) -> Result<(), tokio_otp::BoxError> {
         // Models a per-conversation teardown flush. The deterministic delay
         // also holds the router's Evicting window open so phase 7's raced
         // injection observably lands in the membership buffer instead of
@@ -335,7 +305,7 @@ impl Actor for Session {
                             text,
                         })
                         .await?;
-                    return Ok(());
+                    return Ok(Continue);
                 }
                 self.transcript_len += 1;
                 self.idle_generation += 1;
@@ -351,39 +321,35 @@ impl Actor for Session {
                             .await?;
                     }
                 } else {
-                    self.start_input(input, ctx).await?;
+                    let _ = self.start_input(input, ctx).await?;
                 }
             }
             SessionMsg::RunFinished { task, role, output } => {
                 let Some(active) = self.active.as_mut() else {
-                    return Ok(());
+                    return Ok(Continue);
                 };
                 if active.task != task || active.role != role {
-                    return Ok(());
+                    return Ok(Continue);
                 }
-                let id = active.id.clone();
                 match output {
                     RunOutput::Planned(plan) => {
                         tracing::debug!(chat = self.chat, task, %plan, "planner completed");
                         let input = active.input.clone();
-                        self.pipeline_remove(id, ctx);
                         self.active = None;
-                        self.start_run(task, Role::Engineer, 0, input, ctx).await?;
+                        let _ = self.start_run(task, Role::Engineer, 0, input, ctx).await?;
                     }
                     RunOutput::Engineered(output) => {
                         tracing::debug!(chat = self.chat, task, %output, "engineer completed");
                         let input = active.input.clone();
-                        self.pipeline_remove(id, ctx);
                         self.active = None;
-                        self.start_run(task, Role::Reviewer, 0, input, ctx).await?;
+                        let _ = self.start_run(task, Role::Reviewer, 0, input, ctx).await?;
                     }
                     RunOutput::Reviewed(approved) => {
-                        self.pipeline_remove(id, ctx);
-                        self.complete_task(task, approved, ctx).await?;
+                        let _ = self.complete_task(task, approved, ctx).await?;
                         if self.gate.load(Ordering::Acquire)
                             && let Some(input) = self.pending.pop_front()
                         {
-                            self.start_input(input, ctx).await?;
+                            let _ = self.start_input(input, ctx).await?;
                         }
                     }
                     RunOutput::RetryableFailure => {
@@ -396,11 +362,9 @@ impl Actor for Session {
                                 })
                                 .await?;
                         }
-                        active.retry_after_remove = true;
-                        self.pipeline_remove(id, ctx);
+                        active.retry_after_termination = true;
                     }
                     RunOutput::Cancelled => {
-                        self.pipeline_remove(id, ctx);
                         self.active = None;
                         if let Some(timer) = self.heartbeat.take() {
                             timer.cancel();
@@ -425,7 +389,6 @@ impl Actor for Session {
                 if let tokio_otp::MonitorEvent::Down(down) = &event
                     && down.reason == tokio_otp::DownReason::Failure
                 {
-                    let mut remove = None;
                     if let Some(active) = self.active.as_mut()
                         && active.task == task
                         && active.role == role
@@ -439,39 +402,29 @@ impl Actor for Session {
                                 })
                                 .await?;
                         }
-                        active.retry_after_remove = true;
-                        remove = Some(active.id.clone());
+                        active.retry_after_termination = true;
                     }
-                    if let Some(id) = remove {
-                        self.pipeline_remove(id, ctx);
-                    }
-                }
-            }
-            SessionMsg::RunRemoved { id } => {
-                self.pending_removals.remove(&id);
-                if let Some(active) = self.active.take() {
-                    if active.id != id {
+                } else if matches!(event, tokio_otp::MonitorEvent::Terminated { .. })
+                    && let Some(active) = self.active.take()
+                {
+                    if active.task != task || active.role != role {
                         self.active = Some(active);
-                    } else if active.retry_after_remove && self.gate.load(Ordering::Acquire) {
-                        self.start_run(
-                            active.task,
-                            active.role,
-                            active.attempt + 1,
-                            active.input,
-                            ctx,
-                        )
-                        .await?;
-                    } else if active.retry_after_remove {
+                    } else if active.retry_after_termination && self.gate.load(Ordering::Acquire) {
+                        let _ = self
+                            .start_run(
+                                active.task,
+                                active.role,
+                                active.attempt + 1,
+                                active.input,
+                                ctx,
+                            )
+                            .await?;
+                    } else if active.retry_after_termination {
                         self.pending.push_front(active.input);
                         if let Some(timer) = self.heartbeat.take() {
                             timer.cancel();
                         }
                     }
-                }
-            }
-            SessionMsg::RetryRunRemove { id } => {
-                if self.pending_removals.remove(&id) {
-                    self.pipeline_remove(id, ctx);
                 }
             }
             SessionMsg::PauseChanged { paused } => {
@@ -489,25 +442,27 @@ impl Actor for Session {
                 } else if self.active.is_none()
                     && let Some(input) = self.pending.pop_front()
                 {
-                    self.start_input(input, ctx).await?;
+                    let _ = self.start_input(input, ctx).await?;
                 }
             }
             SessionMsg::Stop => {
                 if let Some(active) = &self.active {
                     active.cancel.cancel();
-                    self.append(JournalEntry::TaskCancelled { task: active.task })
+                    let _ = self
+                        .append(JournalEntry::TaskCancelled { task: active.task })
                         .await?;
                 }
             }
             SessionMsg::IdleSweep { generation } => {
                 if generation == self.idle_generation && self.active.is_none() {
                     let task = self.task_sequence.load(Ordering::Relaxed);
-                    self.append(JournalEntry::Checkpoint {
-                        task,
-                        state: format!("{} transcript item(s)", self.transcript_len),
-                    })
-                    .await?;
-                    self.append(JournalEntry::Evicted).await?;
+                    let _ = self
+                        .append(JournalEntry::Checkpoint {
+                            task,
+                            state: format!("{} transcript item(s)", self.transcript_len),
+                        })
+                        .await?;
+                    let _ = self.append(JournalEntry::Evicted).await?;
                     self.router
                         .send(RouterMsg::Evict {
                             chat: self.chat,
@@ -518,6 +473,6 @@ impl Actor for Session {
                 }
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }

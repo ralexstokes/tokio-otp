@@ -16,7 +16,7 @@
 //!
 //!     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
 //!         println!("{message}");
-//!         Ok(())
+//!         Ok(Continue)
 //!     }
 //! }
 //!
@@ -123,6 +123,7 @@
 //! use tokio_otp::{
 //!     Actor, ActorContext, ActorResult, CancellationToken, GraphBuilder, RebindPolicy, Reply,
 //! };
+//! use tokio_otp::prelude::Continue;
 //!
 //! enum CounterMsg {
 //!     Add(u64),
@@ -145,7 +146,7 @@
 //!             CounterMsg::Add(n) => self.total += n,
 //!             CounterMsg::Total(reply) => reply.send(self.total),
 //!         }
-//!         Ok(())
+//!         Ok(Continue)
 //!     }
 //! }
 //!
@@ -256,9 +257,11 @@ pub mod prelude {
     pub use crate::Topology;
     pub use crate::{
         Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, BoxError,
-        CallError, CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder,
-        MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, RestartWatchRef,
-        Runtime, RuntimeBuilder, RuntimeHandle, SendError, StepDeadline, StepHandle, TimerRef,
+        CallError, CancellationToken, Down, DownReason, DrainPolicy, Flow,
+        Flow::{Continue, Stop},
+        Graph, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply,
+        RestartWatchRef, Runtime, RuntimeBuilder, RuntimeHandle, SendError, StepDeadline,
+        StepHandle, TimerRef,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
@@ -273,7 +276,7 @@ pub use tokio_otp_derive::Topology;
 
 pub use actor::{
     Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, ActorRunError,
-    ActorSlot, ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, Graph,
+    ActorSlot, ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, Flow, Graph,
     GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor,
     RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, StepDeadline, StepHandle,
     SupervisorPathSegment, TimerRef, TryRecvError,

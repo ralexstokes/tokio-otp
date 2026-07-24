@@ -4,7 +4,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_otp::{
     Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ActorRunError, Graph,
     GraphBuildError, GraphBuilder, MailboxMode, MessageSize, RawActor, RebindPolicy, SendError,
-    Topology, TopologyEdge, TopologyMetadata, TopologyNode,
+    Topology, TopologyEdge, TopologyMetadata, TopologyNode, prelude::Continue,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -65,7 +65,7 @@ impl Actor for Frontend {
             FrontendMsg::Feed(line) => self.parser.send(ParserMsg(line)).await?,
             FrontendMsg::Ack => self.acks.send(()).expect("test receiver alive"),
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -81,7 +81,7 @@ impl Actor for Parser {
     async fn handle(&mut self, message: ParserMsg, _ctx: &ActorContext<ParserMsg>) -> ActorResult {
         self.sink.send(SinkMsg(message.0.to_uppercase())).await?;
         self.frontend.send(FrontendMsg::Ack).await?;
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -95,7 +95,7 @@ impl Actor for Sink {
 
     async fn handle(&mut self, message: SinkMsg, _ctx: &ActorContext<SinkMsg>) -> ActorResult {
         self.out.send(message.0).expect("test receiver alive");
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -270,7 +270,7 @@ impl RawActor for Park {
 
     async fn run(&mut self, ctx: ActorContext<()>) -> ActorResult {
         ctx.shutdown_token().cancelled().await;
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -295,7 +295,7 @@ impl RawActor for OptionsActor {
 
     async fn run(&mut self, ctx: ActorContext<SizedMessage>) -> ActorResult {
         ctx.shutdown_token().cancelled().await;
-        Ok(())
+        Ok(Continue)
     }
 }
 

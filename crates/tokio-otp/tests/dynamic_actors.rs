@@ -14,10 +14,11 @@ use tokio::{
     time::timeout,
 };
 use tokio_otp::{
-    ActorContext, ActorOptions, ActorRef, ActorResult, ChildSpec, ControlError,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ChildSpec, ControlError, DownReason,
     DynamicActorOptions, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef,
     RawActor, RestartPolicy, Runtime, RuntimeHandle, SendError, ShutdownPolicy, Strategy,
     SupervisedActors, SupervisorBuilder,
+    prelude::{Continue, Stop},
 };
 
 fn build_runtime(graph: tokio_otp::Graph) -> Runtime {
@@ -45,7 +46,7 @@ impl<M: Send + 'static> RawActor for Drain<M> {
 
     async fn run(&mut self, mut ctx: ActorContext<M>) -> ActorResult {
         while ctx.recv().await.is_some() {}
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -63,8 +64,26 @@ impl RawActor for GatedExit {
         if self.fail {
             Err(io::Error::other("dynamic actor failed").into())
         } else {
-            Ok(())
+            Ok(Continue)
         }
+    }
+}
+
+#[derive(Clone)]
+struct CleanStop {
+    starts: Arc<AtomicUsize>,
+}
+
+impl Actor for CleanStop {
+    type Msg = ();
+
+    async fn on_start(&mut self, _ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(Continue)
+    }
+
+    async fn handle(&mut self, (): (), _ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        Ok(Stop)
     }
 }
 
@@ -81,7 +100,7 @@ impl RawActor for RestartOnce {
             Err(io::Error::other("restart me").into())
         } else {
             ctx.shutdown_token().cancelled().await;
-            Ok(())
+            Ok(Continue)
         }
     }
 }
@@ -114,7 +133,7 @@ impl RawActor for Watcher {
             }
         }
         drop(watch);
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -162,7 +181,7 @@ impl RawActor for Observe {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("receiver alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -191,7 +210,7 @@ impl RawActor for Forwarder {
                 }
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -286,15 +305,14 @@ async fn never_actor_auto_removal_preserves_monitor_order_and_reuses_id() {
         observed: observed_tx.clone(),
     });
     let handle = build_runtime(graph.build().expect("valid graph")).spawn();
-    let release = Arc::new(Notify::new());
+    let starts = Arc::new(AtomicUsize::new(0));
     let target = handle
         .add_actor(
             "temporary",
             {
-                let release = release.clone();
-                move || GatedExit {
-                    release: release.clone(),
-                    fail: false,
+                let starts = starts.clone();
+                move || CleanStop {
+                    starts: starts.clone(),
                 }
             },
             DynamicActorOptions::new().restart(RestartPolicy::Never),
@@ -311,15 +329,17 @@ async fn never_actor_auto_removal_preserves_monitor_order_and_reuses_id() {
         MonitorEvent::Up { ref actor_id, .. } if actor_id == "temporary"
     ));
 
-    release.notify_one();
+    target.send(()).await.expect("clean stop requested");
     assert!(matches!(
         next_monitor_event(&mut observed_rx).await,
-        MonitorEvent::Down(ref down) if down.actor_id == "temporary"
+        MonitorEvent::Down(ref down)
+            if down.actor_id == "temporary" && down.reason == DownReason::Normal
     ));
     assert!(matches!(
         next_monitor_event(&mut observed_rx).await,
         MonitorEvent::Terminated { ref actor_id, .. } if actor_id == "temporary"
     ));
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
     wait_for_child(&handle, "temporary", false).await;
     assert!(matches!(
         target.send(()).await,
@@ -330,6 +350,90 @@ async fn never_actor_auto_removal_preserves_monitor_order_and_reuses_id() {
         .add_actor("temporary", Drain::<()>::new, DynamicActorOptions::new())
         .await
         .expect("auto-removed actor id is reusable");
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn clean_stop_follows_each_restart_policy() {
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+
+    let transient_starts = Arc::new(AtomicUsize::new(0));
+    let transient = handle
+        .add_actor(
+            "transient",
+            {
+                let starts = transient_starts.clone();
+                move || CleanStop {
+                    starts: starts.clone(),
+                }
+            },
+            DynamicActorOptions::new().restart(RestartPolicy::OnFailure),
+        )
+        .await
+        .expect("transient actor added");
+    transient.send(()).await.expect("clean stop requested");
+    timeout(Duration::from_secs(1), async {
+        let mut snapshots = handle.subscribe_snapshots();
+        loop {
+            if snapshots
+                .borrow()
+                .child("transient")
+                .is_some_and(|child| child.last_exit.is_some())
+            {
+                break;
+            }
+            snapshots
+                .changed()
+                .await
+                .expect("runtime remains available");
+        }
+    })
+    .await
+    .expect("transient clean stop recorded");
+    let transient_snapshot = handle
+        .snapshot()
+        .child("transient")
+        .cloned()
+        .expect("OnFailure actor remains in membership");
+    assert_eq!(transient_snapshot.generation, 0);
+    assert!(matches!(
+        transient_snapshot.last_exit,
+        Some(tokio_otp::ExitStatusView::Completed)
+    ));
+    assert_eq!(transient_starts.load(Ordering::SeqCst), 1);
+
+    let permanent_starts = Arc::new(AtomicUsize::new(0));
+    let permanent = handle
+        .add_actor(
+            "permanent",
+            {
+                let starts = permanent_starts.clone();
+                move || CleanStop {
+                    starts: starts.clone(),
+                }
+            },
+            DynamicActorOptions::new().restart(RestartPolicy::Always),
+        )
+        .await
+        .expect("permanent actor added");
+    permanent.send(()).await.expect("clean stop requested");
+    timeout(Duration::from_secs(1), async {
+        while permanent_starts.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Always actor restarted after clean stop");
+    assert!(
+        handle
+            .snapshot()
+            .child("permanent")
+            .is_some_and(|child| child.generation >= 1)
+    );
+
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }
 
@@ -553,7 +657,7 @@ impl RawActor for GatedDrain {
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
         self.release.notified().await;
         while ctx.recv().await.is_some() {}
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -633,7 +737,7 @@ impl RawActor for ForwardTo {
         while let Some(message) = ctx.recv().await {
             self.target.send(message).await?;
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -673,7 +777,7 @@ impl RawActor for PendingActor {
 
     async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
         pending::<()>().await;
-        Ok(())
+        Ok(Continue)
     }
 }
 

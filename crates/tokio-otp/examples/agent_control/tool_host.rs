@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use tokio_otp::{Actor, ActorContext, ActorResult};
+use tokio_otp::{Actor, ActorContext, ActorResult, prelude::Continue};
 
 use crate::messages::{EffectStatus, ToolHostMsg, ToolOutcome, ToolReport};
 
@@ -21,7 +21,7 @@ impl Actor for ToolHost {
             ToolHostMsg::Execute { key, call, reply } => {
                 if let Some(outcome) = self.effects.get(&key).cloned() {
                     reply.send(outcome);
-                    return Ok(());
+                    return Ok(Continue);
                 }
                 let name = call.name.clone();
                 let stalled = call.payload == "stall";
@@ -55,6 +55,6 @@ impl Actor for ToolHost {
                 queries: self.queries.clone(),
             }),
         }
-        Ok(())
+        Ok(Continue)
     }
 }

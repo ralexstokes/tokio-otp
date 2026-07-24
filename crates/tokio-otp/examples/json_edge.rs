@@ -3,7 +3,9 @@
 use std::io::{BufRead, Cursor};
 
 use serde::Deserialize;
-use tokio_otp::{Actor, ActorContext, ActorResult, DrainPolicy, GraphBuilder, Runtime};
+use tokio_otp::{
+    Actor, ActorContext, ActorResult, DrainPolicy, GraphBuilder, Runtime, prelude::Continue,
+};
 
 #[derive(Deserialize)]
 struct Order {
@@ -19,7 +21,7 @@ impl Actor for Printer {
 
     async fn handle(&mut self, order: Order, _ctx: &ActorContext<Order>) -> ActorResult {
         println!("{} x {}", order.quantity, order.item);
-        Ok(())
+        Ok(Continue)
     }
 
     fn drain_policy(&self) -> DrainPolicy {

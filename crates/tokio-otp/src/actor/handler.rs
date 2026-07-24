@@ -2,7 +2,7 @@ use std::future::Future;
 
 use crate::actor::{
     context::ActorContext,
-    raw::{ActorResult, RawActor},
+    raw::{ActorResult, BoxError, Flow, RawActor},
 };
 
 /// How the provided [`Actor`] receive loop treats messages still
@@ -49,6 +49,11 @@ pub enum DrainPolicy {
 /// Hand-writing [`RawActor::run`] remains the escape hatch for actors that need
 /// custom loop control.
 ///
+/// A [`Flow::Stop`] exit is normal for monitoring and supervision. An
+/// [`Always`](tokio_supervisor::RestartPolicy::Always) child restarts after it;
+/// [`OnFailure`](tokio_supervisor::RestartPolicy::OnFailure) and
+/// [`Never`](tokio_supervisor::RestartPolicy::Never) children do not.
+///
 /// # Incarnation construction
 ///
 /// Registration takes a reusable [`ActorFactory`](crate::ActorFactory), whose
@@ -61,6 +66,9 @@ pub trait Actor: Send + Sync + 'static {
 
     /// Handles one received message.
     ///
+    /// Returning [`Flow::Continue`] receives the next message. Returning
+    /// [`Flow::Stop`] requests a clean stop; the actor's [`DrainPolicy`] is
+    /// applied to the queued mailbox before [`on_stop`](Self::on_stop) runs.
     /// Returning `Err` fails the actor exactly like [`RawActor::run`] returning
     /// `Err`.
     fn handle(
@@ -71,25 +79,30 @@ pub trait Actor: Send + Sync + 'static {
 
     /// Runs once before the first message of each actor run.
     ///
-    /// This is the place to acquire per-incarnation resources; an error here
-    /// fails the run like a [`handle`](Self::handle) error, so under
+    /// This is the place to acquire per-incarnation resources. Returning
+    /// [`Flow::Stop`] requests a clean stop before the ordinary receive loop.
+    /// [`DrainPolicy::Discard`] drops messages queued during startup, while
+    /// [`DrainPolicy::Drain`] handles the externally accepted mailbox queue;
+    /// actor-local continuations are dropped under either policy. An error
+    /// here fails the run like a [`handle`](Self::handle) error, so under
     /// supervision it is an ordinary restartable failure.
     fn on_start(
         &mut self,
         _ctx: &ActorContext<Self::Msg>,
     ) -> impl Future<Output = ActorResult> + Send {
-        async { Ok(()) }
+        async { Ok(Flow::Continue) }
     }
 
     /// Runs once after the receive loop exits cleanly.
     ///
-    /// This hook also runs after a drain. It is not called when
+    /// This hook also runs after a drain and cannot change the flow decision.
+    /// It is not called when
     /// [`handle`](Self::handle) or [`on_start`](Self::on_start) returns an
     /// error.
     fn on_stop(
         &mut self,
         _ctx: &ActorContext<Self::Msg>,
-    ) -> impl Future<Output = ActorResult> + Send {
+    ) -> impl Future<Output = Result<(), BoxError>> + Send {
         async { Ok(()) }
     }
 
@@ -107,59 +120,23 @@ impl<H: Actor> RawActor for H {
     }
 
     async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
-        self.on_start(&ctx).await?;
+        let start_flow = self.on_start(&ctx).await?;
         ctx.mark_ready();
 
-        loop {
+        let mut stopping = start_flow == Flow::Stop;
+        while !stopping {
+            // External shutdown has priority over actor-local continuations.
+            // In particular, a continuation queued by an in-flight handler
+            // must not run after shutdown was requested.
+            if ctx.shutdown.is_cancelled() {
+                break;
+            }
             let message = if let Some(message) = ctx.take_continuation() {
                 Some(message)
             } else {
                 tokio::select! {
                     biased;
                     _ = ctx.shutdown.cancelled() => {
-                        ctx.close_external_intake();
-                        if self.drain_policy() == DrainPolicy::Drain {
-                            // Waiting for every step before receiving would
-                            // deadlock when a full FIFO mailbox backpressures
-                            // a completion. Close external intake, then drain
-                            // messages and incarnation-local step completions
-                            // together until both sources are quiescent.
-                            loop {
-                                let message = if let Some(message) = ctx.take_continuation() {
-                                    Some(message)
-                                } else {
-                                    match ctx.mailbox.try_recv() {
-                                        Ok(message) => Some(message),
-                                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                                            None
-                                        }
-                                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                                            if ctx.outstanding_steps() == 0 =>
-                                        {
-                                            // A final step can enqueue its postback after the
-                                            // first poll and then deregister before the gauge
-                                            // check. Deregistration synchronizes through the
-                                            // step registry, so re-poll after observing zero
-                                            // before declaring the mailbox quiescent.
-                                            ctx.mailbox.try_recv().ok()
-                                        }
-                                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                                            let changed = ctx.step_change_notify();
-                                            tokio::select! {
-                                                message = ctx.mailbox.recv() => message,
-                                                () = changed.notified() => continue,
-                                            }
-                                        }
-                                    }
-                                };
-                                let Some(message) = message else { break };
-                                ctx.myself.record_received();
-                                ctx.observability.emit_message_received(&ctx.id);
-                                self.handle(message, &ctx).await?;
-                            }
-                        } else {
-                            ctx.abort_steps();
-                        }
                         break;
                     }
                     message = ctx.mailbox.recv() => message,
@@ -171,9 +148,51 @@ impl<H: Actor> RawActor for H {
             };
             ctx.myself.record_received();
             ctx.observability.emit_message_received(&ctx.id);
-            self.handle(message, &ctx).await?;
+            stopping = self.handle(message, &ctx).await? == Flow::Stop;
         }
 
-        self.on_stop(&ctx).await
+        ctx.close_external_intake();
+        if self.drain_policy() == DrainPolicy::Drain {
+            // Waiting for every step before receiving would deadlock when a
+            // full FIFO mailbox backpressures a completion. Drain externally
+            // accepted messages and incarnation-local step completions
+            // together until both sources are quiescent. Continuations are
+            // deliberately ignored once stopping begins.
+            loop {
+                let message = match ctx.mailbox.try_recv() {
+                    Ok(message) => Some(message),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                        if ctx.outstanding_steps() == 0 =>
+                    {
+                        // A final step can enqueue its postback after the
+                        // first poll and then deregister before the gauge
+                        // check. Deregistration synchronizes through the step
+                        // registry, so re-poll after observing zero before
+                        // declaring the mailbox quiescent.
+                        ctx.mailbox.try_recv().ok()
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        let changed = ctx.step_change_notify();
+                        tokio::select! {
+                            message = ctx.mailbox.recv() => message,
+                            () = changed.notified() => continue,
+                        }
+                    }
+                };
+                let Some(message) = message else { break };
+                ctx.myself.record_received();
+                ctx.observability.emit_message_received(&ctx.id);
+                // Once stopping begins, flow values do not change the drain
+                // decision. Continuations queued by drain handlers are left
+                // for the context to drop with the incarnation.
+                let _ = self.handle(message, &ctx).await?;
+            }
+        } else {
+            ctx.abort_steps();
+        }
+
+        self.on_stop(&ctx).await?;
+        Ok(Flow::Stop)
     }
 }

@@ -33,12 +33,12 @@ impl Actor for Outcomes {
             pending::<()>(),
             OutcomeMsg::Timeout,
         );
-        Ok(())
+        Ok(Continue)
     }
 
     async fn handle(&mut self, message: Self::Msg, _ctx: &ActorContext<Self::Msg>) -> ActorResult {
         self.observed.send(message).unwrap();
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -144,7 +144,7 @@ impl Actor for StaleActor {
                 self.done.fetch_add(1, Ordering::Relaxed);
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -215,7 +215,7 @@ impl Actor for AbortActor {
                 self.done.fetch_add(1, Ordering::Relaxed);
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -299,7 +299,7 @@ impl Actor for ShutdownActor {
             DrainMsg::Nested => self.observed.send("nested").unwrap(),
             DrainMsg::Done => self.observed.send("done").unwrap(),
         }
-        Ok(())
+        Ok(Continue)
     }
 
     fn drain_policy(&self) -> DrainPolicy {
@@ -392,7 +392,7 @@ impl Actor for BackpressureActor {
             BackpressureMsg::Fill => self.observed.send("fill").unwrap(),
             BackpressureMsg::Done => self.observed.send("done").unwrap(),
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -507,7 +507,7 @@ impl Actor for DeadlineDrainActor {
             }
             DeadlineDrainMsg::Done(outcome) => self.observed.send(outcome).unwrap(),
         }
-        Ok(())
+        Ok(Continue)
     }
 
     fn drain_policy(&self) -> DrainPolicy {

@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_otp::{
     Actor, ActorContext, ActorFactory, ActorResult, GraphBuilder, RawActor, RebindPolicy, Reply,
-    RestartPolicy, Runtime,
+    RestartPolicy, Runtime, prelude::Continue,
 };
 
 struct HandlerWithNonCloneState {
@@ -22,7 +22,7 @@ impl Actor for HandlerWithNonCloneState {
     type Msg = ();
 
     async fn handle(&mut self, (): (), _ctx: &ActorContext<()>) -> ActorResult {
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -34,7 +34,7 @@ impl RawActor for RawWithNonCloneState {
     type Msg = ();
 
     async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -67,7 +67,7 @@ impl Actor for NonCloneHandler {
             ProbeMsg::Increment(reply) => {
                 self.local += 1;
                 reply.send((self.incarnation, self.local));
-                Ok(())
+                Ok(Continue)
             }
             ProbeMsg::Crash => Err(io::Error::other("restart probe").into()),
         }
@@ -157,7 +157,7 @@ impl RawActor for NonCloneRaw {
                 .send((self.incarnation, local))
                 .expect("observer alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -231,7 +231,7 @@ impl Actor for DefaultActor {
     type Msg = ();
 
     async fn handle(&mut self, (): (), _ctx: &ActorContext<()>) -> ActorResult {
-        Ok(())
+        Ok(Continue)
     }
 }
 

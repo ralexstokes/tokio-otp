@@ -10,6 +10,7 @@ zero-argument constructor paths implement `ActorFactory` automatically; named
 spec structs are useful when durable configuration deserves its own type.
 
 ```rust,no_run
+use tokio_otp::prelude::Continue;
 use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, Runtime};
 use tokio_supervisor::Strategy;
 
@@ -40,7 +41,7 @@ impl Actor for FrontDesk {
                     .await?;
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -51,7 +52,7 @@ impl Actor for RushPress {
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
         println!("RUSH printed {order}");
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -86,8 +87,9 @@ failed exit, matching OTP temporary-child semantics; other restart policies
 retain a terminal child in the supervisor snapshot by default. Override either
 default with `remove_on_exit(bool)`. Removal only follows an exit the policy
 will not restart, so it never interrupts a restart cycle. Watches still receive
-`Down` followed by `Terminated` before the membership disappears, and the child
-id can then be reused.
+`Down` followed by `Terminated` before the membership disappears. Consequently,
+`Terminated` alone does not mean the child id is reusable: wait for removal to
+complete or use a fresh id rather than immediately re-adding the same one.
 
 With a group strategy, opting a non-`Never` actor into removal makes timing
 observable. If its non-restarted exit is handled before a later group restart,

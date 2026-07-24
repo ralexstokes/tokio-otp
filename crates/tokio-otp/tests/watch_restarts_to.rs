@@ -9,6 +9,7 @@ use tokio::{
 use tokio_otp::{
     Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ChildSpec, DynamicActorOptions,
     MailboxMode, RestartPolicy, Runtime, RuntimeHandle, SupervisorBuilder, SupervisorHandleExt,
+    prelude::Continue,
 };
 
 struct Sink {
@@ -23,7 +24,7 @@ impl Actor for Sink {
             return Err(io::Error::other("sink crash requested").into());
         }
         self.observed.send(count).expect("observer alive");
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -122,7 +123,7 @@ impl Actor for BlockingSink {
                 self.observed.send(total).expect("observer alive");
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 

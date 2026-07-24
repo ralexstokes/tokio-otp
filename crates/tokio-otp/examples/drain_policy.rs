@@ -30,7 +30,7 @@ impl Actor for Worker {
                 self.handled.send(job).expect("receiver alive");
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 
     fn drain_policy(&self) -> DrainPolicy {

@@ -72,6 +72,6 @@ impl Actor for Health {
             }
             HealthMsg::Tripped { reply } => reply.send(self.tripped),
         }
-        Ok(())
+        Ok(Continue)
     }
 }

@@ -34,7 +34,7 @@ impl Actor for FrontDesk {
 
     async fn handle(&mut self, order: String, _ctx: &ActorContext<String>) -> ActorResult {
         self.press.send(order).await?;
-        Ok(())
+        Ok(Continue)
     }
 }
 

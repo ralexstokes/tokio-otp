@@ -76,12 +76,12 @@
 //!         are bounced back and land in the router's Evicting buffer
 //!     ─▶ removed; next message respawns the same id, replay restores context
 //!
-//! run:<chat>:<task>:<role>   (transient child, restart = Never)
+//! run:<chat>:<task>:<role>:<attempt>   (transient child, restart = Never)
 //!   add_actor_with_options ─▶ continue_with(Step)
 //!     ─▶ model turn in a context-owned step (cancel token + deadline) ─▶ ModelResult
 //!     ─▶ tool loop: journal ToolIntent ─▶ Execute (bounded) ─▶ ToolResult,
 //!         reconciling an unknown outcome through an idempotency-key Query
-//!     ─▶ RunFinished{output} to the session, which removes the child
+//!     ─▶ RunFinished{output} to the session + Ok(Stop); Never auto-removes
 //!     ─▶ on panic: Down(Failure) then Terminated to the session's watch;
 //!         the session reports the failure and spawns a fresh attempt
 //! ```

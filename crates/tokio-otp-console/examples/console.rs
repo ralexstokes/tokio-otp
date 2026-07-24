@@ -26,7 +26,7 @@ use std::{error::Error, io, time::Duration};
 use tokio::time::sleep;
 use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, BoxError, DynamicActorOptions, GraphBuilder,
-    SupervisedActors,
+    SupervisedActors, prelude::Continue,
 };
 use tokio_otp_console::Console;
 use tokio_supervisor::{
@@ -48,7 +48,7 @@ impl Actor for Frontend {
 
     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
         self.worker.send(message).await?;
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -61,9 +61,9 @@ impl Actor for Worker {
     async fn handle(&mut self, message: String, _ctx: &ActorContext<String>) -> ActorResult {
         if message.contains("fail") {
             println!("worker failing on `{message}`");
-            return Err::<(), BoxError>(example_error("simulated worker failure"));
+            return Err::<_, BoxError>(example_error("simulated worker failure"));
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -74,7 +74,7 @@ impl Actor for Burst {
     type Msg = u32;
 
     async fn handle(&mut self, _message: u32, _ctx: &ActorContext<u32>) -> ActorResult {
-        Ok(())
+        Ok(Continue)
     }
 }
 

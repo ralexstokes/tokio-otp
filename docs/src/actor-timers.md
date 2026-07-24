@@ -28,7 +28,7 @@ impl Actor for Worker {
     async fn on_start(&mut self, ctx: &ActorContext<Message>) -> ActorResult {
         self.reconnect = Some(ctx.send_after(Message::Reconnect, Duration::from_secs(5)));
         self.reconcile = Some(ctx.interval(Message::Reconcile, Duration::from_secs(30)));
-        Ok(())
+        Ok(Continue)
     }
 
     async fn handle(&mut self, message: Message, _ctx: &ActorContext<Message>) -> ActorResult {
@@ -36,7 +36,7 @@ impl Actor for Worker {
             Message::Reconnect => { /* reconnect once */ }
             Message::Reconcile => { /* reconcile periodically */ }
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 ```
@@ -110,7 +110,7 @@ impl Actor for Order {
 
     async fn on_start(&mut self, ctx: &ActorContext<Message>) -> ActorResult {
         ctx.state_timeout(Message::FillTimedOut, Duration::from_millis(500));
-        Ok(())
+        Ok(Continue)
     }
 
     async fn handle(&mut self, message: Message, ctx: &ActorContext<Message>) -> ActorResult {
@@ -129,7 +129,7 @@ impl Actor for Order {
             }
             _ => {}
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 ```

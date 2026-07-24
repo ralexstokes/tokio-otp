@@ -10,6 +10,7 @@ use std::{
 
 use tokio_otp::{
     Actor, ActorContext, ActorRef, ActorResult, ControlError, DynamicActorOptions, RuntimeHandle,
+    prelude::Continue,
 };
 
 use crate::{
@@ -242,6 +243,6 @@ impl Actor for Router {
                 }
             }
         }
-        Ok(())
+        Ok(Continue)
     }
 }

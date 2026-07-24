@@ -8,8 +8,9 @@ mod coverage_probe {
     mod actor {
         use tokio_otp::prelude::{
             Actor, ActorContext, ActorOptions, ActorRef, ActorResult, BoxError, CallError,
-            CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder, MailboxMode,
-            MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, SendError, TimerRef, Topology,
+            CancellationToken, Continue, Down, DownReason, DrainPolicy, Flow, Graph, GraphBuilder,
+            MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, SendError, Stop,
+            TimerRef, Topology,
         };
     }
 
@@ -53,7 +54,7 @@ impl Actor for BlockingWorker {
             observed.send(actor_id).expect("test receiver dropped");
         })
         .await;
-        Ok(())
+        Ok(Continue)
     }
 }
 

@@ -16,6 +16,7 @@ use tokio::{
 use tokio_otp::{
     Actor, ActorContext, ActorFactory, ActorRef, ActorResult, BoxError, DynamicActorOptions,
     GraphBuilder, RawActor, Reply, Runtime, SendError, SupervisedActors, SupervisorHandleExt,
+    prelude::Continue,
 };
 use tokio_supervisor::{
     ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, ShutdownPolicy, Strategy,
@@ -41,7 +42,7 @@ impl<M: Send + 'static> RawActor for Drain<M> {
 
     async fn run(&mut self, mut ctx: ActorContext<M>) -> ActorResult {
         while ctx.recv().await.is_some() {}
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -57,7 +58,7 @@ impl RawActor for Observe {
         while let Some(message) = ctx.recv().await {
             self.observed.send(message).expect("receiver alive");
         }
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -72,7 +73,7 @@ impl RawActor for ObserveOnce {
     async fn run(&mut self, mut ctx: ActorContext<String>) -> ActorResult {
         let message = ctx.recv().await.expect("message received before shutdown");
         self.observed.send(message).expect("receiver alive");
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -489,7 +490,7 @@ impl RawActor for FailAfterObserve {
                 self.observed.send(message).expect("receiver alive");
                 Err("deliberate failure".into())
             }
-            None => Ok(()),
+            None => Ok(Continue),
         }
     }
 }
@@ -710,10 +711,10 @@ impl RawActor for FailOnMessage {
 
     async fn run(&mut self, mut ctx: ActorContext<()>) -> ActorResult {
         if ctx.recv().await.is_some() {
-            return Err::<(), BoxError>(Box::new(io::Error::other("boom")));
+            return Err::<_, BoxError>(Box::new(io::Error::other("boom")));
         }
 
-        Ok(())
+        Ok(Continue)
     }
 }
 
@@ -840,7 +841,7 @@ impl RawActor for AlwaysFails {
     type Msg = ();
 
     async fn run(&mut self, _ctx: ActorContext<()>) -> ActorResult {
-        Err::<(), BoxError>(Box::new(io::Error::other("boom")))
+        Err::<_, BoxError>(Box::new(io::Error::other("boom")))
     }
 }
 
@@ -888,7 +889,7 @@ impl Actor for ResettingCounter {
 
     async fn on_start(&mut self, _ctx: &ActorContext<CounterMsg>) -> ActorResult {
         self.on_starts.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(Continue)
     }
 
     async fn handle(
@@ -899,11 +900,11 @@ impl Actor for ResettingCounter {
         match message {
             CounterMsg::Add(n) => {
                 self.total += n;
-                Ok(())
+                Ok(Continue)
             }
             CounterMsg::Total(reply) => {
                 reply.send(self.total);
-                Ok(())
+                Ok(Continue)
             }
             CounterMsg::Crash => Err("deliberate crash".into()),
         }

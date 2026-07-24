@@ -162,7 +162,7 @@ impl Actor for Router {
                 reply.send(accepted);
             }
         }
-        Ok(())
+        Ok(tokio_otp::prelude::Continue)
     }
 }
 ```
