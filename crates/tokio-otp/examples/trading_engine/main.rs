@@ -610,12 +610,12 @@ async fn phase_6(app: &App) -> Result<(), AnyError> {
         })
     })
     .await?;
-    let cancelled = tokio::time::timeout(
-        URGENT_BOUND,
-        app.control
-            .call(|reply| ControlMsg::EmergencyCancelAll { reply }),
-    )
-    .await??;
+    let cancelled = app
+        .control
+        .call(URGENT_BOUND, |reply| ControlMsg::EmergencyCancelAll {
+            reply,
+        })
+        .await?;
     assert!(cancelled >= 1);
     assert_eq!(app.venue_a.status(&open), Some(OrderStatus::Cancelled));
     flood_stop.cancel();
@@ -735,7 +735,7 @@ where
     M: Send + 'static,
     T: Send + 'static,
 {
-    Ok(tokio::time::timeout(PHASE_TIMEOUT, actor.call(message)).await??)
+    Ok(actor.call(PHASE_TIMEOUT, message).await?)
 }
 
 async fn await_until<F, Fut>(mut predicate: F) -> Result<(), AnyError>

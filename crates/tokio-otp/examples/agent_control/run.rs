@@ -71,15 +71,13 @@ impl tokio_otp::ActorFactory for AgentRunFactory {
 
 impl AgentRun {
     async fn append(&self, entry: JournalEntry) -> ActorResult {
-        tokio::time::timeout(
-            PHASE_TIMEOUT,
-            self.journal.call(|reply| JournalMsg::Append {
+        self.journal
+            .call(PHASE_TIMEOUT, |reply| JournalMsg::Append {
                 chat: self.chat,
                 entry,
                 reply,
-            }),
-        )
-        .await??;
+            })
+            .await?;
         Ok(())
     }
 
@@ -117,31 +115,27 @@ impl AgentRun {
         let tool_host = self.tool_host.clone();
         let myself = ctx.myself();
         tokio::spawn(async move {
-            let execute = tokio::time::timeout(
-                TOOL_DEADLINE,
-                tool_host.call(|reply| ToolHostMsg::Execute {
+            let execute = tool_host
+                .call(TOOL_DEADLINE, |reply| ToolHostMsg::Execute {
                     key: key.clone(),
                     call,
                     reply,
-                }),
-            )
-            .await;
+                })
+                .await;
             let outcome = match execute {
-                Ok(Ok(outcome)) => outcome,
+                Ok(outcome) => outcome,
                 _ => {
                     // A timeout is an unknown outcome. Querying is ordered
                     // behind the in-flight Execute in the tool-host mailbox,
                     // so this deterministically reconciles the completed key.
-                    match tokio::time::timeout(
-                        PHASE_TIMEOUT,
-                        tool_host.call(|reply| ToolHostMsg::Query {
+                    match tool_host
+                        .call(PHASE_TIMEOUT, |reply| ToolHostMsg::Query {
                             key: key.clone(),
                             reply,
-                        }),
-                    )
-                    .await
+                        })
+                        .await
                     {
-                        Ok(Ok(EffectStatus::Found(outcome))) => outcome,
+                        Ok(EffectStatus::Found(outcome)) => outcome,
                         _ => ToolOutcome {
                             output: "tool outcome remained unknown".into(),
                         },

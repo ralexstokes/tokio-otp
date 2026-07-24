@@ -103,26 +103,24 @@ impl Actor for OrderRouter {
                 let gateway = self.gateways.get(venue).expect("known venue").clone();
                 let myself = ctx.myself();
                 tokio::spawn(async move {
-                    let result = tokio::time::timeout(
-                        CALL_DEADLINE,
-                        gateway.call(|reply| GatewayMsg::Place {
+                    let result = gateway
+                        .call(CALL_DEADLINE, |reply| GatewayMsg::Place {
                             key: key.clone(),
                             symbol,
                             qty,
                             reply,
-                        }),
-                    )
-                    .await;
+                        })
+                        .await;
                     let (disposition, submitted) = match result {
-                        Ok(Ok(PlaceOutcome::Accepted { .. })) => (
+                        Ok(PlaceOutcome::Accepted { .. }) => (
                             SubmitDisposition::Confirmed,
                             SubmitResult::Placed(key.clone()),
                         ),
-                        Err(_) => (
+                        Err(CallError::Timeout { .. } | CallError::ReplyDropped { .. }) => (
                             SubmitDisposition::Unknown,
                             SubmitResult::Unknown(key.clone()),
                         ),
-                        Ok(Err(_)) => (SubmitDisposition::Rejected, SubmitResult::Rejected),
+                        Err(_) => (SubmitDisposition::Rejected, SubmitResult::Rejected),
                     };
                     // Queue the state update before releasing the caller so a
                     // follow-up sent after the reply (a cancel, a reconcile)
@@ -162,14 +160,12 @@ impl Actor for OrderRouter {
                     .expect("known venue")
                     .clone();
                 tokio::spawn(async move {
-                    let outcome = match tokio::time::timeout(
-                        CALL_DEADLINE,
-                        gateway.call(|reply| GatewayMsg::Cancel { key, reply }),
-                    )
-                    .await
+                    let outcome = match gateway
+                        .call(CALL_DEADLINE, |reply| GatewayMsg::Cancel { key, reply })
+                        .await
                     {
-                        Ok(Ok(outcome)) => outcome,
-                        Ok(Err(_)) | Err(_) => CancelOutcome::Unknown,
+                        Ok(outcome) => outcome,
+                        Err(_) => CancelOutcome::Unknown,
                     };
                     reply.send(outcome);
                 });
@@ -190,16 +186,14 @@ impl Actor for OrderRouter {
                 let mut resolved = 0;
                 for (key, intent) in unknown {
                     let gateway = self.gateways.get(intent.venue).expect("known venue");
-                    let query = tokio::time::timeout(
-                        CALL_DEADLINE,
-                        gateway.call(|reply| GatewayMsg::Query {
+                    let query = gateway
+                        .call(CALL_DEADLINE, |reply| GatewayMsg::Query {
                             key: key.clone(),
                             reply,
-                        }),
-                    )
-                    .await;
+                        })
+                        .await;
                     match query {
-                        Ok(Ok(QueryOutcome::Found(_))) => {
+                        Ok(QueryOutcome::Found(_)) => {
                             self.intents.get_mut(&key).expect("known intent").state =
                                 IntentState::Confirmed;
                             self.ledger
@@ -210,24 +204,22 @@ impl Actor for OrderRouter {
                                 .await?;
                             resolved += 1;
                         }
-                        Ok(Ok(QueryOutcome::NotFound)) => {
-                            let placed = tokio::time::timeout(
-                                CALL_DEADLINE,
-                                gateway.call(|reply| GatewayMsg::Place {
+                        Ok(QueryOutcome::NotFound) => {
+                            let placed = gateway
+                                .call(CALL_DEADLINE, |reply| GatewayMsg::Place {
                                     key: key.clone(),
                                     symbol: intent.symbol,
                                     qty: intent.qty,
                                     reply,
-                                }),
-                            )
-                            .await;
-                            if matches!(placed, Ok(Ok(PlaceOutcome::Accepted { .. }))) {
+                                })
+                                .await;
+                            if matches!(placed, Ok(PlaceOutcome::Accepted { .. })) {
                                 self.intents.get_mut(&key).expect("known intent").state =
                                     IntentState::Confirmed;
                                 resolved += 1;
                             }
                         }
-                        Ok(Err(_)) | Err(_) => {}
+                        Err(_) => {}
                     }
                 }
                 reply.send(resolved);

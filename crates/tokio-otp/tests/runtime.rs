@@ -769,9 +769,9 @@ async fn supervised_restart_constructs_fresh_actor_state() {
 
     counter.send(CounterMsg::Add(5)).await.expect("add sent");
     assert_eq!(
-        timeout(Duration::from_secs(1), counter.call(CounterMsg::Total))
+        counter
+            .call(Duration::from_secs(1), CounterMsg::Total)
             .await
-            .expect("total resolved")
             .expect("total replied"),
         5
     );
@@ -786,9 +786,9 @@ async fn supervised_restart_constructs_fresh_actor_state() {
         .expect("restart monitor succeeded");
 
     assert_eq!(
-        timeout(Duration::from_secs(2), counter.call(CounterMsg::Total))
+        counter
+            .call(Duration::from_secs(2), CounterMsg::Total)
             .await
-            .expect("total resolved after restart")
             .expect("total replied after restart"),
         0,
         "restart receives freshly constructed state"
