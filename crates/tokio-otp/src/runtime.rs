@@ -444,19 +444,22 @@ impl RuntimeHandle {
 
     /// Removes a child from the supervisor.
     ///
-    /// Removal marks the membership as removing and requests cooperative
-    /// shutdown. For an [`Actor`](crate::Actor), the normal receive loop stops
-    /// when it observes that request, then its [`DrainPolicy`](crate::DrainPolicy)
-    /// is applied, `on_stop` runs, the mailbox binding becomes terminal, and
-    /// finally the child is detached. The returned future completes after
-    /// detachment (or after the configured shutdown backstop aborts it).
+    /// Removal marks the membership as removing and starts its configured
+    /// shutdown. When cooperative shutdown completes within its grace period,
+    /// an [`Actor`](crate::Actor) stops its normal receive loop, applies its
+    /// [`DrainPolicy`](crate::DrainPolicy), runs `on_stop`, makes the mailbox
+    /// binding terminal, and is then detached. Immediate abort, or expiry of
+    /// the cooperative grace period, can skip any remaining drain or hook work
+    /// before detachment. The returned future completes after detachment (or
+    /// after the configured shutdown backstop aborts it).
     ///
-    /// A send that races before the actor closes intake may still be accepted.
-    /// With `DrainPolicy::Drain` it belongs to the queued prefix that is
-    /// handled before `on_stop`; with `Discard` it can be dropped. Once drain
-    /// closes intake, `try_send` may briefly return
-    /// [`SendError::MailboxClosed`](crate::SendError::MailboxClosed), while an
-    /// awaited `send` waits and then returns
+    /// A send racing with removal may still be accepted. With
+    /// `DrainPolicy::Drain`, work accepted before drain closes intake belongs
+    /// to the queued prefix handled before `on_stop`. With `Discard`, intake
+    /// can remain open through `on_stop`, and accepted work can be dropped when
+    /// the incarnation ends. Once drain closes intake, `try_send` may briefly
+    /// return [`SendError::MailboxClosed`](crate::SendError::MailboxClosed),
+    /// while an awaited `send` waits and then returns
     /// [`SendError::ActorTerminated`](crate::SendError::ActorTerminated).
     /// Removal does not return queued messages: end-to-end delivery ownership
     /// belongs in an application acknowledgement and replay protocol.

@@ -99,8 +99,11 @@ pub trait Actor: Send + Sync + 'static {
     /// Runs once after the receive loop exits cleanly.
     ///
     /// This hook also runs after a drain and cannot change the flow decision.
-    /// Supervisor removal waits for the hook before detaching the child and
-    /// completing [`RuntimeHandle::remove_child`](crate::RuntimeHandle::remove_child).
+    /// During cooperative supervisor removal, the supervisor waits for the
+    /// hook before detaching the child and completing
+    /// [`RuntimeHandle::remove_child`](crate::RuntimeHandle::remove_child).
+    /// Immediate abort, or expiry of the cooperative shutdown grace period,
+    /// can abort this hook and detach the child without waiting for it.
     /// It is not called when
     /// [`handle`](Self::handle) or [`on_start`](Self::on_start) returns an
     /// error.

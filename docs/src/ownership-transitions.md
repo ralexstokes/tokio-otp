@@ -42,6 +42,9 @@ The protocol has four parts:
    mailboxes preserve sequential enqueue order from one sender, so the
    retiree's `Evict` reaches the router before its later bounce. The bounce
    therefore lands in `Evicting` instead of being forwarded back in a loop.
+   Configure cooperative shutdown with enough grace for this drain to finish:
+   immediate abort or expiry of the grace period can skip remaining drain and
+   `on_stop` work.
 4. **Mint and replay.** After removal completes, the router calls `add_actor`
    with the reusable id, stores the fresh `ActorRef`, and replays the buffered
    messages in order. Old refs remain terminal and cannot address the new

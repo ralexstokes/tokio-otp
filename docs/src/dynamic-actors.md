@@ -97,18 +97,23 @@ another actor with the same id returns a fresh ref; the old one never silently
 rebinds to the new occupant.
 
 Removal is sequenced supervisor child removal. `remove_child(label)` marks the
-membership `Removing` and requests shutdown. Once an `Actor` observes that
-request, it stops its normal receive loop, closes intake and applies its
-`DrainPolicy`, runs `on_stop`, terminates the mailbox binding, and finally
-detaches the child. The removal future completes after detachment.
+membership `Removing` and starts its configured shutdown. When cooperative
+shutdown completes within its grace period, an `Actor` stops its normal receive
+loop and applies its `DrainPolicy`: `Drain` closes intake and handles the queued
+prefix, while `Discard` drops queued messages without closing intake. It then
+runs `on_stop`, terminates the mailbox binding, and detaches the child. Immediate
+abort, or expiry of the cooperative grace period, can skip any remaining drain
+or hook work before detachment. The removal future completes after detachment.
 
 There is an intentional race boundary: a send can be accepted after removal is
-requested but before the actor observes cancellation and closes intake. `Drain`
-handles that accepted prefix; `Discard` drops it. During the closed-mailbox
-window `try_send` can report `MailboxClosed`; an awaited `send` waits for the
-final disposition and then reports `ActorTerminated`. There is no separate
-`Draining` error. An application that must not lose accepted work during a
-membership change needs an ownership protocol, described in
+requested but before the actor observes cancellation. `Drain` then closes
+intake and handles that accepted prefix. `Discard` does not close intake, so it
+can continue accepting messages through `on_stop`; those messages are dropped
+when the incarnation ends. During `Drain`'s closed-mailbox window, `try_send`
+can report `MailboxClosed`; an awaited `send` waits for the final disposition
+and then reports `ActorTerminated`. There is no separate `Draining` error. An
+application that must not lose accepted work during a membership change needs
+an ownership protocol, described in
 [Ownership during membership transitions](ownership-transitions.md).
 
 A runtime can be reduced back to zero actors and keeps running until

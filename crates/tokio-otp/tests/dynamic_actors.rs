@@ -354,6 +354,7 @@ struct RemovalProbe {
     release_handler: Arc<Notify>,
     release_on_stop: Arc<Notify>,
     events: mpsc::UnboundedSender<RemovalEvent>,
+    drain_policy: DrainPolicy,
 }
 
 impl Actor for RemovalProbe {
@@ -388,7 +389,7 @@ impl Actor for RemovalProbe {
     }
 
     fn drain_policy(&self) -> DrainPolicy {
-        DrainPolicy::Drain
+        self.drain_policy
     }
 }
 
@@ -411,6 +412,7 @@ async fn remove_child_closes_intake_drains_then_runs_on_stop_before_detach() {
                     release_handler: release_handler.clone(),
                     release_on_stop: release_on_stop.clone(),
                     events: events_tx.clone(),
+                    drain_policy: DrainPolicy::Drain,
                 }
             },
             DynamicActorOptions::default(),
@@ -496,6 +498,83 @@ async fn remove_child_closes_intake_drains_then_runs_on_stop_before_detach() {
         .send(RemovalMsg::Work(11))
         .await
         .expect("fresh ref addresses replacement membership");
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn discard_keeps_intake_open_and_drops_racing_messages() {
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    let release_handler = Arc::new(Notify::new());
+    let release_on_stop = Arc::new(Notify::new());
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+    let actor = handle
+        .add_actor(
+            "discarding",
+            {
+                let release_handler = release_handler.clone();
+                let release_on_stop = release_on_stop.clone();
+                move || RemovalProbe {
+                    release_handler: release_handler.clone(),
+                    release_on_stop: release_on_stop.clone(),
+                    events: events_tx.clone(),
+                    drain_policy: DrainPolicy::Discard,
+                }
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("actor added");
+
+    actor.send(RemovalMsg::Hold).await.expect("hold accepted");
+    assert_eq!(events_rx.recv().await, Some(RemovalEvent::Holding));
+
+    let mut snapshots = handle.subscribe_snapshots();
+    let remover = handle.clone();
+    let removal = tokio::spawn(async move { remover.remove_child("discarding").await });
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if snapshots
+                .borrow()
+                .child("discarding")
+                .is_some_and(|child| child.membership == ChildMembershipView::Removing)
+            {
+                break;
+            }
+            snapshots.changed().await.expect("runtime remains alive");
+        }
+    })
+    .await
+    .expect("membership entered Removing");
+
+    actor
+        .send(RemovalMsg::Work(7))
+        .await
+        .expect("racing work accepted before handler observes shutdown");
+    release_handler.notify_one();
+    assert_eq!(events_rx.recv().await, Some(RemovalEvent::OnStopStarted));
+
+    actor
+        .try_send(RemovalMsg::Work(8))
+        .expect("Discard leaves intake open through on_stop");
+    assert!(!removal.is_finished(), "removal waits for on_stop");
+    release_on_stop.notify_one();
+    assert_eq!(events_rx.recv().await, Some(RemovalEvent::OnStopFinished));
+    removal
+        .await
+        .expect("removal task joined")
+        .expect("removal completed");
+    assert!(
+        matches!(
+            events_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty
+                | tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ),
+        "messages accepted around Discard removal were not handled"
+    );
 
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }
