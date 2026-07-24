@@ -55,6 +55,10 @@ incarnation. Nested supervisors allocate their own sequences, so identify a
 nested child by its snapshot path, including each parent's membership epoch
 and generation. The `u64` counter saturates at its maximum rather than changing
 supervisor control semantics in the practically unreachable overflow case.
+For dynamically added task children, `SupervisorHandle::add_child` returns the
+same epoch that the supervisor assigned while inserting the child. Consumers
+that need to associate their own state with that exact membership should retain
+the returned value rather than performing a later id-based snapshot lookup.
 
 ## Reliable Restart Counting
 

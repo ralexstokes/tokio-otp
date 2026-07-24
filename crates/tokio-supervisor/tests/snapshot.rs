@@ -60,13 +60,14 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
         assert_eq!(entry.next_restart_in, None);
     }
 
-    handle
+    let assigned_epoch = handle
         .add_child(ChildSpec::new("gamma", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .await
         .expect("dynamic child should be accepted");
+    assert_eq!(assigned_epoch, 2);
 
     let mut snapshots = handle.subscribe_snapshots();
     let updated = wait_for_snapshot(&mut snapshots, |snapshot| {
@@ -74,7 +75,10 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
     })
     .await;
     assert_eq!(child_ids(&updated), vec!["alpha", "beta", "gamma"]);
-    assert_eq!(child(&updated, "gamma").unwrap().membership_epoch, 2);
+    assert_eq!(
+        child(&updated, "gamma").unwrap().membership_epoch,
+        assigned_epoch
+    );
 
     handle.shutdown();
     handle.wait().await.expect("shutdown should succeed");

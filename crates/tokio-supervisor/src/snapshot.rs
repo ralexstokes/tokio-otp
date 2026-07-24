@@ -69,11 +69,6 @@ pub struct ChildSnapshot {
     /// same membership retain the epoch. Epochs are scoped to direct children
     /// of one supervisor incarnation; nested supervisors maintain independent
     /// sequences. The counter saturates at [`u64::MAX`].
-    ///
-    /// With the `serde` feature, snapshots serialized before this field was
-    /// introduced deserialize it as zero. Such legacy data is therefore
-    /// indistinguishable from a genuine first membership.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub membership_epoch: u64,
     /// Current generation counter. Incremented on each restart.
     pub generation: u64,
@@ -394,5 +389,25 @@ impl SnapshotCell {
                 self.state.mark_dequeued();
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod tests {
+    use super::{ChildSnapshot, ChildStateView};
+
+    #[test]
+    fn membership_epoch_is_required_when_deserializing() {
+        let mut value =
+            serde_json::to_value(ChildSnapshot::new("worker", 0, ChildStateView::Running))
+                .expect("child snapshot serializes");
+        value
+            .as_object_mut()
+            .expect("child snapshot serializes as an object")
+            .remove("membership_epoch");
+
+        let error = serde_json::from_value::<ChildSnapshot>(value)
+            .expect_err("membership_epoch must be present");
+        assert!(error.to_string().contains("membership_epoch"));
     }
 }
