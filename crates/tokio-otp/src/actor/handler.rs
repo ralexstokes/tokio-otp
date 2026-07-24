@@ -32,6 +32,12 @@ pub enum DrainPolicy {
     /// Close the mailbox to new sends, handle every message already queued,
     /// then stop.
     ///
+    /// A send racing with a shutdown request can be accepted before the actor
+    /// observes cancellation and closes intake; that message is part of the
+    /// queued prefix drained here. Once intake is closed, `try_send` reports a
+    /// closed mailbox and an awaited `send` waits for the binding's final
+    /// lifecycle state. There is no separate sender-visible `Draining` state.
+    ///
     /// The drain is not separately time-bounded; the surrounding shutdown
     /// backstop applies:
     /// [`GraphBuilder::actor_shutdown_timeout`](crate::GraphBuilder::actor_shutdown_timeout)
@@ -96,6 +102,11 @@ pub trait Actor: Send + Sync + 'static {
     /// Runs once after the receive loop exits cleanly.
     ///
     /// This hook also runs after a drain and cannot change the flow decision.
+    /// During cooperative supervisor removal, the supervisor waits for the
+    /// hook before detaching the child and completing
+    /// [`RuntimeHandle::remove_child`](crate::RuntimeHandle::remove_child).
+    /// Immediate abort, or expiry of the cooperative shutdown grace period,
+    /// can abort this hook and detach the child without waiting for it.
     /// It is not called when
     /// [`handle`](Self::handle) or [`on_start`](Self::on_start) returns an
     /// error.

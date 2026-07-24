@@ -753,6 +753,26 @@ impl RuntimeHandle {
     }
 
     /// Removes a child from the supervisor.
+    ///
+    /// Removal marks the membership as removing and starts its configured
+    /// shutdown. When cooperative shutdown completes within its grace period,
+    /// an [`Actor`](crate::Actor) stops its normal receive loop, closes external
+    /// intake, applies its [`DrainPolicy`](crate::DrainPolicy), runs `on_stop`,
+    /// makes the mailbox binding terminal, and is then detached. Immediate
+    /// abort, or expiry of the cooperative grace period, can skip any remaining
+    /// drain or hook work before detachment. The returned future completes
+    /// after detachment (or after the configured shutdown backstop aborts it).
+    ///
+    /// A send racing with removal may still be accepted. With
+    /// `DrainPolicy::Drain`, work accepted before drain closes intake belongs
+    /// to the queued prefix handled before `on_stop`. With `Discard`, accepted
+    /// work that remains queued is dropped. Once the actor closes intake,
+    /// `try_send` may briefly return
+    /// [`SendError::MailboxClosed`](crate::SendError::MailboxClosed), while an
+    /// awaited `send` waits and then returns
+    /// [`SendError::ActorTerminated`](crate::SendError::ActorTerminated).
+    /// Removal does not return queued messages: end-to-end delivery ownership
+    /// belongs in an application acknowledgement and replay protocol.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         let id = id.into();
         let result = self.supervisor.remove_child(id.clone()).await;

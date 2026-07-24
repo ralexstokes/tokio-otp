@@ -103,12 +103,31 @@ the static graph remain registered after terminal exit, even when
 membership can be recreated from the graph when its supervisor restarts.
 
 `add_actor` returns an actor ref matching the factory's actor message type, and
-the same ref keeps working across restarts of that actor.
+the same ref keeps working across restarts of that actor. Its stability ends at
+the membership boundary: remove an actor and that ref becomes terminal. Adding
+another actor with the same id returns a fresh ref; the old one never silently
+rebinds to the new occupant.
 
-Removal is plain supervisor child removal: `remove_child(label)` shuts the
-actor down and terminates its mailbox binding, so senders holding stale refs
-fail fast instead of waiting forever. A runtime can be reduced back to zero
-actors and keeps running until `shutdown()` is requested.
+Removal is sequenced supervisor child removal. `remove_child(label)` marks the
+membership `Removing` and starts its configured shutdown. When cooperative
+shutdown completes within its grace period, an `Actor` stops its normal receive
+loop, closes external intake, and applies its `DrainPolicy`: `Drain` handles the
+queued prefix, while `Discard` drops it. It then runs `on_stop`, terminates the
+mailbox binding, and detaches the child. Immediate abort, or expiry of the
+cooperative grace period, can skip any remaining drain or hook work before
+detachment. The removal future completes after detachment.
+
+There is an intentional race boundary: a send can be accepted after removal is
+requested but before the actor observes cancellation. `Drain` then closes
+intake and handles that accepted prefix; `Discard` drops it. After intake closes,
+`try_send` can report `MailboxClosed`; an awaited `send` waits for the final
+disposition and then reports `ActorTerminated`. There is no separate `Draining`
+error. An application that must not lose accepted work during a membership
+change needs an ownership protocol, described in
+[Ownership during membership transitions](ownership-transitions.md).
+
+A runtime can be reduced back to zero actors and keeps running until
+`shutdown()` is requested.
 
 ## Adding to a nested supervisor
 
