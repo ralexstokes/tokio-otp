@@ -248,6 +248,9 @@ pub struct DynamicActorOptions {
     pub shutdown: ShutdownPolicy,
     /// Optional restart intensity override for this actor child.
     pub restart_intensity: Option<RestartIntensity>,
+    // `None` selects the policy-dependent default. Keeping the override
+    // unresolved makes `restart(...).remove_on_exit(...)` order-independent.
+    remove_on_exit: Option<bool>,
 }
 
 impl Default for DynamicActorOptions {
@@ -256,6 +259,7 @@ impl Default for DynamicActorOptions {
             restart: RestartPolicy::OnFailure,
             shutdown: ShutdownPolicy::default(),
             restart_intensity: None,
+            remove_on_exit: None,
         }
     }
 }
@@ -285,6 +289,23 @@ impl DynamicActorOptions {
     pub fn restart_intensity(mut self, restart_intensity: RestartIntensity) -> Self {
         self.restart_intensity = Some(restart_intensity);
         self
+    }
+
+    /// Sets whether the actor child is removed after a terminal exit.
+    ///
+    /// Removal happens only when the restart policy declines a restart, never
+    /// during a restart cycle. By default, actors using
+    /// [`RestartPolicy::Never`] are removed and actors using other policies
+    /// remain visible in supervisor snapshots.
+    #[must_use]
+    pub fn remove_on_exit(mut self, remove_on_exit: bool) -> Self {
+        self.remove_on_exit = Some(remove_on_exit);
+        self
+    }
+
+    fn resolved_remove_on_exit(&self) -> bool {
+        self.remove_on_exit
+            .unwrap_or(matches!(self.restart, RestartPolicy::Never))
     }
 }
 
@@ -357,6 +378,7 @@ impl SupervisorHandleExt for SupervisorHandle {
             options.restart,
             options.shutdown,
             options.restart_intensity,
+            options.resolved_remove_on_exit(),
         );
 
         async move {
@@ -714,6 +736,7 @@ impl RuntimeHandle {
             options.restart,
             options.shutdown,
             options.restart_intensity,
+            options.resolved_remove_on_exit(),
         );
         let membership_epoch = self.supervisor.add_child(child).await?;
         if let Some(registration_path) =
@@ -874,8 +897,9 @@ pub(crate) fn actor_child_spec(
     restart: RestartPolicy,
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
+    remove_on_exit: bool,
 ) -> ChildSpec {
-    actor_child_spec_with_termination(actor, restart, shutdown, restart_intensity).0
+    actor_child_spec_with_termination(actor, restart, shutdown, restart_intensity, remove_on_exit).0
 }
 
 fn actor_child_spec_with_termination(
@@ -883,6 +907,7 @@ fn actor_child_spec_with_termination(
     restart: RestartPolicy,
     shutdown: ShutdownPolicy,
     restart_intensity: Option<RestartIntensity>,
+    remove_on_exit: bool,
 ) -> (ChildSpec, Arc<TerminateBindingOnDrop>) {
     let actor_id = actor.label().to_owned();
     let rebind = rebind_policy_for_restart(restart);
@@ -901,6 +926,7 @@ fn actor_child_spec_with_termination(
     })
     .wait_for_ready()
     .restart(restart)
+    .remove_on_exit(remove_on_exit)
     .shutdown(shutdown);
 
     if let Some(intensity) = restart_intensity {
