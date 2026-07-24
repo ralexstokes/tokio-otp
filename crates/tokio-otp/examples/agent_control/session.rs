@@ -10,8 +10,8 @@ use std::{
 
 use tokio::time::Instant;
 use tokio_otp::{
-    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, CancellationToken, DrainPolicy,
-    DynamicActorOptions, RestartPolicy, RuntimeHandle, TimerRef,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, CancellationToken, ControlError,
+    DrainPolicy, DynamicActorOptions, RestartPolicy, RuntimeHandle, TimerRef,
 };
 
 use crate::{
@@ -212,10 +212,22 @@ impl Session {
         let message_id = id.clone();
         ctx.step(
             PHASE_TIMEOUT,
-            async move {
-                let _ = sessions.remove_child(id.clone()).await;
+            async move { sessions.remove_child(id.clone()).await },
+            move |outcome| {
+                if matches!(
+                    outcome,
+                    Ok(Ok(()))
+                        | Ok(Err(ControlError::UnknownChildId(_)))
+                        | Ok(Err(ControlError::ShutdownTimedOut(_)))
+                ) {
+                    SessionMsg::RunRemoved { id: message_id }
+                } else {
+                    // A step deadline does not cancel a removal already
+                    // accepted by the supervisor. Reconcile until the id is
+                    // confirmed absent before starting the retry attempt.
+                    SessionMsg::RetryRunRemove { id: message_id }
+                }
             },
-            move |_| SessionMsg::RunRemoved { id: message_id },
         );
     }
 
@@ -456,6 +468,11 @@ impl Actor for Session {
                             timer.cancel();
                         }
                     }
+                }
+            }
+            SessionMsg::RetryRunRemove { id } => {
+                if matches!(&self.active, Some(active) if active.id == id) {
+                    self.pipeline_remove(id, ctx);
                 }
             }
             SessionMsg::PauseChanged { paused } => {

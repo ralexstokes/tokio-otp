@@ -73,7 +73,8 @@ where
             let observability = start.observability;
             let (sender, mailbox) = mailbox(&mailbox_mode, start.mailbox_capacity);
             let actor_id = binding.actor_id().clone();
-            let incarnation = MailboxRef::new(actor_id.clone(), sender);
+            let steps = ActorSteps::new();
+            let incarnation = MailboxRef::new(actor_id.clone(), sender, steps.gauge());
             let bound_mailbox = BindingGuard::bind(
                 binding.clone(),
                 incarnation.clone(),
@@ -94,7 +95,7 @@ where
                 monitors,
                 ready: Mutex::new(Some(start.ready)),
                 continuations: Mutex::new(Default::default()),
-                steps: ActorSteps::new(binding.stats_counters()),
+                steps,
             };
             let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
             // Binding is deliberately deferred until this actor future's first

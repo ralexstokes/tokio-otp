@@ -72,7 +72,6 @@ pub(crate) struct ActorStatsCounters {
     messages_accepted: AtomicU64,
     messages_conflated: AtomicU64,
     sends_rejected: AtomicU64,
-    outstanding_steps: AtomicU64,
     message_bytes_accepted: Option<AtomicU64>,
 }
 
@@ -83,7 +82,6 @@ impl ActorStatsCounters {
             messages_accepted: AtomicU64::new(0),
             messages_conflated: AtomicU64::new(0),
             sends_rejected: AtomicU64::new(0),
-            outstanding_steps: AtomicU64::new(0),
             message_bytes_accepted: observe_message_size.then(|| AtomicU64::new(0)),
         }
     }
@@ -113,17 +111,10 @@ impl ActorStatsCounters {
         }
     }
 
-    pub(crate) fn step_started(&self) {
-        self.outstanding_steps.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn step_finished(&self) {
-        self.outstanding_steps.fetch_sub(1, Ordering::Relaxed);
-    }
-
     pub(crate) fn snapshot(
         &self,
         actor_id: &str,
+        outstanding_steps: u64,
         mailbox_depth: usize,
         mailbox_capacity: usize,
     ) -> ActorStats {
@@ -138,7 +129,7 @@ impl ActorStatsCounters {
                 .as_ref()
                 .map(|total| total.load(Ordering::Relaxed)),
             sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
-            outstanding_steps: self.outstanding_steps.load(Ordering::Relaxed),
+            outstanding_steps,
             mailbox_depth,
             mailbox_capacity,
         }
@@ -305,6 +296,7 @@ pub(crate) enum SendOutcome<M> {
 pub(crate) struct MailboxRef<M> {
     actor_id: Arc<str>,
     sender: MailboxSender<M>,
+    outstanding_steps: Arc<AtomicU64>,
 }
 
 impl<M> Clone for MailboxRef<M> {
@@ -312,13 +304,22 @@ impl<M> Clone for MailboxRef<M> {
         Self {
             actor_id: Arc::clone(&self.actor_id),
             sender: self.sender.clone(),
+            outstanding_steps: Arc::clone(&self.outstanding_steps),
         }
     }
 }
 
 impl<M> MailboxRef<M> {
-    pub(crate) fn new(actor_id: Arc<str>, sender: MailboxSender<M>) -> Self {
-        Self { actor_id, sender }
+    pub(crate) fn new(
+        actor_id: Arc<str>,
+        sender: MailboxSender<M>,
+        outstanding_steps: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            actor_id,
+            sender,
+            outstanding_steps,
+        }
     }
 
     /// Sends, returning the message on failure so callers can retry after a
@@ -395,6 +396,10 @@ impl<M> MailboxRef<M> {
 
     pub(crate) fn usage(&self) -> (usize, usize) {
         self.sender.usage()
+    }
+
+    pub(crate) fn outstanding_steps(&self) -> u64 {
+        self.outstanding_steps.load(Ordering::Relaxed)
     }
 }
 
@@ -725,11 +730,15 @@ impl<M> BindingCore<M> {
 
     pub(crate) fn stats(&self) -> ActorStats {
         let state = self.current.borrow();
-        let (depth, capacity) = match &*state {
-            BindingState::Bound(mailbox) => mailbox.usage(),
-            BindingState::Unbound | BindingState::Terminated => (0, 0),
+        let (outstanding_steps, depth, capacity) = match &*state {
+            BindingState::Bound(mailbox) => {
+                let (depth, capacity) = mailbox.usage();
+                (mailbox.outstanding_steps(), depth, capacity)
+            }
+            BindingState::Unbound | BindingState::Terminated => (0, 0, 0),
         };
-        self.stats.snapshot(&self.actor_id, depth, capacity)
+        self.stats
+            .snapshot(&self.actor_id, outstanding_steps, depth, capacity)
     }
 
     fn bind(&self, mailbox: MailboxRef<M>) {

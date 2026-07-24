@@ -251,6 +251,9 @@ pub enum RouterMsg {
     Removed {
         chat: ChatId,
     },
+    RetryRemove {
+        chat: ChatId,
+    },
     PauseChanged {
         paused: bool,
     },
@@ -286,6 +289,9 @@ pub enum SessionMsg {
         event: MonitorEvent,
     },
     RunRemoved {
+        id: String,
+    },
+    RetryRunRemove {
         id: String,
     },
     PauseChanged {

@@ -1,9 +1,11 @@
 use std::{
     future::pending,
+    pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -84,8 +86,39 @@ enum StaleMsg {
 
 struct StaleActor {
     incarnation: usize,
-    release: Arc<Notify>,
+    drop_started: Arc<AtomicBool>,
+    release_drop: Arc<AtomicBool>,
     done: Arc<AtomicUsize>,
+}
+
+struct SlowDropFuture {
+    drop_started: Arc<AtomicBool>,
+    release_drop: Arc<AtomicBool>,
+}
+
+impl std::future::Future for SlowDropFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
+}
+
+impl Drop for SlowDropFuture {
+    fn drop(&mut self) {
+        self.drop_started.store(true, Ordering::Release);
+        while !self.release_drop.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+}
+
+struct ReleaseOnDrop(Arc<AtomicBool>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 impl Actor for StaleActor {
@@ -95,10 +128,12 @@ impl Actor for StaleActor {
         match message {
             StaleMsg::Start => {
                 assert_eq!(self.incarnation, 0);
-                let release = self.release.clone();
                 ctx.step(
                     Duration::from_secs(1),
-                    async move { release.notified().await },
+                    SlowDropFuture {
+                        drop_started: self.drop_started.clone(),
+                        release_drop: self.release_drop.clone(),
+                    },
                     |_| StaleMsg::Done,
                 );
                 return Err(std::io::Error::other("restart after starting step").into());
@@ -111,19 +146,23 @@ impl Actor for StaleActor {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn step_is_aborted_and_never_posts_to_a_fresh_incarnation() {
     let constructed = Arc::new(AtomicUsize::new(0));
-    let release = Arc::new(Notify::new());
+    let drop_started = Arc::new(AtomicBool::new(false));
+    let release_drop = Arc::new(AtomicBool::new(false));
+    let _release_on_drop = ReleaseOnDrop(release_drop.clone());
     let done = Arc::new(AtomicUsize::new(0));
     let mut graph = GraphBuilder::new();
     let actor = graph.add({
         let constructed = constructed.clone();
-        let release = release.clone();
+        let drop_started = drop_started.clone();
+        let release_drop = release_drop.clone();
         let done = done.clone();
         move || StaleActor {
             incarnation: constructed.fetch_add(1, Ordering::Relaxed),
-            release: release.clone(),
+            drop_started: drop_started.clone(),
+            release_drop: release_drop.clone(),
             done: done.clone(),
         }
     });
@@ -135,14 +174,15 @@ async fn step_is_aborted_and_never_posts_to_a_fresh_incarnation() {
         .spawn();
     runtime.wait_started().await.unwrap();
     actor.send(StaleMsg::Start).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while constructed.load(Ordering::Relaxed) < 2 {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while constructed.load(Ordering::Relaxed) < 2 || !drop_started.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    release.notify_waiters();
+    assert_eq!(actor.stats().outstanding_steps, 0);
+    release_drop.store(true, Ordering::Release);
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(done.load(Ordering::Relaxed), 0);
     runtime.shutdown_and_wait().await.unwrap();

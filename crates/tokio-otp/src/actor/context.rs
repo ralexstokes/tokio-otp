@@ -109,11 +109,15 @@ impl<M> ActorRef<M> {
     /// Returns a point-in-time snapshot of this actor's message counters and
     /// current mailbox usage.
     pub fn stats(&self) -> ActorStats {
-        let (depth, capacity) = match &*self.binding.borrow() {
-            BindingState::Bound(mailbox) => mailbox.usage(),
-            BindingState::Unbound | BindingState::Terminated => (0, 0),
+        let (outstanding_steps, depth, capacity) = match &*self.binding.borrow() {
+            BindingState::Bound(mailbox) => {
+                let (depth, capacity) = mailbox.usage();
+                (mailbox.outstanding_steps(), depth, capacity)
+            }
+            BindingState::Unbound | BindingState::Terminated => (0, 0, 0),
         };
-        self.stats.snapshot(&self.actor_id, depth, capacity)
+        self.stats
+            .snapshot(&self.actor_id, outstanding_steps, depth, capacity)
     }
 
     fn current_mailbox(&self) -> Result<MailboxRef<M>, SendError> {
@@ -944,17 +948,17 @@ struct ActorStepsInner {
     next_id: AtomicU64,
     active: Mutex<HashMap<u64, CancellationToken>>,
     changed: Arc<Notify>,
-    stats: Arc<ActorStatsCounters>,
+    outstanding: Arc<AtomicU64>,
 }
 
 impl ActorSteps {
-    pub(crate) fn new(stats: Arc<ActorStatsCounters>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(ActorStepsInner {
                 next_id: AtomicU64::new(0),
                 active: Mutex::new(HashMap::new()),
                 changed: Arc::new(Notify::new()),
-                stats,
+                outstanding: Arc::new(AtomicU64::new(0)),
             }),
             // Unlike timers, this token is independent from graph shutdown:
             // Drain actors keep their steps until their own deadlines.
@@ -970,12 +974,16 @@ impl ActorSteps {
             .lock()
             .expect("actor step registry poisoned")
             .insert(id, cancellation.clone());
-        self.inner.stats.step_started();
+        self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
         (id, cancellation, Arc::new(AtomicBool::new(false)))
     }
 
     fn inner(&self) -> Arc<ActorStepsInner> {
         Arc::clone(&self.inner)
+    }
+
+    pub(crate) fn gauge(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.inner.outstanding)
     }
 
     fn abort_all(&self) {
@@ -1017,7 +1025,7 @@ impl Drop for StepGuard {
             .remove(&self.id)
             .is_some()
         {
-            self.steps.stats.step_finished();
+            self.steps.outstanding.fetch_sub(1, Ordering::Relaxed);
         }
         self.finished.store(true, Ordering::Release);
         self.steps.changed.notify_one();

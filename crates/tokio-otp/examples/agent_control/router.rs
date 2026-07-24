@@ -8,7 +8,9 @@ use std::{
     },
 };
 
-use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions, RuntimeHandle};
+use tokio_otp::{
+    Actor, ActorContext, ActorRef, ActorResult, ControlError, DynamicActorOptions, RuntimeHandle,
+};
 
 use crate::{
     messages::{
@@ -126,9 +128,23 @@ impl Router {
                 // Removal is pipelined so an idle eviction never head-of-line
                 // blocks unrelated routing work (the same hazard documented for
                 // the trading example's order router).
-                let _ = sessions.remove_child(format!("session:{chat}")).await;
+                sessions.remove_child(format!("session:{chat}")).await
             },
-            move |_| RouterMsg::Removed { chat },
+            move |outcome| {
+                if matches!(
+                    outcome,
+                    Ok(Ok(()))
+                        | Ok(Err(ControlError::UnknownChildId(_)))
+                        | Ok(Err(ControlError::ShutdownTimedOut(_)))
+                ) {
+                    RouterMsg::Removed { chat }
+                } else {
+                    // A step deadline abandons only our wait. The supervisor
+                    // may still be removing this id, so reconcile before a
+                    // buffered message is allowed to re-add it.
+                    RouterMsg::RetryRemove { chat }
+                }
+            },
         );
     }
 }
@@ -206,6 +222,11 @@ impl Actor for Router {
                             })
                             .await?;
                     }
+                }
+            }
+            RouterMsg::RetryRemove { chat } => {
+                if matches!(self.sessions.get(chat), Some(SessionSlot::Evicting { .. })) {
+                    self.pipeline_remove(chat, ctx);
                 }
             }
             RouterMsg::PauseChanged { paused } => {
