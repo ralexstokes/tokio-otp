@@ -25,7 +25,7 @@ use crate::actor::{
         RebindPolicy, mailbox,
     },
     builder::{ActorOptions, DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
-    context::{ActorContext, ActorRef, ActorTimers},
+    context::{ActorContext, ActorRef, ActorSteps, ActorTimers},
     factory::ActorFactory,
     monitor::{DownReason, MonitorExitGuard},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
@@ -73,9 +73,11 @@ where
             let observability = start.observability;
             let (sender, mailbox) = mailbox(&mailbox_mode, start.mailbox_capacity);
             let actor_id = binding.actor_id().clone();
+            let steps = ActorSteps::new();
+            let incarnation = MailboxRef::new(actor_id.clone(), sender, steps.gauge());
             let bound_mailbox = BindingGuard::bind(
                 binding.clone(),
-                MailboxRef::new(actor_id.clone(), sender),
+                incarnation.clone(),
                 observability.clone(),
                 start.rebind_policy,
             );
@@ -85,6 +87,7 @@ where
                 id: actor_id,
                 mailbox,
                 myself,
+                incarnation,
                 shutdown: actor_shutdown,
                 observability,
                 timers,
@@ -92,6 +95,7 @@ where
                 monitors,
                 ready: Mutex::new(Some(start.ready)),
                 continuations: Mutex::new(Default::default()),
+                steps,
             };
             let mut monitor_exit = MonitorExitGuard::new(monitor_hub);
             // Binding is deliberately deferred until this actor future's first

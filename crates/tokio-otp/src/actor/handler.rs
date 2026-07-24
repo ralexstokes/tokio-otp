@@ -117,18 +117,48 @@ impl<H: Actor> RawActor for H {
                 tokio::select! {
                     biased;
                     _ = ctx.shutdown.cancelled() => {
+                        ctx.close_external_intake();
                         if self.drain_policy() == DrainPolicy::Drain {
-                            ctx.mailbox.close();
+                            // Waiting for every step before receiving would
+                            // deadlock when a full FIFO mailbox backpressures
+                            // a completion. Close external intake, then drain
+                            // messages and incarnation-local step completions
+                            // together until both sources are quiescent.
                             loop {
-                                let message = match ctx.take_continuation() {
-                                    Some(message) => Some(message),
-                                    None => ctx.mailbox.recv().await,
+                                let message = if let Some(message) = ctx.take_continuation() {
+                                    Some(message)
+                                } else {
+                                    match ctx.mailbox.try_recv() {
+                                        Ok(message) => Some(message),
+                                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                            None
+                                        }
+                                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                                            if ctx.outstanding_steps() == 0 =>
+                                        {
+                                            // A final step can enqueue its postback after the
+                                            // first poll and then deregister before the gauge
+                                            // check. Deregistration synchronizes through the
+                                            // step registry, so re-poll after observing zero
+                                            // before declaring the mailbox quiescent.
+                                            ctx.mailbox.try_recv().ok()
+                                        }
+                                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                                            let changed = ctx.step_change_notify();
+                                            tokio::select! {
+                                                message = ctx.mailbox.recv() => message,
+                                                () = changed.notified() => continue,
+                                            }
+                                        }
+                                    }
                                 };
                                 let Some(message) = message else { break };
                                 ctx.myself.record_received();
                                 ctx.observability.emit_message_received(&ctx.id);
                                 self.handle(message, &ctx).await?;
                             }
+                        } else {
+                            ctx.abort_steps();
                         }
                         break;
                     }

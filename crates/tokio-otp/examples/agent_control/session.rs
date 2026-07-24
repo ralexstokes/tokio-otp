@@ -1,7 +1,7 @@
 //! Dynamic conversation orchestrator and owner of transient role-run children.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -10,8 +10,8 @@ use std::{
 
 use tokio::time::Instant;
 use tokio_otp::{
-    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, CancellationToken, DrainPolicy,
-    DynamicActorOptions, RestartPolicy, RuntimeHandle, TimerRef,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, CancellationToken, ControlError,
+    DrainPolicy, DynamicActorOptions, RestartPolicy, RuntimeHandle, TimerRef,
 };
 
 use crate::{
@@ -52,6 +52,7 @@ pub struct Session {
     proof: Proof,
     transcript_len: usize,
     pending: VecDeque<PendingInput>,
+    pending_removals: HashSet<String>,
     active: Option<ActiveRun>,
     heartbeat: Option<TimerRef>,
     idle_generation: u64,
@@ -98,6 +99,7 @@ impl tokio_otp::ActorFactory for SessionFactory {
             proof: self.proof.clone(),
             transcript_len: 0,
             pending: VecDeque::new(),
+            pending_removals: HashSet::new(),
             active: None,
             heartbeat: None,
             idle_generation: 0,
@@ -108,15 +110,13 @@ impl tokio_otp::ActorFactory for SessionFactory {
 
 impl Session {
     async fn append(&self, entry: JournalEntry) -> ActorResult {
-        tokio::time::timeout(
-            PHASE_TIMEOUT,
-            self.journal.call(|reply| JournalMsg::Append {
+        self.journal
+            .call(PHASE_TIMEOUT, |reply| JournalMsg::Append {
                 chat: self.chat,
                 entry,
                 reply,
-            }),
-        )
-        .await??;
+            })
+            .await?;
         Ok(())
     }
 
@@ -209,13 +209,31 @@ impl Session {
         self.start_run(task, Role::Planner, 0, input, ctx).await
     }
 
-    fn pipeline_remove(&self, id: String, ctx: &ActorContext<SessionMsg>) {
+    fn pipeline_remove(&mut self, id: String, ctx: &ActorContext<SessionMsg>) {
+        if !self.pending_removals.insert(id.clone()) {
+            return;
+        }
         let sessions = self.sessions.clone();
-        let myself = ctx.myself();
-        tokio::spawn(async move {
-            let _ = sessions.remove_child(id.clone()).await;
-            let _ = myself.send(SessionMsg::RunRemoved { id }).await;
-        });
+        let message_id = id.clone();
+        ctx.step(
+            PHASE_TIMEOUT,
+            async move { sessions.remove_child(id.clone()).await },
+            move |outcome| {
+                if matches!(
+                    outcome,
+                    Ok(Ok(()))
+                        | Ok(Err(ControlError::UnknownChildId(_)))
+                        | Ok(Err(ControlError::ShutdownTimedOut(_)))
+                ) {
+                    SessionMsg::RunRemoved { id: message_id }
+                } else {
+                    // A step deadline does not cancel a removal already
+                    // accepted by the supervisor. Reconcile until the id is
+                    // confirmed absent before starting the retry attempt.
+                    SessionMsg::RetryRunRemove { id: message_id }
+                }
+            },
+        );
     }
 
     async fn complete_task(
@@ -284,14 +302,13 @@ impl Actor for Session {
     async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
         match message {
             SessionMsg::Rehydrate => {
-                let replay = tokio::time::timeout(
-                    PHASE_TIMEOUT,
-                    self.journal.call(|reply| JournalMsg::Replay {
+                let replay = self
+                    .journal
+                    .call(PHASE_TIMEOUT, |reply| JournalMsg::Replay {
                         chat: self.chat,
                         reply,
-                    }),
-                )
-                .await??;
+                    })
+                    .await?;
                 self.transcript_len = replay
                     .iter()
                     .filter(|entry| matches!(entry.entry, JournalEntry::UserMessage { .. }))
@@ -431,6 +448,7 @@ impl Actor for Session {
                 }
             }
             SessionMsg::RunRemoved { id } => {
+                self.pending_removals.remove(&id);
                 if let Some(active) = self.active.take() {
                     if active.id != id {
                         self.active = Some(active);
@@ -449,6 +467,11 @@ impl Actor for Session {
                             timer.cancel();
                         }
                     }
+                }
+            }
+            SessionMsg::RetryRunRemove { id } => {
+                if self.pending_removals.remove(&id) {
+                    self.pipeline_remove(id, ctx);
                 }
             }
             SessionMsg::PauseChanged { paused } => {

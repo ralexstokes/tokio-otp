@@ -266,7 +266,13 @@ async fn call_reply_roundtrip() {
     counter.send(CounterMsg::Add(1)).await.expect("send");
     counter.send(CounterMsg::Add(2)).await.expect("send");
 
-    assert_eq!(counter.call(CounterMsg::Total).await.expect("call"), 3);
+    assert_eq!(
+        counter
+            .call(Duration::from_secs(1), CounterMsg::Total)
+            .await
+            .expect("call"),
+        3
+    );
 
     stop_graph(stop, task).await;
 }
@@ -314,7 +320,10 @@ async fn handler_receives_messages_in_order_and_preserves_state() {
         .expect("second add sent");
 
     assert_eq!(
-        counter.call(HandlerCounterMsg::Total).await.expect("call"),
+        counter
+            .call(Duration::from_secs(1), HandlerCounterMsg::Total)
+            .await
+            .expect("call"),
         5
     );
 
@@ -531,7 +540,7 @@ async fn queued_total_call(actor: ActorRef<GateMsg>) -> JoinHandle<Result<u32, C
     let (queued_tx, queued_rx) = oneshot::channel();
     let call_task = tokio::spawn(async move {
         actor
-            .call(|reply| {
+            .call(Duration::from_secs(1), |reply| {
                 queued_tx.send(()).expect("receiver alive");
                 GateMsg::Total(reply)
             })

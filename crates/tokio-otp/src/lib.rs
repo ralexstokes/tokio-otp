@@ -165,7 +165,12 @@
 //!
 //! counter.send(CounterMsg::Add(2)).await.expect("send succeeded");
 //! counter.send(CounterMsg::Add(3)).await.expect("send succeeded");
-//! assert_eq!(counter.call(CounterMsg::Total).await?, 5);
+//! assert_eq!(
+//!     counter
+//!         .call(std::time::Duration::from_secs(1), CounterMsg::Total)
+//!         .await?,
+//!     5
+//! );
 //!
 //! stop.cancel();
 //! run.await??;
@@ -252,8 +257,8 @@ pub mod prelude {
     pub use crate::{
         Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, BoxError,
         CallError, CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder,
-        MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, Runtime,
-        RuntimeBuilder, RuntimeHandle, SendError, TimerRef,
+        MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, RestartWatchRef,
+        Runtime, RuntimeBuilder, RuntimeHandle, SendError, StepDeadline, StepHandle, TimerRef,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
@@ -270,10 +275,13 @@ pub use actor::{
     Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, ActorRunError,
     ActorSlot, ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, Graph,
     GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor,
-    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, TimerRef, TryRecvError,
+    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, StepDeadline, StepHandle,
+    SupervisorPathSegment, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
-pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
+pub use runtime::{
+    DynamicActorOptions, RestartWatchRef, Runtime, RuntimeHandle, SupervisorHandleExt,
+};
 pub use supervised_actors::SupervisedActors;
 pub use tokio_supervisor::{
     AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,

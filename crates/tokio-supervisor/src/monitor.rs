@@ -126,6 +126,16 @@ impl RestartWatch {
         self.observed
     }
 
+    /// Waits until this supervisor's stable identity becomes terminal.
+    ///
+    /// Unlike [`next`](Self::next), this does not consume restart
+    /// observations. It is useful when a consumer is temporarily blocked on
+    /// another operation but must still react promptly to terminal closure.
+    pub async fn closed(&self) {
+        let mut snapshots = self.snapshots.clone();
+        while snapshots.changed().await.is_ok() {}
+    }
+
     /// Waits until the supervisor records further restarts and returns how
     /// many were recorded since the previous observation.
     ///
@@ -224,6 +234,7 @@ mod tests {
             total_restarts: 1,
             children: vec![crate::ChildSnapshot {
                 id: "worker".to_owned(),
+                membership_epoch: 0,
                 generation: 1,
                 started: true,
                 startup_aborted: false,

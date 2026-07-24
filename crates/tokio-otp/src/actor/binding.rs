@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -25,6 +25,24 @@ use crate::actor::{
 pub struct ActorStats {
     /// Actor id used to correlate these stats with supervisor snapshots.
     pub actor_id: String,
+    /// Identity path of the supervisors containing this actor when sampled
+    /// through [`RuntimeHandle::actor_stats`](crate::RuntimeHandle::actor_stats).
+    ///
+    /// A direct child of the sampled runtime has an empty path. Each nested
+    /// segment includes the supervisor child's membership epoch and generation
+    /// so identical actor ids and local epochs in sibling or restarted
+    /// subtrees remain distinguishable. Standalone actor and graph stats have
+    /// no supervisor context and report `None`.
+    pub supervisor_path: Option<Vec<SupervisorPathSegment>>,
+    /// Identity of the actor's current supervisor membership, when sampled
+    /// through [`RuntimeHandle::actor_stats`](crate::RuntimeHandle::actor_stats).
+    ///
+    /// Pair this with [`actor_id`](Self::actor_id) and
+    /// [`supervisor_path`](Self::supervisor_path) to distinguish a removed
+    /// actor from a later actor added under the same id, including actors with
+    /// identical local identities in different subtrees. Standalone actor and
+    /// graph stats have no supervisor membership and report `None`.
+    pub membership_epoch: Option<u64>,
     /// Messages removed from the mailbox by the actor for handling.
     ///
     /// This can be lower than [`messages_accepted`](Self::messages_accepted):
@@ -48,10 +66,27 @@ pub struct ActorStats {
     pub message_bytes_accepted: Option<u64>,
     /// `send` or `try_send` calls that returned an error.
     pub sends_rejected: u64,
+    /// Steps currently owned by this actor incarnation.
+    ///
+    /// This is a gauge rather than a lifetime counter. It returns to zero
+    /// when steps finish, time out, or are aborted.
+    pub outstanding_steps: u64,
     /// Messages currently occupying the bound mailbox.
     pub mailbox_depth: usize,
     /// Maximum capacity of the currently bound mailbox.
     pub mailbox_capacity: usize,
+}
+
+/// Identity of one nested supervisor on an actor stats path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SupervisorPathSegment {
+    /// Child id under which the nested supervisor is mounted.
+    pub id: String,
+    /// Membership identity of that child in its parent supervisor.
+    pub membership_epoch: u64,
+    /// Current generation of the nested supervisor child.
+    pub generation: u64,
 }
 
 #[derive(Debug)]
@@ -102,11 +137,14 @@ impl ActorStatsCounters {
     pub(crate) fn snapshot(
         &self,
         actor_id: &str,
+        outstanding_steps: u64,
         mailbox_depth: usize,
         mailbox_capacity: usize,
     ) -> ActorStats {
         ActorStats {
             actor_id: actor_id.to_owned(),
+            supervisor_path: None,
+            membership_epoch: None,
             messages_received: self.messages_received.load(Ordering::Relaxed),
             messages_accepted: self.messages_accepted.load(Ordering::Relaxed),
             messages_conflated: self.messages_conflated.load(Ordering::Relaxed),
@@ -115,6 +153,7 @@ impl ActorStatsCounters {
                 .as_ref()
                 .map(|total| total.load(Ordering::Relaxed)),
             sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
+            outstanding_steps,
             mailbox_depth,
             mailbox_capacity,
         }
@@ -204,29 +243,34 @@ impl<M> fmt::Debug for MailboxMode<M> {
 }
 
 pub(crate) enum MailboxReceiver<M> {
-    Queue(mpsc::Receiver<M>),
+    Queue {
+        receiver: mpsc::Receiver<M>,
+        accepting_external: Arc<AtomicBool>,
+    },
     Conflating(ConflatingReceiver<M>),
 }
 
 impl<M> MailboxReceiver<M> {
     pub(crate) async fn recv(&mut self) -> Option<M> {
         match self {
-            Self::Queue(receiver) => receiver.recv().await,
+            Self::Queue { receiver, .. } => receiver.recv().await,
             Self::Conflating(receiver) => receiver.recv().await,
         }
     }
 
     pub(crate) fn try_recv(&mut self) -> Result<M, mpsc::error::TryRecvError> {
         match self {
-            Self::Queue(receiver) => receiver.try_recv(),
+            Self::Queue { receiver, .. } => receiver.try_recv(),
             Self::Conflating(receiver) => receiver.try_recv(),
         }
     }
 
-    pub(crate) fn close(&mut self) {
+    pub(crate) fn close_external(&mut self) {
         match self {
-            Self::Queue(receiver) => receiver.close(),
-            Self::Conflating(receiver) => receiver.close(),
+            Self::Queue {
+                accepting_external, ..
+            } => accepting_external.store(false, Ordering::Release),
+            Self::Conflating(receiver) => receiver.close_external(),
         }
     }
 }
@@ -238,9 +282,16 @@ pub(crate) fn mailbox<M>(
     match mode {
         MailboxMode::Queue => {
             let (sender, receiver) = mpsc::channel(capacity);
+            let accepting_external = Arc::new(AtomicBool::new(true));
             (
-                MailboxSender::Queue(sender),
-                MailboxReceiver::Queue(receiver),
+                MailboxSender::Queue {
+                    sender,
+                    accepting_external: Arc::clone(&accepting_external),
+                },
+                MailboxReceiver::Queue {
+                    receiver,
+                    accepting_external,
+                },
             )
         }
         MailboxMode::Conflate => {
@@ -269,6 +320,7 @@ pub(crate) enum SendOutcome<M> {
 pub(crate) struct MailboxRef<M> {
     actor_id: Arc<str>,
     sender: MailboxSender<M>,
+    outstanding_steps: Arc<AtomicU64>,
 }
 
 impl<M> Clone for MailboxRef<M> {
@@ -276,43 +328,87 @@ impl<M> Clone for MailboxRef<M> {
         Self {
             actor_id: Arc::clone(&self.actor_id),
             sender: self.sender.clone(),
+            outstanding_steps: Arc::clone(&self.outstanding_steps),
         }
     }
 }
 
 impl<M> MailboxRef<M> {
-    pub(crate) fn new(actor_id: Arc<str>, sender: MailboxSender<M>) -> Self {
-        Self { actor_id, sender }
+    pub(crate) fn new(
+        actor_id: Arc<str>,
+        sender: MailboxSender<M>,
+        outstanding_steps: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            actor_id,
+            sender,
+            outstanding_steps,
+        }
     }
 
     /// Sends, returning the message on failure so callers can retry after a
     /// rebind.
     pub(crate) async fn send_retaining(&self, message: M) -> SendOutcome<M> {
         match &self.sender {
-            MailboxSender::Queue(sender) => match sender.send(message).await {
+            MailboxSender::Queue {
+                sender,
+                accepting_external,
+            } => {
+                if !accepting_external.load(Ordering::Acquire) {
+                    return SendOutcome::Closed(message);
+                }
+                match sender.reserve().await {
+                    // This narrows the close race after reserving capacity;
+                    // close_external is an intake signal, not a linearizable
+                    // fence against a sender already in this operation.
+                    Ok(permit) if accepting_external.load(Ordering::Acquire) => {
+                        permit.send(message);
+                        SendOutcome::Accepted { conflated: 0 }
+                    }
+                    Ok(_) | Err(_) => SendOutcome::Closed(message),
+                }
+            }
+            MailboxSender::Conflating(sender) => sender.send(message, false),
+        }
+    }
+
+    pub(crate) async fn send_internal_retaining(&self, message: M) -> SendOutcome<M> {
+        match &self.sender {
+            MailboxSender::Queue { sender, .. } => match sender.send(message).await {
                 Ok(()) => SendOutcome::Accepted { conflated: 0 },
                 Err(error) => SendOutcome::Closed(error.0),
             },
-            MailboxSender::Conflating(sender) => sender.send(message),
+            MailboxSender::Conflating(sender) => sender.send(message, true),
         }
     }
 
     pub(crate) fn try_send(&self, message: M) -> Result<u64, SendError> {
         match &self.sender {
-            MailboxSender::Queue(sender) => {
-                sender
-                    .try_send(message)
-                    .map(|()| 0)
-                    .map_err(|err| match err {
-                        mpsc::error::TrySendError::Full(_) => SendError::MailboxFull {
+            MailboxSender::Queue {
+                sender,
+                accepting_external,
+            } => {
+                if !accepting_external.load(Ordering::Acquire) {
+                    return Err(SendError::MailboxClosed {
+                        actor_id: self.actor_id.to_string(),
+                    });
+                }
+                match sender.try_reserve() {
+                    Ok(permit) if accepting_external.load(Ordering::Acquire) => {
+                        permit.send(message);
+                        Ok(0)
+                    }
+                    Ok(_) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                        Err(SendError::MailboxClosed {
                             actor_id: self.actor_id.to_string(),
-                        },
-                        mpsc::error::TrySendError::Closed(_) => SendError::MailboxClosed {
-                            actor_id: self.actor_id.to_string(),
-                        },
-                    })
+                        })
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => Err(SendError::MailboxFull {
+                        actor_id: self.actor_id.to_string(),
+                    }),
+                }
             }
-            MailboxSender::Conflating(sender) => match sender.send(message) {
+            MailboxSender::Conflating(sender) => match sender.send(message, false) {
                 SendOutcome::Accepted { conflated } => Ok(conflated),
                 SendOutcome::Closed(_) => Err(SendError::MailboxClosed {
                     actor_id: self.actor_id.to_string(),
@@ -328,17 +424,30 @@ impl<M> MailboxRef<M> {
     pub(crate) fn usage(&self) -> (usize, usize) {
         self.sender.usage()
     }
+
+    pub(crate) fn outstanding_steps(&self) -> u64 {
+        self.outstanding_steps.load(Ordering::Relaxed)
+    }
 }
 
 pub(crate) enum MailboxSender<M> {
-    Queue(mpsc::Sender<M>),
+    Queue {
+        sender: mpsc::Sender<M>,
+        accepting_external: Arc<AtomicBool>,
+    },
     Conflating(ConflatingSender<M>),
 }
 
 impl<M> Clone for MailboxSender<M> {
     fn clone(&self) -> Self {
         match self {
-            Self::Queue(sender) => Self::Queue(sender.clone()),
+            Self::Queue {
+                sender,
+                accepting_external,
+            } => Self::Queue {
+                sender: sender.clone(),
+                accepting_external: Arc::clone(accepting_external),
+            },
             Self::Conflating(sender) => Self::Conflating(sender.clone()),
         }
     }
@@ -347,7 +456,9 @@ impl<M> Clone for MailboxSender<M> {
 impl<M> MailboxSender<M> {
     fn same_channel(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Queue(left), Self::Queue(right)) => left.same_channel(right),
+            (Self::Queue { sender: left, .. }, Self::Queue { sender: right, .. }) => {
+                left.same_channel(right)
+            }
             (Self::Conflating(left), Self::Conflating(right)) => left.same_channel(right),
             _ => false,
         }
@@ -355,7 +466,7 @@ impl<M> MailboxSender<M> {
 
     fn usage(&self) -> (usize, usize) {
         match self {
-            Self::Queue(sender) => {
+            Self::Queue { sender, .. } => {
                 let capacity = sender.max_capacity();
                 (capacity.saturating_sub(sender.capacity()), capacity)
             }
@@ -372,6 +483,7 @@ struct ConflatingState<M> {
     key_matches: Option<KeyMatcher<M>>,
     sender_count: usize,
     receiver_closed: bool,
+    accepting_external: bool,
 }
 
 struct ConflatingShared<M> {
@@ -392,9 +504,9 @@ pub(crate) struct ConflatingSender<M> {
 }
 
 impl<M> ConflatingSender<M> {
-    fn send(&self, message: M) -> SendOutcome<M> {
+    fn send(&self, message: M, internal: bool) -> SendOutcome<M> {
         let mut state = self.shared.lock();
-        if state.receiver_closed {
+        if state.receiver_closed || (!internal && !state.accepting_external) {
             return SendOutcome::Closed(message);
         }
 
@@ -491,17 +603,17 @@ impl<M> ConflatingReceiver<M> {
         }
     }
 
-    fn close(&mut self) {
-        let mut state = self.shared.lock();
-        state.receiver_closed = true;
-        drop(state);
-        self.shared.notify.notify_waiters();
+    fn close_external(&mut self) {
+        self.shared.lock().accepting_external = false;
     }
 }
 
 impl<M> Drop for ConflatingReceiver<M> {
     fn drop(&mut self) {
-        self.close();
+        let mut state = self.shared.lock();
+        state.receiver_closed = true;
+        drop(state);
+        self.shared.notify.notify_waiters();
     }
 }
 
@@ -516,6 +628,7 @@ fn conflating_channel<M>(
             key_matches,
             sender_count: 1,
             receiver_closed: false,
+            accepting_external: true,
         }),
         notify: Notify::new(),
     });
@@ -653,11 +766,15 @@ impl<M> BindingCore<M> {
 
     pub(crate) fn stats(&self) -> ActorStats {
         let state = self.current.borrow();
-        let (depth, capacity) = match &*state {
-            BindingState::Bound(mailbox) => mailbox.usage(),
-            BindingState::Unbound | BindingState::Terminated => (0, 0),
+        let (outstanding_steps, depth, capacity) = match &*state {
+            BindingState::Bound(mailbox) => {
+                let (depth, capacity) = mailbox.usage();
+                (mailbox.outstanding_steps(), depth, capacity)
+            }
+            BindingState::Unbound | BindingState::Terminated => (0, 0, 0),
         };
-        self.stats.snapshot(&self.actor_id, depth, capacity)
+        self.stats
+            .snapshot(&self.actor_id, outstanding_steps, depth, capacity)
     }
 
     fn bind(&self, mailbox: MailboxRef<M>) {

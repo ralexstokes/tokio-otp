@@ -51,7 +51,7 @@
 //!    │                                                │ add/watch/remove
 //!    │                                                ▼
 //!    │                                    run:<chat>:<task>:<role>
-//!    │                                     │ model turn on spawned task
+//!    │                                     │ model turn in bounded step
 //!    │                                     │ tool calls: ToolIntent journaled,
 //!    │                                     ▼ then Execute under deadline
 //!    │                                  tool_host ──(timeout? Query key)──▶ run
@@ -78,7 +78,7 @@
 //!
 //! run:<chat>:<task>:<role>   (transient child, restart = Never)
 //!   add_actor_with_options ─▶ continue_with(Step)
-//!     ─▶ model turn on a spawned task (cancel token + deadline) ─▶ ModelResult
+//!     ─▶ model turn in a context-owned step (cancel token + deadline) ─▶ ModelResult
 //!     ─▶ tool loop: journal ToolIntent ─▶ Execute (bounded) ─▶ ToolResult,
 //!         reconciling an unknown outcome through an idempotency-key Query
 //!     ─▶ RunFinished{output} to the session, which removes the child
@@ -156,8 +156,7 @@ struct App {
     tool_host: ActorRef<ToolHostMsg>,
     proof: Proof,
     gate: Arc<AtomicBool>,
-    background_stop: CancellationToken,
-    restart_pump: tokio::task::JoinHandle<()>,
+    restart_watch: RestartWatchRef,
 }
 
 #[tokio::main]
@@ -298,24 +297,8 @@ async fn build_app() -> Result<App, AnyError> {
         })
         .await?;
 
-    let background_stop = CancellationToken::new();
-    let mut restarts = gateway.watch_restarts();
-    let restart_guard = guard.clone();
-    let restart_stop = background_stop.clone();
-    let restart_pump = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                () = restart_stop.cancelled() => break,
-                total = restarts.next() => match total {
-                    Some(total) => {
-                        let _ = restart_guard.send(GuardMsg::BridgeRestarts { total }).await;
-                    }
-                    None => break,
-                }
-            }
-        }
-    });
+    let restart_watch =
+        gateway.watch_restarts_to(&guard, |total| GuardMsg::BridgeRestarts { total });
 
     Ok(App {
         handle,
@@ -331,8 +314,7 @@ async fn build_app() -> Result<App, AnyError> {
         tool_host,
         proof,
         gate,
-        background_stop,
-        restart_pump,
+        restart_watch,
     })
 }
 
@@ -559,27 +541,16 @@ async fn phase_5(app: &App) -> Result<(), AnyError> {
 }
 
 async fn phase_6(app: &App) -> Result<(), AnyError> {
-    let failures_before = guard_report(&app.guard).await?.run_failures_by_chat;
-    let failures_for = |map: &std::collections::HashMap<ChatId, usize>, chat: ChatId| {
-        map.get(chat).copied().unwrap_or(0)
-    };
+    let failures_before = guard_report(&app.guard).await?.run_failures;
     app.model.set_rate_limited(true);
     app.chat.inject_user_message(CHAT_A, "OK outage-a");
     app.chat.inject_user_message(CHAT_B, "OK outage-b");
     await_until(|| async { paused(&app.guard).await.unwrap_or(false) }).await?;
     assert!(!app.gate.load(Ordering::Acquire));
-    // Both sessions' failures reach the guard (the trip itself may have been
-    // two failures from one chat's retry loop), and the pause fan-out lands a
-    // notice on both chats.
-    await_until(|| async {
-        guard_report(&app.guard).await.is_ok_and(|report| {
-            failures_for(&report.run_failures_by_chat, CHAT_A)
-                > failures_for(&failures_before, CHAT_A)
-                && failures_for(&report.run_failures_by_chat, CHAT_B)
-                    > failures_for(&failures_before, CHAT_B)
-        })
-    })
-    .await?;
+    // Either session's retry loop may supply both failures that trip the
+    // breaker before the other session starts. Pin the causal aggregate and
+    // verify the cluster-wide pause separately through both chats' notices.
+    assert!(guard_report(&app.guard).await?.run_failures > failures_before);
     await_until(|| async {
         [CHAT_A, CHAT_B].iter().all(|chat| {
             app.chat
@@ -773,8 +744,7 @@ async fn phase_8(app: App, latency: LatencyRecorder) -> Result<(), AnyError> {
     let recursive_stats = app.handle.actor_stats();
     let session_stats = app.sessions.actor_stats();
     let final_snapshot = app.handle.snapshot();
-    app.background_stop.cancel();
-    app.restart_pump.await?;
+    drop(app.restart_watch);
     tokio::time::timeout(Duration::from_secs(5), app.handle.shutdown_and_wait()).await??;
     let latency = latency.snapshot();
     assert!(
@@ -856,7 +826,7 @@ where
     M: Send + 'static,
     T: Send + 'static,
 {
-    Ok(tokio::time::timeout(PHASE_TIMEOUT, actor.call(make)).await??)
+    Ok(actor.call(PHASE_TIMEOUT, make).await?)
 }
 
 async fn await_until<F, Fut>(predicate: F) -> Result<(), AnyError>
