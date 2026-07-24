@@ -165,7 +165,12 @@
 //!
 //! counter.send(CounterMsg::Add(2)).await.expect("send succeeded");
 //! counter.send(CounterMsg::Add(3)).await.expect("send succeeded");
-//! assert_eq!(counter.call(CounterMsg::Total).await?, 5);
+//! assert_eq!(
+//!     counter
+//!         .call(std::time::Duration::from_secs(1), CounterMsg::Total)
+//!         .await?,
+//!     5
+//! );
 //!
 //! stop.cancel();
 //! run.await??;

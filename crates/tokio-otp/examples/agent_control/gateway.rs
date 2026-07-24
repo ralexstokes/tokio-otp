@@ -83,18 +83,17 @@ impl Inbound {
     }
 
     async fn delivery(&self, delivery: crate::messages::ChatDelivery) -> ActorResult {
-        let ack = tokio::time::timeout(
-            PHASE_TIMEOUT,
-            self.journal.call(|reply| JournalMsg::Append {
+        let ack = self
+            .journal
+            .call(PHASE_TIMEOUT, |reply| JournalMsg::Append {
                 chat: delivery.chat,
                 entry: JournalEntry::UserMessage {
                     envelope: delivery.envelope,
                     text: delivery.text.clone(),
                 },
                 reply,
-            }),
-        )
-        .await??;
+            })
+            .await?;
         // Ack-after-append is the durability boundary. A duplicate is also
         // acked but deliberately never reaches the router.
         self.chat.ack(delivery.envelope);

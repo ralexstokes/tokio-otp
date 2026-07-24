@@ -84,6 +84,13 @@ pub enum CallError {
     /// The request message could not be delivered.
     #[error(transparent)]
     Send(#[from] SendError),
+    /// The deadline expired before the actor replied.
+    #[error("call to actor `{actor_id}` timed out")]
+    #[non_exhaustive]
+    Timeout {
+        /// Target actor id.
+        actor_id: String,
+    },
     /// The actor dropped the [`Reply`](crate::Reply) without answering.
     #[error("actor `{actor_id}` dropped the reply")]
     #[non_exhaustive]

@@ -53,11 +53,12 @@ impl Actor for Health {
                     // Control closes the shared intake gate before awaiting
                     // cancellations. Even if this bounded wait expires, the
                     // already-accepted kill switch still takes effect.
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(500),
-                        self.control.call(|reply| ControlMsg::KillSwitch { reply }),
-                    )
-                    .await;
+                    let _ = self
+                        .control
+                        .call(Duration::from_millis(500), |reply| ControlMsg::KillSwitch {
+                            reply,
+                        })
+                        .await;
                 }
             }
             HealthMsg::ResetBreaker => {

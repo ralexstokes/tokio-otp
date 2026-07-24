@@ -7,7 +7,7 @@ use std::{
 
 use tokio::{
     sync::{oneshot, watch},
-    time::{Instant, MissedTickBehavior},
+    time::{Instant, MissedTickBehavior, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -218,12 +218,11 @@ impl<M> ActorRef<M> {
     /// Sends a request and waits for the actor to answer through the
     /// [`Reply`] carried inside the message.
     ///
-    /// Callers own their deadline. Compose `call` with
-    /// [`tokio::time::timeout`] for a bounded wait:
+    /// The deadline bounds the entire operation, including waiting for a
+    /// mailbox binding, FIFO mailbox capacity, and the reply:
     ///
     /// ```no_run
     /// use std::time::Duration;
-    /// use tokio::time::timeout;
     /// use tokio_otp::{ActorRef, Reply};
     ///
     /// enum Msg {
@@ -231,17 +230,16 @@ impl<M> ActorRef<M> {
     /// }
     ///
     /// # async fn get(actor: &ActorRef<Msg>) -> Result<u64, Box<dyn std::error::Error>> {
-    /// let value = timeout(Duration::from_millis(250), actor.call(Msg::Get)).await??;
+    /// let value = actor.call(Duration::from_millis(250), Msg::Get).await?;
     /// # Ok(value)
     /// # }
     /// ```
     ///
     /// This waits for the same actor binding conditions as [`send`](Self::send),
     /// including FIFO mailbox capacity and expected restart windows. If the
-    /// timeout cancels `call` before the request is accepted, the request is
-    /// dropped. Once the mailbox accepts it, cancelling the caller's wait
-    /// cannot retract it: the actor may still process the request and a late
-    /// reply is discarded.
+    /// deadline expires before the request is accepted, the request is
+    /// dropped. Once the mailbox accepts it, a timeout cannot retract it: the
+    /// actor may still process the request and a late reply is discarded.
     ///
     /// Consequently, a timeout after acceptance has an **unknown outcome**.
     /// In-memory queries are usually harmless, but requests with external
@@ -268,7 +266,32 @@ impl<M> ActorRef<M> {
     /// ordinary message via [`ActorContext::myself`], or move the slow
     /// dependency behind a dedicated child actor. The book's request/reply
     /// chapter covers the pattern.
-    pub async fn call<T>(&self, message: impl FnOnce(Reply<T>) -> M) -> Result<T, CallError> {
+    pub async fn call<T>(
+        &self,
+        deadline: Duration,
+        message: impl FnOnce(Reply<T>) -> M,
+    ) -> Result<T, CallError> {
+        timeout(deadline, self.call_unbounded(message))
+            .await
+            .map_err(|_| CallError::Timeout {
+                actor_id: self.actor_id.to_string(),
+            })?
+    }
+
+    /// Sends a request and waits without a deadline for the actor to answer.
+    ///
+    /// Prefer [`call`](Self::call), whose required deadline bounds mailbox
+    /// backpressure, restart windows, and reply latency. This escape hatch is
+    /// intended only for protocols whose lifetime is deliberately bounded by
+    /// some other mechanism.
+    ///
+    /// As with `call`, cancelling this future after delivery cannot retract
+    /// the request. The actor may still process it, and a late [`Reply`] is a
+    /// silent no-op.
+    pub async fn call_unbounded<T>(
+        &self,
+        message: impl FnOnce(Reply<T>) -> M,
+    ) -> Result<T, CallError> {
         let (sender, receiver) = oneshot::channel();
         self.send(message(Reply { sender })).await?;
         receiver.await.map_err(|_| CallError::ReplyDropped {

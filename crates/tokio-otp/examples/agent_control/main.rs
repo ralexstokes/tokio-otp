@@ -856,7 +856,7 @@ where
     M: Send + 'static,
     T: Send + 'static,
 {
-    Ok(tokio::time::timeout(PHASE_TIMEOUT, actor.call(make)).await??)
+    Ok(actor.call(PHASE_TIMEOUT, make).await?)
 }
 
 async fn await_until<F, Fut>(predicate: F) -> Result<(), AnyError>

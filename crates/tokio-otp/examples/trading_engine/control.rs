@@ -16,14 +16,10 @@ pub struct Control {
 
 impl Control {
     async fn cancel_gateway(gateway: ActorRef<GatewayMsg>) -> usize {
-        tokio::time::timeout(
-            CALL_DEADLINE,
-            gateway.call(|reply| GatewayMsg::CancelAll { reply }),
-        )
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
+        gateway
+            .call(CALL_DEADLINE, |reply| GatewayMsg::CancelAll { reply })
+            .await
+            .unwrap_or_default()
     }
 
     async fn cancel_all(&self) -> usize {
