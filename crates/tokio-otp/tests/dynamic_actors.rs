@@ -536,7 +536,7 @@ async fn remove_child_closes_intake_drains_then_runs_on_stop_before_detach() {
 }
 
 #[tokio::test]
-async fn discard_keeps_intake_open_and_drops_racing_messages() {
+async fn discard_closes_intake_and_drops_racing_messages() {
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let release_handler = Arc::new(Notify::new());
     let release_on_stop = Arc::new(Notify::new());
@@ -590,9 +590,10 @@ async fn discard_keeps_intake_open_and_drops_racing_messages() {
     release_handler.notify_one();
     assert_eq!(events_rx.recv().await, Some(RemovalEvent::OnStopStarted));
 
-    actor
-        .try_send(RemovalMsg::Work(8))
-        .expect("Discard leaves intake open through on_stop");
+    assert!(matches!(
+        actor.try_send(RemovalMsg::Work(8)),
+        Err(SendError::MailboxClosed { actor_id , .. }) if actor_id == "discarding"
+    ));
     assert!(!removal.is_finished(), "removal waits for on_stop");
     release_on_stop.notify_one();
     assert_eq!(events_rx.recv().await, Some(RemovalEvent::OnStopFinished));
