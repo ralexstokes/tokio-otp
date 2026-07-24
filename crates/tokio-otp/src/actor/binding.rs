@@ -11,7 +11,7 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use crate::actor::{
     error::SendError,
-    monitor::MonitorHub,
+    monitor::{ActorMonitors, MonitorHub},
     observability::{GraphObservability, MessageSizeMetrics},
 };
 
@@ -576,6 +576,7 @@ pub(crate) struct BindingCore<M> {
     stats: Arc<ActorStatsCounters>,
     message_size: Option<Arc<MessageSizeObserver<M>>>,
     monitors: Arc<MonitorHub>,
+    outbound_monitors: Arc<ActorMonitors>,
 }
 
 pub(crate) struct MessageSizeObserver<M> {
@@ -597,18 +598,21 @@ impl<M> BindingCore<M> {
     pub(crate) fn new(actor_id: Arc<str>) -> Self {
         let (current, _receiver) = watch::channel(BindingState::Unbound);
         let monitors = Arc::new(MonitorHub::new(&actor_id));
+        let outbound_monitors = Arc::new(ActorMonitors::new());
         Self {
             actor_id,
             current,
             stats: Arc::new(ActorStatsCounters::new(false)),
             message_size: None,
             monitors,
+            outbound_monitors,
         }
     }
 
     pub(crate) fn with_message_size(actor_id: Arc<str>, size_hint: fn(&M) -> usize) -> Self {
         let (current, _receiver) = watch::channel(BindingState::Unbound);
         let monitors = Arc::new(MonitorHub::new(&actor_id));
+        let outbound_monitors = Arc::new(ActorMonitors::new());
         let message_size = MessageSizeObserver {
             size_hint,
             metrics: MessageSizeMetrics::new(&actor_id),
@@ -619,6 +623,7 @@ impl<M> BindingCore<M> {
             stats: Arc::new(ActorStatsCounters::new(true)),
             message_size: Some(Arc::new(message_size)),
             monitors,
+            outbound_monitors,
         }
     }
 
@@ -640,6 +645,10 @@ impl<M> BindingCore<M> {
 
     pub(crate) fn monitor_hub(&self) -> Arc<MonitorHub> {
         Arc::clone(&self.monitors)
+    }
+
+    pub(crate) fn outbound_monitors(&self) -> Arc<ActorMonitors> {
+        Arc::clone(&self.outbound_monitors)
     }
 
     pub(crate) fn stats(&self) -> ActorStats {
@@ -673,6 +682,7 @@ impl<M> BindingCore<M> {
     pub(crate) fn terminate(&self) {
         self.current.send_replace(BindingState::Terminated);
         self.monitors.terminated();
+        self.outbound_monitors.terminate();
     }
 }
 
@@ -693,6 +703,7 @@ impl<M: Send + 'static> BindingLifecycle for BindingCore<M> {
 impl<M> Drop for BindingCore<M> {
     fn drop(&mut self) {
         self.monitors.terminated();
+        self.outbound_monitors.terminate();
     }
 }
 

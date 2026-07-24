@@ -414,7 +414,7 @@ pub struct ActorContext<M> {
     pub(crate) observability: GraphObservability,
     pub(crate) timers: ActorTimers,
     pub(crate) state_timeout: Mutex<Option<TimerRef>>,
-    pub(crate) monitors: ActorMonitors,
+    pub(crate) monitors: Arc<ActorMonitors>,
     pub(crate) ready: Mutex<Option<oneshot::Sender<()>>>,
     pub(crate) continuations: Mutex<VecDeque<M>>,
 }
@@ -488,9 +488,15 @@ impl<M: Send + 'static> ActorContext<M> {
     /// [`MonitorEvent::Terminated`] when the target is permanently gone. A
     /// target that is already running delivers an immediate `Up` for the
     /// current incarnation; a target between incarnations stays silent until
-    /// the next start, so a watch never races a supervisor restart. Watches
-    /// are automatically cancelled when this observer incarnation stops or
-    /// restarts, so register them on start.
+    /// the next start, so a watch never races a supervisor restart.
+    ///
+    /// A watch belongs to the observing and watched actor memberships, not
+    /// either current incarnation. It survives restarts on both sides and is
+    /// delivered to whichever observer incarnation is running next. Calling
+    /// `watch` again for the same pair returns the existing watch without
+    /// replacing its original `map` closure or emitting another immediate
+    /// `Up`. Explicit cancellation or permanent removal of either membership
+    /// ends it.
     ///
     /// Delivery uses the observer's ordinary mailbox policy. A conflating
     /// mailbox may replace an unread event with a later one, so use a FIFO
@@ -505,11 +511,15 @@ impl<M: Send + 'static> ActorContext<M> {
         T: Send + 'static,
         F: FnMut(MonitorEvent) -> M + Send + 'static,
     {
-        let cancellation = self.monitors.child_token();
+        let (cancellation, install) = self.monitors.register(&target.monitors);
         let monitor = MonitorRef {
             cancellation: cancellation.clone(),
         };
+        if !install {
+            return monitor;
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            cancellation.cancel();
             return monitor;
         };
         // The guard closes the queue on drop, so the hub stops staging events

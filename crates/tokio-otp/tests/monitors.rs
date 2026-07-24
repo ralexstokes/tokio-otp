@@ -268,7 +268,7 @@ async fn cancelled_watch_suppresses_delivery() {
 }
 
 #[tokio::test]
-async fn observer_restart_clears_old_watches() {
+async fn watch_survives_observer_restart_without_duplicate_registration() {
     let mut fixture = fixture(false);
     let peer = fixture.peer.clone();
     let peer_task =
@@ -295,6 +295,18 @@ async fn observer_restart_clears_old_watches() {
             .is_panic()
     );
 
+    // Exit the subject while the observer has no bound incarnation. The
+    // membership-owned forwarder must wait for the replacement mailbox.
+    fixture
+        .peer_ref
+        .send(PeerMessage::Stop)
+        .await
+        .expect("stop command sent");
+    peer_task
+        .await
+        .expect("peer task joined")
+        .expect("peer stopped cleanly");
+
     let second_observer = fixture.observer.clone();
     let second_task = tokio::spawn(async move {
         second_observer
@@ -302,12 +314,6 @@ async fn observer_restart_clears_old_watches() {
             .await
     });
     started(&mut fixture.observer_started).await;
-    assert_eq!(next_event(&mut fixture.observed).await, up("peer", 0));
-    fixture
-        .peer_ref
-        .send(PeerMessage::Stop)
-        .await
-        .expect("stop command sent");
     assert_eq!(
         expect_down(next_event(&mut fixture.observed).await).reason,
         DownReason::Normal
@@ -318,11 +324,260 @@ async fn observer_restart_clears_old_watches() {
     );
     assert_silence(&mut fixture.observed).await;
 
+    second_task.abort();
+}
+
+enum TaggedObserverMessage {
+    Event {
+        registration: usize,
+        event: MonitorEvent,
+    },
+    Crash,
+}
+
+#[derive(Clone)]
+struct TaggedObserver {
+    peer: ActorRef<PeerMessage>,
+    registrations: Arc<std::sync::atomic::AtomicUsize>,
+    started: mpsc::UnboundedSender<()>,
+    observed: mpsc::UnboundedSender<(usize, MonitorEvent)>,
+}
+
+impl RawActor for TaggedObserver {
+    type Msg = TaggedObserverMessage;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let registration = self
+            .registrations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ctx.watch(&self.peer, move |event| TaggedObserverMessage::Event {
+            registration,
+            event,
+        });
+        self.started.send(()).expect("start receiver alive");
+        while let Some(message) = ctx.recv().await {
+            match message {
+                TaggedObserverMessage::Event {
+                    registration,
+                    event,
+                } => self
+                    .observed
+                    .send((registration, event))
+                    .expect("event receiver alive"),
+                TaggedObserverMessage::Crash => panic!("deliberate observer panic"),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn replacement_incarnation_keeps_the_membership_owned_mapper() {
+    let factory = RunnableActorFactory::new();
+    let (peer_started_tx, mut peer_started) = mpsc::unbounded_channel();
+    let (peer, peer_ref) = factory.actor("peer", move || Peer {
+        started: peer_started_tx.clone(),
+    });
+    let registrations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (observer_started_tx, mut observer_started) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed) = mpsc::unbounded_channel();
+    let (observer, observer_ref) = factory.actor("observer", {
+        let peer_ref = peer_ref.clone();
+        let registrations = registrations.clone();
+        move || TaggedObserver {
+            peer: peer_ref.clone(),
+            registrations: registrations.clone(),
+            started: observer_started_tx.clone(),
+            observed: observed_tx.clone(),
+        }
+    });
+    let peer_task =
+        tokio::spawn(async move { peer.run_until(pending::<()>(), RebindPolicy::Never).await });
+    let first_observer = observer.clone();
+    let first_task = tokio::spawn(async move {
+        first_observer
+            .run_until(pending::<()>(), RebindPolicy::OnFailure)
+            .await
+    });
+    started(&mut peer_started).await;
+    started(&mut observer_started).await;
+    let (registration, event) = observed.recv().await.expect("initial up delivered");
+    assert_eq!(registration, 0);
+    assert_eq!(event, up("peer", 0));
+
+    observer_ref
+        .send(TaggedObserverMessage::Crash)
+        .await
+        .expect("observer crash sent");
+    assert!(
+        first_task
+            .await
+            .expect_err("observer task panicked")
+            .is_panic()
+    );
+    let second_observer = observer.clone();
+    let second_task = tokio::spawn(async move {
+        second_observer
+            .run_until(pending::<()>(), RebindPolicy::Never)
+            .await
+    });
+    started(&mut observer_started).await;
+    assert_eq!(
+        registrations.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both incarnations attempted registration"
+    );
+
+    peer_ref
+        .send(PeerMessage::Stop)
+        .await
+        .expect("peer stop sent");
+    let (registration, event) = observed.recv().await.expect("down delivered");
+    assert_eq!(
+        registration, 0,
+        "replacement mapper did not replace the watch"
+    );
+    assert_eq!(expect_down(event).reason, DownReason::Normal);
+    let (registration, event) = observed.recv().await.expect("terminal delivered");
+    assert_eq!(registration, 0);
+    assert_eq!(expect_terminated(event, "peer"), Some(0));
+    assert!(
+        timeout(Duration::from_millis(100), observed.recv())
+            .await
+            .is_err(),
+        "replacement registration must not create a duplicate watch"
+    );
+
     peer_task
         .await
         .expect("peer task joined")
         .expect("peer stopped cleanly");
     second_task.abort();
+}
+
+enum ManagedObserverMessage {
+    Event(MonitorEvent),
+    Stop,
+}
+
+#[derive(Clone)]
+struct ManagedObserver {
+    peer: ActorRef<PeerMessage>,
+    watch: mpsc::UnboundedSender<MonitorRef>,
+    observed: mpsc::UnboundedSender<MonitorEvent>,
+}
+
+impl RawActor for ManagedObserver {
+    type Msg = ManagedObserverMessage;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        let watch = ctx.watch(&self.peer, ManagedObserverMessage::Event);
+        self.watch.send(watch).expect("watch receiver alive");
+        while let Some(message) = ctx.recv().await {
+            match message {
+                ManagedObserverMessage::Event(event) => {
+                    self.observed.send(event).expect("event receiver alive");
+                }
+                ManagedObserverMessage::Stop => break,
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn observer_membership_removal_cancels_its_watches() {
+    let factory = RunnableActorFactory::new();
+    let (peer_started_tx, mut peer_started) = mpsc::unbounded_channel();
+    let (peer, peer_ref) = factory.actor("peer", move || Peer {
+        started: peer_started_tx.clone(),
+    });
+    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel();
+    let (observed_tx, _observed_rx) = mpsc::unbounded_channel();
+    let (observer, observer_ref) = factory.actor("observer", {
+        let peer_ref = peer_ref.clone();
+        move || ManagedObserver {
+            peer: peer_ref.clone(),
+            watch: watch_tx.clone(),
+            observed: observed_tx.clone(),
+        }
+    });
+    let peer_task =
+        tokio::spawn(async move { peer.run_until(pending::<()>(), RebindPolicy::Never).await });
+    let observer_task = tokio::spawn(async move {
+        observer
+            .run_until(pending::<()>(), RebindPolicy::Never)
+            .await
+    });
+    started(&mut peer_started).await;
+    let watch = watch_rx.recv().await.expect("watch created");
+
+    observer_ref
+        .send(ManagedObserverMessage::Stop)
+        .await
+        .expect("observer stop sent");
+    observer_task
+        .await
+        .expect("observer task joined")
+        .expect("observer stopped cleanly");
+    assert!(
+        watch.is_cancelled(),
+        "terminating the observer membership ends its outbound watch"
+    );
+
+    peer_task.abort();
+}
+
+#[tokio::test]
+async fn subject_membership_removal_delivers_terminal_then_ends_watch() {
+    let factory = RunnableActorFactory::new();
+    let (peer_started_tx, mut peer_started) = mpsc::unbounded_channel();
+    let (peer, peer_ref) = factory.actor("peer", move || Peer {
+        started: peer_started_tx.clone(),
+    });
+    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed) = mpsc::unbounded_channel();
+    let (observer, _) = factory.actor("observer", {
+        let peer_ref = peer_ref.clone();
+        move || ManagedObserver {
+            peer: peer_ref.clone(),
+            watch: watch_tx.clone(),
+            observed: observed_tx.clone(),
+        }
+    });
+    let peer_task =
+        tokio::spawn(async move { peer.run_until(pending::<()>(), RebindPolicy::Never).await });
+    let observer_task = tokio::spawn(async move {
+        observer
+            .run_until(pending::<()>(), RebindPolicy::Never)
+            .await
+    });
+    started(&mut peer_started).await;
+    let watch = watch_rx.recv().await.expect("watch created");
+    assert_eq!(next_event(&mut observed).await, up("peer", 0));
+
+    peer_ref
+        .send(PeerMessage::Stop)
+        .await
+        .expect("peer stop sent");
+    assert_eq!(
+        expect_down(next_event(&mut observed).await).reason,
+        DownReason::Normal
+    );
+    assert_eq!(
+        expect_terminated(next_event(&mut observed).await, "peer"),
+        Some(0)
+    );
+    assert!(
+        watch.is_cancelled(),
+        "the subject's terminal event is delivered before the pair ends"
+    );
+
+    peer_task
+        .await
+        .expect("peer task joined")
+        .expect("peer stopped cleanly");
+    observer_task.abort();
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -92,8 +92,8 @@ pub enum MonitorEvent {
 /// A cancellable actor watch.
 ///
 /// Clones refer to the same watch. Dropping the handle does not cancel the
-/// watch; call [`cancel`](Self::cancel) explicitly. Watches are also
-/// cancelled automatically when the observing actor stops or restarts.
+/// watch; call [`cancel`](Self::cancel) explicitly. Watches also end when
+/// either the observing or watched actor membership is permanently removed.
 #[derive(Clone, Debug)]
 pub struct MonitorRef {
     pub(crate) cancellation: CancellationToken,
@@ -204,17 +204,21 @@ impl WatchQueue {
 /// Owns a forwarder's end of a [`WatchQueue`] and closes it on drop, so the
 /// hub stops staging into the queue whether the forwarder exits normally or
 /// unwinds through a panicking `map` closure.
-pub(crate) struct WatchQueueGuard(Arc<WatchQueue>);
+pub(crate) struct WatchQueueGuard {
+    queue: Arc<WatchQueue>,
+    cancellation: CancellationToken,
+}
 
 impl WatchQueueGuard {
     pub(crate) fn queue(&self) -> &WatchQueue {
-        &self.0
+        &self.queue
     }
 }
 
 impl Drop for WatchQueueGuard {
     fn drop(&mut self) {
-        self.0.close();
+        self.queue.close();
+        self.cancellation.cancel();
     }
 }
 
@@ -287,7 +291,10 @@ impl MonitorHub {
         match state.lifecycle {
             Lifecycle::Terminated(generation) => {
                 queue.push(self.terminated_event(generation));
-                return WatchQueueGuard(queue);
+                return WatchQueueGuard {
+                    queue,
+                    cancellation,
+                };
             }
             Lifecycle::Running(generation) => {
                 queue.push(self.up(generation));
@@ -295,10 +302,13 @@ impl MonitorHub {
             Lifecycle::Pending | Lifecycle::Exited(_) => {}
         }
         state.watchers.push(Watcher {
-            cancellation,
+            cancellation: cancellation.clone(),
             queue: Arc::clone(&queue),
         });
-        WatchQueueGuard(queue)
+        WatchQueueGuard {
+            queue,
+            cancellation,
+        }
     }
 
     pub(crate) fn started(&self) {
@@ -400,21 +410,55 @@ impl Drop for MonitorExitGuard {
     }
 }
 
-pub(crate) struct ActorMonitors(CancellationToken);
-
-impl ActorMonitors {
-    pub(crate) fn new(shutdown: &CancellationToken) -> Self {
-        Self(shutdown.child_token())
-    }
-
-    pub(crate) fn child_token(&self) -> CancellationToken {
-        self.0.child_token()
-    }
+struct MembershipWatch {
+    subject: Weak<MonitorHub>,
+    cancellation: CancellationToken,
 }
 
-impl Drop for ActorMonitors {
-    fn drop(&mut self) {
-        self.0.cancel();
+/// Owns the watches created by one actor membership.
+///
+/// Unlike timers, this scope belongs to the restart-stable binding rather
+/// than an incarnation. Re-registering a watch from a replacement
+/// incarnation finds the existing observer/subject pair, while terminating
+/// the binding cancels every outbound watch.
+pub(crate) struct ActorMonitors {
+    lifetime: CancellationToken,
+    watches: Mutex<Vec<MembershipWatch>>,
+}
+
+impl ActorMonitors {
+    pub(crate) fn new() -> Self {
+        Self {
+            lifetime: CancellationToken::new(),
+            watches: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Returns the cancellation token for the unique live watch on `subject`
+    /// and whether the caller must install its forwarder.
+    pub(crate) fn register(&self, subject: &Arc<MonitorHub>) -> (CancellationToken, bool) {
+        let mut watches = self.watches.lock().unwrap_or_else(PoisonError::into_inner);
+        watches
+            .retain(|watch| !watch.cancellation.is_cancelled() && watch.subject.strong_count() > 0);
+        if let Some(watch) = watches.iter().find(|watch| {
+            watch
+                .subject
+                .upgrade()
+                .is_some_and(|registered| Arc::ptr_eq(&registered, subject))
+        }) {
+            return (watch.cancellation.clone(), false);
+        }
+
+        let cancellation = self.lifetime.child_token();
+        watches.push(MembershipWatch {
+            subject: Arc::downgrade(subject),
+            cancellation: cancellation.clone(),
+        });
+        (cancellation, true)
+    }
+
+    pub(crate) fn terminate(&self) {
+        self.lifetime.cancel();
     }
 }
 
