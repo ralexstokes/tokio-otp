@@ -406,7 +406,7 @@ impl<M> ActorRef<M> {
         self.stats.record_received();
     }
 
-    async fn send_to_incarnation(&self, mailbox: MailboxRef<M>, message: M) {
+    async fn post_to_incarnation(&self, mailbox: MailboxRef<M>, message: M) {
         let message_size = self
             .message_size
             .as_ref()
@@ -617,7 +617,7 @@ impl<M: Send + 'static> ActorContext<M> {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {}
-                () = myself.send_to_incarnation(incarnation, message) => {}
+                () = myself.post_to_incarnation(incarnation, message) => {}
             }
         });
         handle
