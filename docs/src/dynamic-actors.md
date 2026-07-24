@@ -152,6 +152,40 @@ supervisor, so remove it through the same handle with
 normally, and appear in both `venue.actor_stats()` and the parent handle's
 recursive `actor_stats()` result.
 
+Subtrees can also be added dynamically. `add_subtree` takes the same
+`RuntimeBuilder` used for static composition and returns an actor-aware handle:
+
+```rust,ignore
+let sessions = handle
+    .add_subtree("sessions", Runtime::builder())
+    .await?;
+let session = sessions
+    .add_subtree(
+        session_id,
+        Runtime::builder().graph(session_graph),
+    )
+    .await?;
+session
+    .add_actor(
+        "current-run",
+        Run::new,
+        DynamicActorOptions::default(),
+    )
+    .await?;
+```
+
+Dynamic subtrees use the same actor registry nodes and recursive stats path as
+statically declared subtrees. Removing one with `remove_child` removes that
+registry node, and retained handles fail control operations with
+`ControlError::Unavailable`.
+
+Restart recovery follows the builder boundary. If a dynamic subtree itself
+restarts, actors and nested subtrees declared in the builder are recreated;
+children added later through its handle are not and must be replayed by the
+application. If the parent supervisor that received `add_subtree` restarts,
+the dynamic subtree itself is not recreated. Restart intensity remains per
+child, and shutdown remains concurrent under the parent's shared deadline.
+
 If an id is removed and later reused, compare the snapshot's
 `membership_epoch` (also present in runtime-scoped `ActorStats`) as well as its
 `generation`: restarts keep an epoch and increment the generation, while a new
@@ -159,13 +193,13 @@ membership receives a later epoch and starts again at generation zero. For
 recursive stats, also compare `ActorStats::supervisor_path`; it distinguishes
 otherwise identical local ids and epochs in sibling or restarted subtrees.
 
-For a raw nested `Supervisor` that was not built as a runtime subtree, use
-`Graph::dynamic_factory`, `RuntimeHandle::supervisor`, and
-`SupervisorHandleExt` as the lower-level escape hatch. Actors added through
-that raw path are not part of runtime actor stats. Raw removals also bypass the
-runtime registry's immediate bookkeeping; the next `actor_stats()` sample
-reconciles tracked entries against the supervisor snapshot and prunes removed
-children.
+For a raw nested `Supervisor` that does not need actor-aware behavior, use
+`RuntimeHandle::add_supervisor`, `Graph::dynamic_factory`,
+`RuntimeHandle::supervisor`, and `SupervisorHandleExt` as the lower-level
+escape hatch. Actors added through that raw path are not part of runtime actor
+stats. Raw removals also bypass the runtime registry's immediate bookkeeping;
+the next `actor_stats()` sample reconciles tracked entries against the
+supervisor snapshot and prunes removed children.
 
 ## Name-based discovery, when you want it
 

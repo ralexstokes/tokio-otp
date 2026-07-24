@@ -14,13 +14,13 @@ use tokio::{
     time::timeout,
 };
 use tokio_otp::{
-    Actor, ActorContext, ActorFactory, ActorRef, ActorResult, BoxError, DynamicActorOptions,
-    GraphBuilder, RawActor, Reply, Runtime, SendError, SupervisedActors, SupervisorHandleExt,
-    prelude::Continue,
+    Actor, ActorContext, ActorFactory, ActorRef, ActorResult, AddSubtreeError, BoxError,
+    DynamicActorOptions, GraphBuilder, RawActor, Reply, Runtime, SendError, SupervisedActors,
+    SupervisorHandleExt, prelude::Continue,
 };
 use tokio_supervisor::{
-    ChildStateView, ExitStatusView, RestartIntensity, RestartPolicy, ShutdownPolicy, Strategy,
-    SupervisorBuilder, SupervisorError, SupervisorStateView,
+    ChildStateView, ControlError, ExitStatusView, RestartIntensity, RestartPolicy, ShutdownPolicy,
+    Strategy, SupervisorBuilder, SupervisorError, SupervisorStateView,
 };
 
 struct Drain<M>(PhantomData<fn(M)>);
@@ -297,6 +297,108 @@ async fn runtime_builder_composes_subtrees_with_recursive_actor_stats() {
 }
 
 #[tokio::test]
+async fn dynamic_subtree_preserves_static_and_dynamic_actor_metadata() {
+    let mut graph = GraphBuilder::new();
+    let static_ref = graph.actor("static-worker", Drain::<()>::new);
+    let root = Runtime::builder().build().expect("runtime builds").spawn();
+
+    let subtree = root
+        .add_subtree(
+            "workers",
+            Runtime::builder().graph(graph.build().expect("graph builds")),
+        )
+        .await
+        .expect("subtree added");
+    subtree.wait_started().await.expect("subtree started");
+    let dynamic_ref = subtree
+        .add_actor(
+            "dynamic-worker",
+            Drain::<()>::new,
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("dynamic actor added");
+
+    static_ref.send(()).await.expect("static actor receives");
+    dynamic_ref.send(()).await.expect("dynamic actor receives");
+    assert!(root.subtree("workers").is_some());
+    assert_eq!(
+        root.actor_stats()
+            .into_iter()
+            .map(|stats| stats.actor_id)
+            .collect::<Vec<_>>(),
+        [static_ref.id(), dynamic_ref.id()]
+    );
+    assert!(
+        root.actor_stats()
+            .iter()
+            .all(|stats| stats.membership_epoch.is_some()),
+        "builder-created and dynamically added actors both have bound epochs"
+    );
+
+    root.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn dynamic_subtrees_can_nest_and_removal_terminates_retained_handles() {
+    let root = Runtime::builder().build().expect("runtime builds").spawn();
+    let middle = root
+        .add_subtree("middle", Runtime::builder())
+        .await
+        .expect("middle subtree added");
+    let leaf = middle
+        .add_subtree("leaf", Runtime::builder())
+        .await
+        .expect("leaf subtree added");
+    let actor = leaf
+        .add_actor("worker", Drain::<()>::new, DynamicActorOptions::default())
+        .await
+        .expect("nested actor added");
+    actor.send(()).await.expect("nested actor receives");
+
+    assert_eq!(root.actor_stats().len(), 1);
+    assert!(middle.subtree("leaf").is_some());
+    root.remove_child("middle")
+        .await
+        .expect("middle subtree removed");
+    assert!(root.subtree("middle").is_none());
+    assert!(root.actor_stats().is_empty());
+    assert!(matches!(
+        leaf.add_actor("late", Drain::<()>::new, DynamicActorOptions::default())
+            .await,
+        Err(ControlError::Unavailable)
+    ));
+
+    root.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn duplicate_dynamic_subtree_id_leaves_registry_unchanged() {
+    let root = Runtime::builder().build().expect("runtime builds").spawn();
+    let first = root
+        .add_subtree("workers", Runtime::builder())
+        .await
+        .expect("first subtree added");
+    first
+        .add_actor("worker", Drain::<()>::new, DynamicActorOptions::default())
+        .await
+        .expect("actor added");
+
+    let error = root
+        .add_subtree("workers", Runtime::builder())
+        .await
+        .expect_err("duplicate subtree rejected");
+    assert_eq!(
+        error,
+        AddSubtreeError::Control(ControlError::DuplicateChildId("workers".to_owned()))
+    );
+    assert_eq!(root.actor_stats().len(), 1);
+    assert!(root.subtree("workers").is_some());
+
+    root.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn recursive_stats_distinguish_duplicate_actor_ids_in_sibling_subtrees() {
     let mut left_graph = GraphBuilder::new();
     left_graph.actor("worker", Drain::<()>::new);
@@ -474,6 +576,124 @@ async fn recursive_stats_prune_dynamic_actors_lost_on_subtree_restart() {
         .shutdown_and_wait()
         .await
         .expect("supervisor shut down cleanly");
+}
+
+#[tokio::test]
+async fn dynamic_subtree_restart_recreates_only_builder_membership() {
+    let mut graph = GraphBuilder::new();
+    let static_ref = graph.actor("static-worker", || FailOnMessage);
+    let root = Runtime::builder().build().expect("runtime builds").spawn();
+    let subtree = root
+        .add_subtree(
+            "workers",
+            Runtime::builder()
+                .graph(graph.build().expect("graph builds"))
+                .restart_intensity(RestartIntensity::new(0, Duration::from_secs(60))),
+        )
+        .await
+        .expect("subtree added");
+    subtree.wait_started().await.expect("subtree started");
+    let dynamic_ref = subtree
+        .add_actor(
+            "dynamic-worker",
+            Drain::<()>::new,
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("dynamic actor added");
+    assert_eq!(root.actor_stats().len(), 2);
+
+    let restart = root
+        .monitor_restart("workers")
+        .expect("subtree is monitored");
+    static_ref.send(()).await.expect("failure triggered");
+    timeout(Duration::from_secs(1), restart.into_future())
+        .await
+        .expect("subtree restarted within timeout")
+        .expect("subtree restart succeeded");
+
+    let stats = root.actor_stats();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].actor_id, static_ref.id());
+    assert!(matches!(
+        dynamic_ref.send(()).await,
+        Err(SendError::ActorTerminated { .. })
+    ));
+
+    root.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn parent_restart_drops_dynamic_subtree_and_allows_same_id_replay() {
+    let mut parent_graph = GraphBuilder::new();
+    let fuse = parent_graph.actor("fuse", || FailOnMessage);
+    let root = Runtime::builder()
+        .subtree(
+            "parent",
+            Runtime::builder()
+                .graph(parent_graph.build().expect("graph builds"))
+                .restart_intensity(RestartIntensity::new(0, Duration::from_secs(60))),
+        )
+        .build()
+        .expect("runtime builds")
+        .spawn();
+    root.wait_started().await.expect("runtime started");
+    let parent = root.subtree("parent").expect("parent subtree available");
+    let dynamic = parent
+        .add_subtree("dynamic", Runtime::builder())
+        .await
+        .expect("dynamic subtree added");
+    dynamic
+        .add_actor("worker", Drain::<()>::new, DynamicActorOptions::default())
+        .await
+        .expect("dynamic actor added");
+    assert!(
+        root.actor_stats()
+            .iter()
+            .any(|stats| stats.actor_id == "worker")
+    );
+
+    let restart = root
+        .monitor_restart("parent")
+        .expect("parent subtree is monitored");
+    fuse.send(()).await.expect("parent failure triggered");
+    timeout(Duration::from_secs(1), restart.into_future())
+        .await
+        .expect("parent restarted within timeout")
+        .expect("parent restart succeeded");
+
+    assert!(
+        root.actor_stats()
+            .iter()
+            .all(|stats| stats.actor_id != "worker")
+    );
+    assert!(matches!(
+        dynamic
+            .add_actor("late", Drain::<()>::new, DynamicActorOptions::default())
+            .await,
+        Err(ControlError::Unavailable)
+    ));
+    let restarted_parent = root.subtree("parent").expect("parent rebound");
+    assert!(restarted_parent.subtree("dynamic").is_none());
+    let replayed = restarted_parent
+        .add_subtree("dynamic", Runtime::builder())
+        .await
+        .expect("same id can be replayed");
+    replayed
+        .add_actor(
+            "replacement",
+            Drain::<()>::new,
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("replacement actor added");
+    assert!(
+        root.actor_stats()
+            .iter()
+            .any(|stats| stats.actor_id == "replacement")
+    );
+
+    root.shutdown_and_wait().await.expect("clean shutdown");
 }
 
 #[derive(Clone)]

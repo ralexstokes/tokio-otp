@@ -40,7 +40,7 @@ impl ControlEndpoint {
         &self,
         id: String,
         supervisor: SupervisorSpec,
-    ) -> Result<(), ControlError> {
+    ) -> Result<u64, ControlError> {
         self.send(|reply| SupervisorCommand::AddSupervisor {
             id,
             supervisor: Box::new(supervisor),
@@ -389,7 +389,7 @@ pub(crate) enum SupervisorCommand {
     AddSupervisor {
         id: String,
         supervisor: Box<SupervisorSpec>,
-        reply: oneshot::Sender<Result<(), ControlError>>,
+        reply: oneshot::Sender<Result<u64, ControlError>>,
     },
 }
 
@@ -484,11 +484,14 @@ impl SupervisorHandle {
 
     /// Adds a nested supervisor at runtime with restart-stable observation and
     /// control channels.
+    ///
+    /// On success, returns the membership epoch assigned atomically with the
+    /// insertion.
     pub async fn add_supervisor(
         &self,
         id: impl Into<String>,
         supervisor: impl Into<SupervisorSpec>,
-    ) -> Result<(), ControlError> {
+    ) -> Result<u64, ControlError> {
         self.control_endpoint()?
             .add_supervisor(id.into(), supervisor.into())
             .await
