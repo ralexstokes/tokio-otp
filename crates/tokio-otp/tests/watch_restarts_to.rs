@@ -161,6 +161,24 @@ async fn dropping_restart_watch_stops_delivery() {
 }
 
 #[tokio::test]
+async fn cancelling_restart_watch_stops_delivery() {
+    let (handle, sink, crasher, mut observed) = runtime_with_sink().await;
+    let watch = handle.watch_restarts_to(&sink, |count| count);
+    watch.cancel();
+    assert!(watch.is_cancelled());
+
+    crash_once(&handle, &crasher).await;
+    assert!(
+        timeout(Duration::from_millis(100), observed.recv())
+            .await
+            .is_err(),
+        "cancelled restart watch delivered a message"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn restart_watch_follows_target_restarts() {
     let (handle, sink, _crasher, mut observed) = runtime_with_sink().await;
     let watch = handle.watch_restarts_to(&sink, |count| count);
