@@ -265,7 +265,7 @@ impl<M> ActorRef<M> {
     /// An actor processes one message at a time, so a handler that awaits
     /// `call` stops its own mailbox for the full round-trip: every queued
     /// message, however urgent or unrelated, waits behind the outstanding
-    /// request for up to the composed deadline. This is the actor-model
+    /// request for up to the call's deadline. This is the actor-model
     /// equivalent of blocking inside an Erlang `gen_server` callback, and in
     /// fan-out or routing actors it turns one slow callee into head-of-line
     /// blocking for all traffic through the intermediary. Pipeline the
