@@ -209,14 +209,14 @@ impl ActorRuntimeState {
         &self,
         id: String,
         state: Arc<ActorRuntimeState>,
-        membership_epoch: impl Into<Option<u64>>,
+        membership_epoch: Option<u64>,
     ) {
         let mut subtrees = self.subtrees.lock().expect("actor subtree lock poisoned");
         subtrees.retain(|existing| existing.id != id);
         subtrees.push(TrackedSubtree {
             id,
             state,
-            membership_epoch: membership_epoch.into(),
+            membership_epoch,
         });
     }
 
@@ -714,13 +714,15 @@ impl RuntimeHandle {
             .supervisor
             .add_supervisor(id.clone(), nested_supervisor)
             .await?;
-        self.actors
-            .record_subtree(id.clone(), Arc::clone(&nested_actors), membership_epoch);
-
         let nested_handle = self
             .supervisor
             .supervisor(&id)
             .ok_or(ControlError::Unavailable)?;
+        self.actors.record_subtree(
+            id.clone(),
+            Arc::clone(&nested_actors),
+            Some(membership_epoch),
+        );
         nested_actors.bind_initial_memberships(&nested_handle);
 
         let mut ancestors = self.ancestors.clone();
