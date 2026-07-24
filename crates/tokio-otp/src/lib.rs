@@ -252,8 +252,8 @@ pub mod prelude {
     pub use crate::{
         Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, BoxError,
         CallError, CancellationToken, Down, DownReason, DrainPolicy, Graph, GraphBuilder,
-        MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, Runtime,
-        RuntimeBuilder, RuntimeHandle, SendError, TimerRef,
+        MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply, RestartWatchRef,
+        Runtime, RuntimeBuilder, RuntimeHandle, SendError, TimerRef,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
@@ -273,7 +273,9 @@ pub use actor::{
     RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
-pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
+pub use runtime::{
+    DynamicActorOptions, RestartWatchRef, Runtime, RuntimeHandle, SupervisorHandleExt,
+};
 pub use supervised_actors::SupervisedActors;
 pub use tokio_supervisor::{
     AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,

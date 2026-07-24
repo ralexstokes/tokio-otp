@@ -23,7 +23,7 @@ mod coverage_probe {
     }
 
     mod otp {
-        use tokio_otp::prelude::{Runtime, RuntimeBuilder, RuntimeHandle};
+        use tokio_otp::prelude::{RestartWatchRef, Runtime, RuntimeBuilder, RuntimeHandle};
     }
 
     mod advanced_root {

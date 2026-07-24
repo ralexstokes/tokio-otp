@@ -11,6 +11,7 @@ const BREAKER_THRESHOLD: usize = 4;
 #[derive(Clone)]
 pub struct Health {
     restarts: VecDeque<Instant>,
+    observed_restart_total: u64,
     tripped: bool,
     control: ActorRef<ControlMsg>,
 }
@@ -19,6 +20,7 @@ impl Health {
     pub fn new(control: ActorRef<ControlMsg>) -> Self {
         Self {
             restarts: VecDeque::new(),
+            observed_restart_total: 0,
             tripped: false,
             control,
         }
@@ -30,14 +32,17 @@ impl Actor for Health {
 
     async fn handle(&mut self, message: HealthMsg, _ctx: &ActorContext<HealthMsg>) -> ActorResult {
         match message {
-            HealthMsg::RestartsObserved { count } => {
-                tracing::warn!(count, "venue subtree restarts observed");
+            HealthMsg::RestartsObserved { total } => {
+                let count = total.saturating_sub(self.observed_restart_total);
+                self.observed_restart_total = self.observed_restart_total.max(total);
+                tracing::warn!(total, count, "venue subtree restarts observed");
                 let now = Instant::now();
-                // A single observation may cover several restarts when
-                // snapshot updates were conflated; count each one. They all
-                // carry this observation's timestamp rather than their own
-                // arrival times, which can only widen the window's view
-                // (trip earlier) — the fail-closed direction for a breaker.
+                // The bridge sends an idempotent cumulative total, including
+                // after a target restart. Count only the newly represented
+                // restarts. They all carry this observation's timestamp
+                // rather than their own arrival times, which can only widen
+                // the window's view (trip earlier) — the fail-closed direction
+                // for a breaker.
                 for _ in 0..count {
                     self.restarts.push_back(now);
                 }

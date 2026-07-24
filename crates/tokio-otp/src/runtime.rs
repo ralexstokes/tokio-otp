@@ -17,6 +17,7 @@ use tokio_supervisor::{
     RestartWatch, ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,
     SupervisorSnapshot, SupervisorSpec,
 };
+use tokio_util::sync::CancellationToken;
 
 pub(crate) type ActorSubtrees = Vec<(String, Arc<ActorRuntimeState>)>;
 
@@ -173,9 +174,11 @@ mod sealed {
 /// Actor-aware extensions for any supervisor handle, including handles for
 /// nested supervisors.
 ///
-/// Import this trait to add a [`RunnableActor`] minted by
+/// Import this trait to connect actor-aware behavior to a raw supervisor
+/// handle. It can add a [`RunnableActor`] minted by
 /// [`Graph::dynamic_factory`](crate::Graph::dynamic_factory) directly to a
-/// running supervisor subtree.
+/// running supervisor subtree, or pump reliable restart counts into an actor
+/// mailbox with [`watch_restarts_to`](Self::watch_restarts_to).
 ///
 /// This trait is sealed and cannot be implemented outside `tokio-otp`.
 pub trait SupervisorHandleExt: sealed::Sealed {
@@ -199,6 +202,25 @@ pub trait SupervisorHandleExt: sealed::Sealed {
         actor: RunnableActor,
         options: DynamicActorOptions,
     ) -> impl Future<Output = Result<(), ControlError>> + Send;
+
+    /// Pumps this supervisor's cumulative restart count into `target`.
+    ///
+    /// This is the actor-mailbox form of [`SupervisorHandle::watch_restarts`].
+    /// Each observation is the cumulative number of restarts since this watch
+    /// was created. It is passed to `map` and delivered with the target's
+    /// ordinary mailbox policy. Cumulative values make latest-wins conflation
+    /// safe, and the latest value is sent again after a target restart so a
+    /// fresh incarnation can restore its state. Consumers should therefore
+    /// treat observations as idempotent totals, not additive deltas.
+    ///
+    /// The pump stops when the returned [`RestartWatchRef`] is dropped or
+    /// cancelled, when the watched supervisor reaches a terminal state, or
+    /// when the target actor permanently terminates. It follows the target
+    /// through ordinary actor restarts.
+    fn watch_restarts_to<M, F>(&self, target: &ActorRef<M>, map: F) -> RestartWatchRef
+    where
+        M: Send + 'static,
+        F: FnMut(u64) -> M + Send + 'static;
 }
 
 impl SupervisorHandleExt for SupervisorHandle {
@@ -221,6 +243,117 @@ impl SupervisorHandleExt for SupervisorHandle {
             }
             result
         }
+    }
+
+    fn watch_restarts_to<M, F>(&self, target: &ActorRef<M>, map: F) -> RestartWatchRef
+    where
+        M: Send + 'static,
+        F: FnMut(u64) -> M + Send + 'static,
+    {
+        spawn_restart_watch_to(self.watch_restarts(), target.clone(), map)
+    }
+}
+
+/// Cancellation guard for a restart-count mailbox pump.
+///
+/// Created by [`RuntimeHandle::watch_restarts_to`] or
+/// [`SupervisorHandleExt::watch_restarts_to`]. Dropping the guard cancels the
+/// pump. It also stops automatically when the watched supervisor can no longer
+/// restart a child or when the target actor permanently terminates.
+#[must_use = "dropping the guard immediately cancels the restart watch"]
+pub struct RestartWatchRef {
+    cancellation: CancellationToken,
+}
+
+impl RestartWatchRef {
+    /// Cancels the restart-count pump.
+    ///
+    /// Cancellation is idempotent. A message already accepted by the target
+    /// mailbox cannot be retracted.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Returns whether the restart-count pump has been cancelled or stopped.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+}
+
+impl std::fmt::Debug for RestartWatchRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestartWatchRef")
+            .field("is_cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl Drop for RestartWatchRef {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn spawn_restart_watch_to<M, F>(
+    mut restarts: RestartWatch,
+    target: ActorRef<M>,
+    mut map: F,
+) -> RestartWatchRef
+where
+    M: Send + 'static,
+    F: FnMut(u64) -> M + Send + 'static,
+{
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+
+    tokio::spawn(async move {
+        let _cancel_on_exit = CancelRestartWatchOnDrop(task_cancellation.clone());
+        let Some(mut total) = (tokio::select! {
+            biased;
+            () = task_cancellation.cancelled() => None,
+            () = target.wait_terminated() => None,
+            count = restarts.next() => count,
+        }) else {
+            return;
+        };
+
+        loop {
+            let accepted_by = tokio::select! {
+                biased;
+                () = task_cancellation.cancelled() => break,
+                sent = target.send_to_incarnation(map(total)) => match sent {
+                    Ok(mailbox) => mailbox,
+                    Err(_) => break,
+                },
+                () = restarts.closed() => break,
+                () = target.wait_terminated() => break,
+            };
+
+            tokio::select! {
+                biased;
+                () = task_cancellation.cancelled() => break,
+                restarted = target.wait_incarnation_changed(&accepted_by) => {
+                    if !restarted {
+                        break;
+                    }
+                    // Re-send the cumulative total to the fresh incarnation.
+                }
+                count = restarts.next() => match count {
+                    Some(count) => total = total.saturating_add(count),
+                    None => break,
+                },
+            }
+        }
+    });
+
+    RestartWatchRef { cancellation }
+}
+
+struct CancelRestartWatchOnDrop(CancellationToken);
+
+impl Drop for CancelRestartWatchOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 
@@ -474,6 +607,28 @@ impl RuntimeHandle {
     /// subtree.
     pub fn watch_restarts(&self) -> RestartWatch {
         self.supervisor.watch_restarts()
+    }
+
+    /// Pumps the cumulative restart count into `target`.
+    ///
+    /// This is the actor-mailbox form of [`watch_restarts`](Self::watch_restarts).
+    /// Each observation is the cumulative number of restarts since this watch
+    /// was created. It is passed to `map` and delivered with the target's
+    /// ordinary mailbox policy. Cumulative values make latest-wins conflation
+    /// safe, and the latest value is sent again after a target restart so a
+    /// fresh incarnation can restore its state. Consumers should therefore
+    /// treat observations as idempotent totals, not additive deltas.
+    ///
+    /// The pump stops when the returned [`RestartWatchRef`] is dropped or
+    /// cancelled, when this runtime reaches a terminal state, or when the
+    /// target actor permanently terminates. It follows the target through
+    /// ordinary actor restarts.
+    pub fn watch_restarts_to<M, F>(&self, target: &ActorRef<M>, map: F) -> RestartWatchRef
+    where
+        M: Send + 'static,
+        F: FnMut(u64) -> M + Send + 'static,
+    {
+        spawn_restart_watch_to(self.watch_restarts(), target.clone(), map)
     }
 
     /// Returns a clone of the latest supervisor snapshot.
