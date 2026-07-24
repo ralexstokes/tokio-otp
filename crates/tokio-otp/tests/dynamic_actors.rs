@@ -14,10 +14,10 @@ use tokio::{
     time::timeout,
 };
 use tokio_otp::{
-    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, ChildSpec, ControlError, DownReason,
-    DynamicActorOptions, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef,
-    RawActor, RestartPolicy, Runtime, RuntimeHandle, SendError, ShutdownPolicy, Strategy,
-    SupervisedActors, SupervisorBuilder,
+    Actor, ActorContext, ActorOptions, ActorRef, ActorResult, BoxError, ChildMembershipView,
+    ChildSpec, ControlError, DownReason, DrainPolicy, DynamicActorOptions, GraphBuilder,
+    MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, RestartPolicy, Runtime,
+    RuntimeHandle, SendError, ShutdownPolicy, Strategy, SupervisedActors, SupervisorBuilder,
     prelude::{Continue, Stop},
 };
 
@@ -174,6 +174,22 @@ struct Observe {
     observed: mpsc::UnboundedSender<String>,
 }
 
+#[derive(Clone)]
+struct ObserveOrder {
+    observed: mpsc::UnboundedSender<(u8, u32)>,
+}
+
+impl RawActor for ObserveOrder {
+    type Msg = (u8, u32);
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        while let Some(message) = ctx.recv().await {
+            self.observed.send(message).expect("receiver alive");
+        }
+        Ok(Continue)
+    }
+}
+
 impl RawActor for Observe {
     type Msg = String;
 
@@ -255,11 +271,231 @@ async fn graphless_runtime_adds_removes_and_readds_actors() {
         )
         .await
         .expect("label can be reused");
+    assert!(matches!(
+        sink.send("stale-ref-must-not-cross-membership".to_owned())
+            .await,
+        Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "sink"
+    ));
     replacement
         .send("second".to_owned())
         .await
         .expect("replacement receives");
     assert_eq!(observed_rx.recv().await.as_deref(), Some("second"));
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn fifo_mailbox_preserves_each_senders_enqueue_order() {
+    const MESSAGES_PER_SENDER: u32 = 64;
+
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+    let actor = handle
+        .add_actor(
+            "ordered",
+            move || ObserveOrder {
+                observed: observed_tx.clone(),
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("ordered actor added");
+
+    let mut senders = Vec::new();
+    for sender in 0..2 {
+        let actor = actor.clone();
+        senders.push(tokio::spawn(async move {
+            for sequence in 0..MESSAGES_PER_SENDER {
+                actor
+                    .send((sender, sequence))
+                    .await
+                    .expect("membership remains active");
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+
+    let mut next = [0; 2];
+    for _ in 0..(2 * MESSAGES_PER_SENDER) {
+        let (sender, sequence) = timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("ordered message arrived")
+            .expect("actor remains alive");
+        assert_eq!(sequence, next[sender as usize]);
+        next[sender as usize] += 1;
+    }
+    for sender in senders {
+        sender.await.expect("sender task joined");
+    }
+    assert_eq!(next, [MESSAGES_PER_SENDER; 2]);
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RemovalEvent {
+    Holding,
+    Drained(u32),
+    OnStopStarted,
+    OnStopFinished,
+}
+
+enum RemovalMsg {
+    Hold,
+    Work(u32),
+}
+
+#[derive(Clone)]
+struct RemovalProbe {
+    release_handler: Arc<Notify>,
+    release_on_stop: Arc<Notify>,
+    events: mpsc::UnboundedSender<RemovalEvent>,
+}
+
+impl Actor for RemovalProbe {
+    type Msg = RemovalMsg;
+
+    async fn handle(&mut self, message: Self::Msg, _ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        match message {
+            RemovalMsg::Hold => {
+                self.events
+                    .send(RemovalEvent::Holding)
+                    .expect("receiver alive");
+                self.release_handler.notified().await;
+            }
+            RemovalMsg::Work(value) => {
+                self.events
+                    .send(RemovalEvent::Drained(value))
+                    .expect("receiver alive");
+            }
+        }
+        Ok(Continue)
+    }
+
+    async fn on_stop(&mut self, _ctx: &ActorContext<Self::Msg>) -> Result<(), BoxError> {
+        self.events
+            .send(RemovalEvent::OnStopStarted)
+            .expect("receiver alive");
+        self.release_on_stop.notified().await;
+        self.events
+            .send(RemovalEvent::OnStopFinished)
+            .expect("receiver alive");
+        Ok(())
+    }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        DrainPolicy::Drain
+    }
+}
+
+#[tokio::test]
+async fn remove_child_closes_intake_drains_then_runs_on_stop_before_detach() {
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    let release_handler = Arc::new(Notify::new());
+    let release_on_stop = Arc::new(Notify::new());
+    let handle = Runtime::builder()
+        .build()
+        .expect("graphless runtime builds")
+        .spawn();
+    let actor = handle
+        .add_actor(
+            "removable",
+            {
+                let release_handler = release_handler.clone();
+                let release_on_stop = release_on_stop.clone();
+                move || RemovalProbe {
+                    release_handler: release_handler.clone(),
+                    release_on_stop: release_on_stop.clone(),
+                    events: events_tx.clone(),
+                }
+            },
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("actor added");
+
+    actor.send(RemovalMsg::Hold).await.expect("hold accepted");
+    assert_eq!(events_rx.recv().await, Some(RemovalEvent::Holding));
+
+    let mut snapshots = handle.subscribe_snapshots();
+    let remover = handle.clone();
+    let removal = tokio::spawn(async move { remover.remove_child("removable").await });
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if snapshots
+                .borrow()
+                .child("removable")
+                .is_some_and(|child| child.membership == ChildMembershipView::Removing)
+            {
+                break;
+            }
+            snapshots.changed().await.expect("runtime remains alive");
+        }
+    })
+    .await
+    .expect("membership entered Removing");
+
+    // Removal has been requested, but the current handler has not yielded to
+    // observe cancellation yet. This racing send is deliberately accepted and
+    // becomes part of the prefix that Drain must handle.
+    actor
+        .send(RemovalMsg::Work(7))
+        .await
+        .expect("racing work accepted before intake closes");
+    release_handler.notify_one();
+
+    assert_eq!(events_rx.recv().await, Some(RemovalEvent::Drained(7)));
+    assert_eq!(events_rx.recv().await, Some(RemovalEvent::OnStopStarted));
+    assert!(!removal.is_finished(), "removal waits for on_stop");
+    assert!(snapshots.borrow().child("removable").is_some());
+    assert!(matches!(
+        actor.try_send(RemovalMsg::Work(8)),
+        Err(SendError::MailboxClosed { actor_id , .. }) if actor_id == "removable"
+    ));
+
+    // There is no public Draining state. An awaited send observes the closed
+    // incarnation and waits for its terminal membership disposition.
+    let stale = actor.clone();
+    let mut during_on_stop = tokio::spawn(async move { stale.send(RemovalMsg::Work(9)).await });
+    assert!(
+        timeout(Duration::from_millis(20), &mut during_on_stop)
+            .await
+            .is_err(),
+        "send waits while on_stop is still resolving lifecycle"
+    );
+
+    release_on_stop.notify_one();
+    assert_eq!(events_rx.recv().await, Some(RemovalEvent::OnStopFinished));
+    assert!(matches!(
+        during_on_stop.await.expect("send task joined"),
+        Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "removable"
+    ));
+    removal
+        .await
+        .expect("removal task joined")
+        .expect("removal completed");
+    assert!(handle.snapshot().child("removable").is_none());
+
+    let replacement = handle
+        .add_actor(
+            "removable",
+            Drain::<RemovalMsg>::new,
+            DynamicActorOptions::default(),
+        )
+        .await
+        .expect("id reused with a fresh membership");
+    assert!(matches!(
+        actor.send(RemovalMsg::Work(10)).await,
+        Err(SendError::ActorTerminated { actor_id , .. }) if actor_id == "removable"
+    ));
+    replacement
+        .send(RemovalMsg::Work(11))
+        .await
+        .expect("fresh ref addresses replacement membership");
 
     handle.shutdown_and_wait().await.expect("clean shutdown");
 }

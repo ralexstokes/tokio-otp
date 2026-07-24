@@ -443,6 +443,23 @@ impl RuntimeHandle {
     }
 
     /// Removes a child from the supervisor.
+    ///
+    /// Removal marks the membership as removing and requests cooperative
+    /// shutdown. For an [`Actor`](crate::Actor), the normal receive loop stops
+    /// when it observes that request, then its [`DrainPolicy`](crate::DrainPolicy)
+    /// is applied, `on_stop` runs, the mailbox binding becomes terminal, and
+    /// finally the child is detached. The returned future completes after
+    /// detachment (or after the configured shutdown backstop aborts it).
+    ///
+    /// A send that races before the actor closes intake may still be accepted.
+    /// With `DrainPolicy::Drain` it belongs to the queued prefix that is
+    /// handled before `on_stop`; with `Discard` it can be dropped. Once drain
+    /// closes intake, `try_send` may briefly return
+    /// [`SendError::MailboxClosed`](crate::SendError::MailboxClosed), while an
+    /// awaited `send` waits and then returns
+    /// [`SendError::ActorTerminated`](crate::SendError::ActorTerminated).
+    /// Removal does not return queued messages: end-to-end delivery ownership
+    /// belongs in an application acknowledgement and replay protocol.
     pub async fn remove_child(&self, id: impl Into<String>) -> Result<(), ControlError> {
         let id = id.into();
         let result = self.supervisor.remove_child(id.clone()).await;

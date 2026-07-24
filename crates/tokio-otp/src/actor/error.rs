@@ -44,17 +44,27 @@ pub enum GraphBuildError {
 }
 
 /// Errors returned when sending to an actor mailbox.
+///
+/// The variants form sender-visible lifecycle vocabulary. `MailboxFull` is
+/// transient backpressure from [`ActorRef::try_send`](crate::ActorRef::try_send).
+/// `ActorNotRunning` means the membership expects another incarnation, so an
+/// awaited [`ActorRef::send`](crate::ActorRef::send) waits for that rebind.
+/// `ActorTerminated` means the membership is terminal and will never rebind;
+/// removing and re-adding the same actor id creates a different membership.
+/// `MailboxClosed` is a race observed by non-waiting sends when the current
+/// incarnation has closed intake but its final lifecycle disposition is not
+/// visible yet.
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SendError {
-    /// The target actor is currently unbound because it is not running.
+    /// The target actor is currently unbound and a restart is expected.
     #[error("actor `{actor_id}` is not currently running")]
     #[non_exhaustive]
     ActorNotRunning {
         /// Stable id of the target actor.
         actor_id: String,
     },
-    /// The target actor has terminated and no restart is scheduled.
+    /// The target membership has terminated and no restart is scheduled.
     #[error("actor `{actor_id}` has terminated")]
     #[non_exhaustive]
     ActorTerminated {
@@ -68,7 +78,8 @@ pub enum SendError {
         /// Stable id of the target actor.
         actor_id: String,
     },
-    /// The target actor's mailbox is closed.
+    /// The current incarnation's mailbox is closed while its membership
+    /// disposition is still being resolved.
     #[error("mailbox for actor `{actor_id}` is closed")]
     #[non_exhaustive]
     MailboxClosed {

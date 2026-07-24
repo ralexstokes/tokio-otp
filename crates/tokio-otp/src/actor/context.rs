@@ -26,7 +26,10 @@ use crate::actor::{
 /// An `ActorRef<M>` is bound to a long-lived mailbox binding rather than a
 /// single actor runtime instance. When the target actor is restarted (either
 /// as part of a graph rerun or via per-actor supervision), the handle
-/// transparently follows the new mailbox.
+/// transparently follows the new mailbox. That binding belongs to one
+/// supervisor membership: removing a dynamic actor terminates its refs, and
+/// adding another actor under the same id mints a fresh binding. A stale ref
+/// therefore never delivers to the replacement membership.
 pub struct ActorRef<M> {
     actor_id: Arc<str>,
     binding: watch::Receiver<BindingState<M>>,
@@ -137,6 +140,11 @@ impl<M> ActorRef<M> {
     /// Cancelling this future while it is waiting drops the message.
     ///
     /// # Delivery contract
+    ///
+    /// For a FIFO mailbox, messages sent sequentially by one sender are
+    /// enqueued in that order. Messages from concurrent senders may interleave.
+    /// Conflating mailboxes intentionally replace unread state and do not make
+    /// this FIFO guarantee.
     ///
     /// Delivery is **at-most-once**. `Ok` means the message was accepted by
     /// the current incarnation's mailbox, not that it will be processed:

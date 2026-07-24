@@ -12,6 +12,7 @@
 - [Actor timers](actor-timers.md)
 - [Watching actors](actor-monitors.md)
 - [Dynamic actors](dynamic-actors.md)
+  - [Ownership during membership transitions](ownership-transitions.md)
 - [Observability](observability.md)
 
 # Appendix
