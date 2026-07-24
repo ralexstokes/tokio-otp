@@ -1,21 +1,89 @@
 //! A deterministic, in-process control plane for a personal multi-agent assistant.
 //!
 //! The example is an assertion-driven acceptance script for dynamic actor
-//! lifecycles and the runtime surfaces not covered by `trading_engine`.
+//! lifecycles and the runtime surfaces not covered by `trading_engine`:
+//! dynamic add/remove on a subtree mount point, never-restarted transient
+//! children observed through `ctx.watch`, `continue_with` rehydration,
+//! `run_blocking` effects, a readiness-gated `RawActor` bridge, and a
+//! `#[derive(Topology)]` core graph with a real budget ↔ guard cycle.
+//!
+//! # Modules
+//!
+//! | module      | role                                                       |
+//! |-------------|------------------------------------------------------------|
+//! | `chat`      | `ChatSim`: in-process chat transport; redelivers until ack |
+//! | `model`     | `ModelClient` seam + deterministic `ScriptedModel`         |
+//! | `gateway`   | `outbound` (FIFO, drains), `progress` (conflated by chat), |
+//! |             | `inbound` (raw readiness-gated bridge; panics on drop)     |
+//! | `journal`   | append-only transcript/effect log; envelope dedup; replay  |
+//! | `budget`    | token-spend metering; reports `BudgetExceeded` to guard    |
+//! | `guard`     | recoverable breaker: closes the shared intake gate, probes |
+//! | `tool_host` | idempotent-by-key effect execution under `run_blocking`    |
+//! | `router`    | single writer of session membership; buffers during evict  |
+//! | `session`   | per-chat orchestrator (dynamic child); owns run children   |
+//! | `run`       | one role run: mailbox-driven state machine, never restarted|
+//! | `messages`  | shared ids, protocol enums, reports, timing constants      |
+//! | `telemetry` | application-owned latency aggregates for the final dump    |
+//!
+//! # Supervision topology
+//!
+//! ```text
+//! root (OneForOne)
+//! ├── gateway   RestForOne, sequential start: outbound → progress → inbound
+//! │             (inbound is last: its panic restarts only inbound; an
+//! │              outbound/progress failure also restarts the bridge)
+//! ├── core      OneForOne, wired with #[derive(Topology)]
+//! │             journal · budget · guard · tool_host · router
+//! │             (budget ─BudgetExceeded→ guard, guard ─UnderCap?→ budget
+//! │              is the cycle that justifies the derive)
+//! └── sessions  empty subtree mount; all children managed at runtime
+//!     ├── session:<chat>             add_actor, default restart policy
+//!     └── run:<chat>:<task>:<role>   add_actor_with_options, restart = Never
+//! ```
 //!
 //! # Data flow
 //!
 //! ```text
-//! ChatSim -> inbound --append/ack--> journal --replay--> session
-//!                       |                         |
-//!                       +------> router ----------+-- add/remove run children
-//!                                                   planner -> engineer -> reviewer
-//!                                                               |
-//!                                                          tool-host
+//! ChatSim ──delivery──▶ inbound ──append──▶ journal ──replay──▶ session
+//!    ▲                     │ ack only after append       (continue_with)
+//!    │                     ▼
+//!    │                   router ──forward/spawn──▶ session:<chat>
+//!    │                                                │ add/watch/remove
+//!    │                                                ▼
+//!    │                                    run:<chat>:<task>:<role>
+//!    │                                     │ model turn on spawned task
+//!    │                                     │ tool calls: ToolIntent journaled,
+//!    │                                     ▼ then Execute under deadline
+//!    │                                  tool_host ──(timeout? Query key)──▶ run
+//!    │
+//!    ├◀─conflated deltas/typing── progress ◀── runs + session heartbeat
+//!    └◀─replies and notices────── outbound ◀── session (drains on shutdown)
 //!
-//! model progress -> conflating progress -> ChatSim
-//! final replies  -> draining outbound    -> ChatSim
-//! run failures + budget cap -> guard -> shared gate + session pause/resume
+//! guard inputs: session run failures, budget cap, bridge restart totals
+//! guard output: shared intake gate (Arc<AtomicBool>) + PauseChanged fan-out
+//!               via router; send_after probes with backoff lift the pause
+//! ```
+//!
+//! # Lifecycles
+//!
+//! ```text
+//! session:<chat>   (dynamic child, spawned on first message for the chat)
+//!   add_actor ─▶ on_start: mark ready ─▶ continue_with(Rehydrate): replay
+//!     ─▶ UserMessage: start planner run, suppress idle timer, heartbeat
+//!     ─▶ RunFinished: planner → engineer → reviewer → Reply, re-arm idle
+//!     ─▶ IdleSweep (current generation, no run): Checkpoint + Evicted,
+//!         then Evict{generation} to the router and retire — late arrivals
+//!         are bounced back and land in the router's Evicting buffer
+//!     ─▶ removed; next message respawns the same id, replay restores context
+//!
+//! run:<chat>:<task>:<role>   (transient child, restart = Never)
+//!   add_actor_with_options ─▶ continue_with(Step)
+//!     ─▶ model turn on a spawned task (cancel token + deadline) ─▶ ModelResult
+//!     ─▶ tool loop: journal ToolIntent ─▶ Execute (bounded) ─▶ ToolResult,
+//!         reconciling an unknown outcome through an idempotency-key Query
+//!     ─▶ RunFinished{output} to the session, which removes the child
+//!     ─▶ on panic: Down(Failure) then Terminated to the session's watch;
+//!         the session reports the failure and spawns a fresh attempt
 //! ```
 //!
 //! `main` runs phases 0–8. No socket is opened and no wall-clock sleep is used
