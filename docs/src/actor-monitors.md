@@ -93,7 +93,19 @@ keeps the common pattern of registering in `on_start` safe when the observer
 restarts: the replacement incarnation gets the existing watch rather than a
 duplicate immediate `Up`. The mapping closure from the first registration is
 membership-owned and remains in use until cancellation, so it should capture
-durable configuration rather than incarnation-local state.
+durable configuration rather than incarnation-local state. This also applies
+to repeated calls within one incarnation: every returned `MonitorRef` aliases
+the same watch, the later mapping closures are unused, and cancelling any alias
+cancels the pair.
+
+A replacement observer does not receive a fresh snapshot when it re-registers.
+Events that a previous incarnation accepted and then lost in a crash are not
+replayed, so an observer that needs its last known target state after restart
+must persist that state durably. To trade staged transition history for a fresh
+snapshot, cancel the existing `MonitorRef` and call `watch` again. A running
+target then emits an immediate `Up`, a terminated target emits an immediate
+`Terminated`, and a target between incarnations remains silent until its next
+`Up`.
 
 Watch notifications use the observer's ordinary mailbox. FIFO mailboxes wait
 for capacity and preserve every accepted notification. A conflating mailbox

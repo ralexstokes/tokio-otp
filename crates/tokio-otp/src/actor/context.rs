@@ -493,10 +493,18 @@ impl<M: Send + 'static> ActorContext<M> {
     /// A watch belongs to the observing and watched actor memberships, not
     /// either current incarnation. It survives restarts on both sides and is
     /// delivered to whichever observer incarnation is running next. Calling
-    /// `watch` again for the same pair returns the existing watch without
-    /// replacing its original `map` closure or emitting another immediate
-    /// `Up`. Explicit cancellation or permanent removal of either membership
-    /// ends it.
+    /// `watch` again for the same pair, even within one incarnation, returns
+    /// an alias of the existing watch without replacing its original `map`
+    /// closure or emitting another immediate `Up`. Cancelling any alias
+    /// cancels the pair. Explicit cancellation or permanent removal of either
+    /// membership ends it.
+    ///
+    /// A replacement observer does not receive a fresh snapshot of the
+    /// target. It must durably persist any observed state that it needs after
+    /// a crash. To request a fresh snapshot instead, cancel the existing watch
+    /// and register a new one: a running or terminated target responds
+    /// immediately, at the cost of discarding any transitions still staged on
+    /// the old watch.
     ///
     /// Delivery uses the observer's ordinary mailbox policy. A conflating
     /// mailbox may replace an unread event with a later one, so use a FIFO

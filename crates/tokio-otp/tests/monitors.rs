@@ -130,6 +130,16 @@ async fn assert_silence(receiver: &mut mpsc::UnboundedReceiver<MonitorEvent>) {
     );
 }
 
+async fn watch_cancelled(watch: &MonitorRef) {
+    timeout(Duration::from_secs(1), async {
+        while !watch.is_cancelled() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("watch cancelled promptly");
+}
+
 fn up(actor_id: &str, generation: u64) -> MonitorEvent {
     MonitorEvent::Up {
         actor_id: actor_id.to_owned(),
@@ -455,6 +465,125 @@ async fn replacement_incarnation_keeps_the_membership_owned_mapper() {
     second_task.abort();
 }
 
+enum AliasedObserverMessage {
+    Event {
+        registration: usize,
+        event: MonitorEvent,
+    },
+    Rewatch,
+}
+
+#[derive(Clone)]
+struct AliasedObserver {
+    peer: ActorRef<PeerMessage>,
+    watches: mpsc::UnboundedSender<MonitorRef>,
+    started: mpsc::UnboundedSender<()>,
+    observed: mpsc::UnboundedSender<(usize, MonitorEvent)>,
+}
+
+impl RawActor for AliasedObserver {
+    type Msg = AliasedObserverMessage;
+
+    async fn run(&mut self, mut ctx: ActorContext<Self::Msg>) -> ActorResult {
+        for registration in 0..2 {
+            let watch = ctx.watch(&self.peer, move |event| AliasedObserverMessage::Event {
+                registration,
+                event,
+            });
+            self.watches.send(watch).expect("watch receiver alive");
+        }
+        self.started.send(()).expect("start receiver alive");
+
+        while let Some(message) = ctx.recv().await {
+            match message {
+                AliasedObserverMessage::Event {
+                    registration,
+                    event,
+                } => self
+                    .observed
+                    .send((registration, event))
+                    .expect("event receiver alive"),
+                AliasedObserverMessage::Rewatch => {
+                    let watch = ctx.watch(&self.peer, |event| AliasedObserverMessage::Event {
+                        registration: 2,
+                        event,
+                    });
+                    self.watches.send(watch).expect("watch receiver alive");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn repeated_watch_calls_alias_until_cancelled() {
+    let factory = RunnableActorFactory::new();
+    let (peer_started_tx, mut peer_started) = mpsc::unbounded_channel();
+    let (peer, peer_ref) = factory.actor("peer", move || Peer {
+        started: peer_started_tx.clone(),
+    });
+    let (watch_tx, mut watch_rx) = mpsc::unbounded_channel();
+    let (observer_started_tx, mut observer_started) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed) = mpsc::unbounded_channel();
+    let (observer, observer_ref) = factory.actor("observer", {
+        let peer_ref = peer_ref.clone();
+        move || AliasedObserver {
+            peer: peer_ref.clone(),
+            watches: watch_tx.clone(),
+            started: observer_started_tx.clone(),
+            observed: observed_tx.clone(),
+        }
+    });
+    let peer_task =
+        tokio::spawn(async move { peer.run_until(pending::<()>(), RebindPolicy::Never).await });
+    started(&mut peer_started).await;
+    let observer_task = tokio::spawn(async move {
+        observer
+            .run_until(pending::<()>(), RebindPolicy::Never)
+            .await
+    });
+    started(&mut observer_started).await;
+    let first = watch_rx.recv().await.expect("first watch created");
+    let second = watch_rx.recv().await.expect("second watch created");
+
+    let (registration, event) = observed.recv().await.expect("initial up delivered");
+    assert_eq!(registration, 0, "the first mapper owns the watch");
+    assert_eq!(event, up("peer", 0));
+
+    second.cancel();
+    watch_cancelled(&first).await;
+    assert!(second.is_cancelled(), "both handles alias one watch");
+
+    observer_ref
+        .send(AliasedObserverMessage::Rewatch)
+        .await
+        .expect("rewatch command sent");
+    let fresh = watch_rx.recv().await.expect("replacement watch created");
+    assert!(!fresh.is_cancelled());
+    let (registration, event) = observed.recv().await.expect("fresh up delivered");
+    assert_eq!(registration, 2, "the fresh mapper owns the new watch");
+    assert_eq!(event, up("peer", 0));
+
+    peer_ref
+        .send(PeerMessage::Stop)
+        .await
+        .expect("peer stop sent");
+    let (registration, event) = observed.recv().await.expect("down delivered");
+    assert_eq!(registration, 2);
+    assert_eq!(expect_down(event).reason, DownReason::Normal);
+    let (registration, event) = observed.recv().await.expect("terminal delivered");
+    assert_eq!(registration, 2);
+    assert_eq!(expect_terminated(event, "peer"), Some(0));
+    watch_cancelled(&fresh).await;
+
+    peer_task
+        .await
+        .expect("peer task joined")
+        .expect("peer stopped cleanly");
+    observer_task.abort();
+}
+
 enum ManagedObserverMessage {
     Event(MonitorEvent),
     Stop,
@@ -568,10 +697,7 @@ async fn subject_membership_removal_delivers_terminal_then_ends_watch() {
         expect_terminated(next_event(&mut observed).await, "peer"),
         Some(0)
     );
-    assert!(
-        watch.is_cancelled(),
-        "the subject's terminal event is delivered before the pair ends"
-    );
+    watch_cancelled(&watch).await;
 
     peer_task
         .await
