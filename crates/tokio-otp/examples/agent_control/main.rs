@@ -51,7 +51,7 @@
 //!    │                                                │ add/watch/remove
 //!    │                                                ▼
 //!    │                                    run:<chat>:<task>:<role>
-//!    │                                     │ model turn on spawned task
+//!    │                                     │ model turn in bounded step
 //!    │                                     │ tool calls: ToolIntent journaled,
 //!    │                                     ▼ then Execute under deadline
 //!    │                                  tool_host ──(timeout? Query key)──▶ run
@@ -78,7 +78,7 @@
 //!
 //! run:<chat>:<task>:<role>   (transient child, restart = Never)
 //!   add_actor_with_options ─▶ continue_with(Step)
-//!     ─▶ model turn on a spawned task (cancel token + deadline) ─▶ ModelResult
+//!     ─▶ model turn in a context-owned step (cancel token + deadline) ─▶ ModelResult
 //!     ─▶ tool loop: journal ToolIntent ─▶ Execute (bounded) ─▶ ToolResult,
 //!         reconciling an unknown outcome through an idempotency-key Query
 //!     ─▶ RunFinished{output} to the session, which removes the child

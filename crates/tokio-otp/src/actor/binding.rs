@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -55,6 +55,11 @@ pub struct ActorStats {
     pub message_bytes_accepted: Option<u64>,
     /// `send` or `try_send` calls that returned an error.
     pub sends_rejected: u64,
+    /// Steps currently owned by this actor incarnation.
+    ///
+    /// This is a gauge rather than a lifetime counter. It returns to zero
+    /// when steps finish, time out, or are aborted.
+    pub outstanding_steps: u64,
     /// Messages currently occupying the bound mailbox.
     pub mailbox_depth: usize,
     /// Maximum capacity of the currently bound mailbox.
@@ -67,6 +72,7 @@ pub(crate) struct ActorStatsCounters {
     messages_accepted: AtomicU64,
     messages_conflated: AtomicU64,
     sends_rejected: AtomicU64,
+    outstanding_steps: AtomicU64,
     message_bytes_accepted: Option<AtomicU64>,
 }
 
@@ -77,6 +83,7 @@ impl ActorStatsCounters {
             messages_accepted: AtomicU64::new(0),
             messages_conflated: AtomicU64::new(0),
             sends_rejected: AtomicU64::new(0),
+            outstanding_steps: AtomicU64::new(0),
             message_bytes_accepted: observe_message_size.then(|| AtomicU64::new(0)),
         }
     }
@@ -106,6 +113,14 @@ impl ActorStatsCounters {
         }
     }
 
+    pub(crate) fn step_started(&self) {
+        self.outstanding_steps.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn step_finished(&self) {
+        self.outstanding_steps.fetch_sub(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(
         &self,
         actor_id: &str,
@@ -123,6 +138,7 @@ impl ActorStatsCounters {
                 .as_ref()
                 .map(|total| total.load(Ordering::Relaxed)),
             sends_rejected: self.sends_rejected.load(Ordering::Relaxed),
+            outstanding_steps: self.outstanding_steps.load(Ordering::Relaxed),
             mailbox_depth,
             mailbox_capacity,
         }
@@ -212,29 +228,34 @@ impl<M> fmt::Debug for MailboxMode<M> {
 }
 
 pub(crate) enum MailboxReceiver<M> {
-    Queue(mpsc::Receiver<M>),
+    Queue {
+        receiver: mpsc::Receiver<M>,
+        accepting_external: Arc<AtomicBool>,
+    },
     Conflating(ConflatingReceiver<M>),
 }
 
 impl<M> MailboxReceiver<M> {
     pub(crate) async fn recv(&mut self) -> Option<M> {
         match self {
-            Self::Queue(receiver) => receiver.recv().await,
+            Self::Queue { receiver, .. } => receiver.recv().await,
             Self::Conflating(receiver) => receiver.recv().await,
         }
     }
 
     pub(crate) fn try_recv(&mut self) -> Result<M, mpsc::error::TryRecvError> {
         match self {
-            Self::Queue(receiver) => receiver.try_recv(),
+            Self::Queue { receiver, .. } => receiver.try_recv(),
             Self::Conflating(receiver) => receiver.try_recv(),
         }
     }
 
-    pub(crate) fn close(&mut self) {
+    pub(crate) fn close_external(&mut self) {
         match self {
-            Self::Queue(receiver) => receiver.close(),
-            Self::Conflating(receiver) => receiver.close(),
+            Self::Queue {
+                accepting_external, ..
+            } => accepting_external.store(false, Ordering::Release),
+            Self::Conflating(receiver) => receiver.close_external(),
         }
     }
 }
@@ -246,9 +267,16 @@ pub(crate) fn mailbox<M>(
     match mode {
         MailboxMode::Queue => {
             let (sender, receiver) = mpsc::channel(capacity);
+            let accepting_external = Arc::new(AtomicBool::new(true));
             (
-                MailboxSender::Queue(sender),
-                MailboxReceiver::Queue(receiver),
+                MailboxSender::Queue {
+                    sender,
+                    accepting_external: Arc::clone(&accepting_external),
+                },
+                MailboxReceiver::Queue {
+                    receiver,
+                    accepting_external,
+                },
             )
         }
         MailboxMode::Conflate => {
@@ -297,30 +325,62 @@ impl<M> MailboxRef<M> {
     /// rebind.
     pub(crate) async fn send_retaining(&self, message: M) -> SendOutcome<M> {
         match &self.sender {
-            MailboxSender::Queue(sender) => match sender.send(message).await {
+            MailboxSender::Queue {
+                sender,
+                accepting_external,
+            } => {
+                if !accepting_external.load(Ordering::Acquire) {
+                    return SendOutcome::Closed(message);
+                }
+                match sender.reserve().await {
+                    Ok(permit) if accepting_external.load(Ordering::Acquire) => {
+                        permit.send(message);
+                        SendOutcome::Accepted { conflated: 0 }
+                    }
+                    Ok(_) | Err(_) => SendOutcome::Closed(message),
+                }
+            }
+            MailboxSender::Conflating(sender) => sender.send(message, false),
+        }
+    }
+
+    pub(crate) async fn send_internal_retaining(&self, message: M) -> SendOutcome<M> {
+        match &self.sender {
+            MailboxSender::Queue { sender, .. } => match sender.send(message).await {
                 Ok(()) => SendOutcome::Accepted { conflated: 0 },
                 Err(error) => SendOutcome::Closed(error.0),
             },
-            MailboxSender::Conflating(sender) => sender.send(message),
+            MailboxSender::Conflating(sender) => sender.send(message, true),
         }
     }
 
     pub(crate) fn try_send(&self, message: M) -> Result<u64, SendError> {
         match &self.sender {
-            MailboxSender::Queue(sender) => {
-                sender
-                    .try_send(message)
-                    .map(|()| 0)
-                    .map_err(|err| match err {
-                        mpsc::error::TrySendError::Full(_) => SendError::MailboxFull {
+            MailboxSender::Queue {
+                sender,
+                accepting_external,
+            } => {
+                if !accepting_external.load(Ordering::Acquire) {
+                    return Err(SendError::MailboxClosed {
+                        actor_id: self.actor_id.to_string(),
+                    });
+                }
+                match sender.try_reserve() {
+                    Ok(permit) if accepting_external.load(Ordering::Acquire) => {
+                        permit.send(message);
+                        Ok(0)
+                    }
+                    Ok(_) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                        Err(SendError::MailboxClosed {
                             actor_id: self.actor_id.to_string(),
-                        },
-                        mpsc::error::TrySendError::Closed(_) => SendError::MailboxClosed {
-                            actor_id: self.actor_id.to_string(),
-                        },
-                    })
+                        })
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => Err(SendError::MailboxFull {
+                        actor_id: self.actor_id.to_string(),
+                    }),
+                }
             }
-            MailboxSender::Conflating(sender) => match sender.send(message) {
+            MailboxSender::Conflating(sender) => match sender.send(message, false) {
                 SendOutcome::Accepted { conflated } => Ok(conflated),
                 SendOutcome::Closed(_) => Err(SendError::MailboxClosed {
                     actor_id: self.actor_id.to_string(),
@@ -339,14 +399,23 @@ impl<M> MailboxRef<M> {
 }
 
 pub(crate) enum MailboxSender<M> {
-    Queue(mpsc::Sender<M>),
+    Queue {
+        sender: mpsc::Sender<M>,
+        accepting_external: Arc<AtomicBool>,
+    },
     Conflating(ConflatingSender<M>),
 }
 
 impl<M> Clone for MailboxSender<M> {
     fn clone(&self) -> Self {
         match self {
-            Self::Queue(sender) => Self::Queue(sender.clone()),
+            Self::Queue {
+                sender,
+                accepting_external,
+            } => Self::Queue {
+                sender: sender.clone(),
+                accepting_external: Arc::clone(accepting_external),
+            },
             Self::Conflating(sender) => Self::Conflating(sender.clone()),
         }
     }
@@ -355,7 +424,9 @@ impl<M> Clone for MailboxSender<M> {
 impl<M> MailboxSender<M> {
     fn same_channel(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Queue(left), Self::Queue(right)) => left.same_channel(right),
+            (Self::Queue { sender: left, .. }, Self::Queue { sender: right, .. }) => {
+                left.same_channel(right)
+            }
             (Self::Conflating(left), Self::Conflating(right)) => left.same_channel(right),
             _ => false,
         }
@@ -363,7 +434,7 @@ impl<M> MailboxSender<M> {
 
     fn usage(&self) -> (usize, usize) {
         match self {
-            Self::Queue(sender) => {
+            Self::Queue { sender, .. } => {
                 let capacity = sender.max_capacity();
                 (capacity.saturating_sub(sender.capacity()), capacity)
             }
@@ -380,6 +451,7 @@ struct ConflatingState<M> {
     key_matches: Option<KeyMatcher<M>>,
     sender_count: usize,
     receiver_closed: bool,
+    accepting_external: bool,
 }
 
 struct ConflatingShared<M> {
@@ -400,9 +472,9 @@ pub(crate) struct ConflatingSender<M> {
 }
 
 impl<M> ConflatingSender<M> {
-    fn send(&self, message: M) -> SendOutcome<M> {
+    fn send(&self, message: M, internal: bool) -> SendOutcome<M> {
         let mut state = self.shared.lock();
-        if state.receiver_closed {
+        if state.receiver_closed || (!internal && !state.accepting_external) {
             return SendOutcome::Closed(message);
         }
 
@@ -499,17 +571,17 @@ impl<M> ConflatingReceiver<M> {
         }
     }
 
-    fn close(&mut self) {
-        let mut state = self.shared.lock();
-        state.receiver_closed = true;
-        drop(state);
-        self.shared.notify.notify_waiters();
+    fn close_external(&mut self) {
+        self.shared.lock().accepting_external = false;
     }
 }
 
 impl<M> Drop for ConflatingReceiver<M> {
     fn drop(&mut self) {
-        self.close();
+        let mut state = self.shared.lock();
+        state.receiver_closed = true;
+        drop(state);
+        self.shared.notify.notify_waiters();
     }
 }
 
@@ -524,6 +596,7 @@ fn conflating_channel<M>(
             key_matches,
             sender_count: 1,
             receiver_closed: false,
+            accepting_external: true,
         }),
         notify: Notify::new(),
     });

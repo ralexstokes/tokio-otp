@@ -1,12 +1,16 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt,
-    sync::{Arc, Mutex},
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{Notify, oneshot, watch},
     time::{Instant, MissedTickBehavior, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -16,7 +20,7 @@ use crate::actor::{
         ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxReceiver, MailboxRef,
         MessageSizeObserver, SendOutcome,
     },
-    error::{CallError, SendError, TryRecvError},
+    error::{CallError, SendError, StepDeadline, TryRecvError},
     monitor::{ActorMonitors, MonitorEvent, MonitorHub, MonitorRef},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
@@ -260,10 +264,9 @@ impl<M> ActorRef<M> {
     /// request for up to the composed deadline. This is the actor-model
     /// equivalent of blocking inside an Erlang `gen_server` callback, and in
     /// fan-out or routing actors it turns one slow callee into head-of-line
-    /// blocking for all traffic through the intermediary. Pipeline instead:
-    /// spawn the bounded call onto a task that completes the original
-    /// [`Reply`] and reports any state change back to the actor as an
-    /// ordinary message via [`ActorContext::myself`], or move the slow
+    /// blocking for all traffic through the intermediary. Pipeline the
+    /// bounded call back into an ordinary message with
+    /// [`ActorContext::step`], or move the slow
     /// dependency behind a dedicated child actor. The book's request/reply
     /// chapter covers the pattern.
     pub async fn call<T>(
@@ -369,6 +372,20 @@ impl<M> ActorRef<M> {
     pub(crate) fn record_received(&self) {
         self.stats.record_received();
     }
+
+    async fn send_to_incarnation(&self, mailbox: MailboxRef<M>, message: M) {
+        let message_size = self
+            .message_size
+            .as_ref()
+            .map(|observer| observer.size_hint(&message));
+        if let SendOutcome::Accepted { conflated } = mailbox.send_internal_retaining(message).await
+        {
+            self.observe_send(MessageOperation::Send, None);
+            self.stats.record_send(true);
+            self.stats.record_conflated(conflated);
+            self.record_message_size(message_size);
+        }
+    }
 }
 
 /// One-shot reply channel carried inside a request message.
@@ -388,6 +405,30 @@ pub struct Reply<T> {
 #[derive(Clone, Debug)]
 pub struct TimerRef {
     cancellation: CancellationToken,
+}
+
+/// Handle for one bounded future started by [`ActorContext::step`].
+///
+/// Dropping the handle does not affect the step. [`abort`](Self::abort)
+/// abandons the future and prevents its continuation message from being
+/// posted. Aborting a request only abandons the local wait: it cannot retract
+/// work that another actor or external service already accepted.
+#[derive(Clone, Debug)]
+pub struct StepHandle {
+    cancellation: CancellationToken,
+    finished: Arc<AtomicBool>,
+}
+
+impl StepHandle {
+    /// Aborts the step and suppresses its continuation message.
+    pub fn abort(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Returns whether the step has finished or its abort has been observed.
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
 }
 
 impl TimerRef {
@@ -427,12 +468,14 @@ impl<T> fmt::Debug for Reply<T> {
 ///
 /// Provides the actor's incoming [`mailbox`](Self::recv), message
 /// [`timers`](Self::send_after), a
+/// bounded [`step`](Self::step) primitive for asynchronous postbacks, a
 /// [`shutdown_token`](Self::shutdown_token) for cooperative shutdown, and
 /// [`run_blocking`](Self::run_blocking) for blocking work.
 pub struct ActorContext<M> {
     pub(crate) id: Arc<str>,
     pub(crate) mailbox: MailboxReceiver<M>,
     pub(crate) myself: ActorRef<M>,
+    pub(crate) incarnation: MailboxRef<M>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
     pub(crate) timers: ActorTimers,
@@ -440,6 +483,7 @@ pub struct ActorContext<M> {
     pub(crate) monitors: ActorMonitors,
     pub(crate) ready: Mutex<Option<oneshot::Sender<()>>>,
     pub(crate) continuations: Mutex<VecDeque<M>>,
+    pub(crate) steps: ActorSteps,
 }
 
 impl<M: Send + 'static> ActorContext<M> {
@@ -480,6 +524,83 @@ impl<M: Send + 'static> ActorContext<M> {
             .lock()
             .expect("actor continuation queue poisoned")
             .push_back(message);
+    }
+
+    /// Runs a bounded future without blocking this actor's receive loop and
+    /// posts its outcome back as an ordinary message.
+    ///
+    /// The continuation is total: it receives either the future's value or
+    /// [`StepDeadline`] and must produce a message in both cases. Delivery
+    /// uses this actor's normal mailbox policy and FIFO backpressure. It is
+    /// stamped to this exact incarnation, so a completion racing a restart is
+    /// silently dropped rather than delivered to fresh state.
+    ///
+    /// Steps are incarnation-owned. They are aborted when the incarnation
+    /// fails, restarts, or uses [`DrainPolicy::Discard`](crate::DrainPolicy).
+    /// A draining handler actor keeps processing queued messages and step
+    /// completions until both are exhausted; the required deadline bounds
+    /// every step's future during that drain.
+    ///
+    /// Aborting or timing out a step is not undo. If the future sent a request
+    /// before being dropped, the receiver may still perform it and the outcome
+    /// is unknown. Put effects behind actors and use idempotency keys plus
+    /// reconciliation; step futures should initiate requests, not mutate
+    /// untracked local state directly. Domain cancellation can still be
+    /// captured explicitly in `future`.
+    ///
+    /// `step` lives on the shared context type, but its drain integration is
+    /// provided by the framework-owned [`Actor`](crate::Actor) loop. A custom
+    /// [`RawActor`](crate::RawActor) remains responsible for its own shutdown
+    /// and draining protocol.
+    pub fn step<F, T, C>(&self, deadline: Duration, future: F, continuation: C) -> StepHandle
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+        C: FnOnce(Result<T, StepDeadline>) -> M + Send + 'static,
+    {
+        let (id, cancellation, finished) = self.steps.start();
+        let handle = StepHandle {
+            cancellation: cancellation.clone(),
+            finished: Arc::clone(&finished),
+        };
+        let steps = self.steps.inner();
+        let myself = self.myself.clone();
+        let incarnation = self.incarnation.clone();
+        tokio::spawn(async move {
+            let _guard = StepGuard {
+                id,
+                steps,
+                finished,
+            };
+            let outcome = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return,
+                outcome = timeout(deadline, future) => outcome.map_err(|_| StepDeadline),
+            };
+            let message = continuation(outcome);
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {}
+                () = myself.send_to_incarnation(incarnation, message) => {}
+            }
+        });
+        handle
+    }
+
+    pub(crate) fn close_external_intake(&mut self) {
+        self.mailbox.close_external();
+    }
+
+    pub(crate) fn abort_steps(&self) {
+        self.steps.abort_all();
+    }
+
+    pub(crate) fn outstanding_steps(&self) -> usize {
+        self.steps.outstanding()
+    }
+
+    pub(crate) fn step_change_notify(&self) -> Arc<Notify> {
+        self.steps.change_notify()
     }
 
     /// Returns the actor's unique identifier within the graph.
@@ -811,6 +932,95 @@ impl<M: Send + 'static> ActorContext<M> {
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             Err(error) => panic!("blocking task was cancelled: {error}"),
         }
+    }
+}
+
+pub(crate) struct ActorSteps {
+    inner: Arc<ActorStepsInner>,
+    cancellation: CancellationToken,
+}
+
+struct ActorStepsInner {
+    next_id: AtomicU64,
+    active: Mutex<HashMap<u64, CancellationToken>>,
+    changed: Arc<Notify>,
+    stats: Arc<ActorStatsCounters>,
+}
+
+impl ActorSteps {
+    pub(crate) fn new(stats: Arc<ActorStatsCounters>) -> Self {
+        Self {
+            inner: Arc::new(ActorStepsInner {
+                next_id: AtomicU64::new(0),
+                active: Mutex::new(HashMap::new()),
+                changed: Arc::new(Notify::new()),
+                stats,
+            }),
+            // Unlike timers, this token is independent from graph shutdown:
+            // Drain actors keep their steps until their own deadlines.
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    fn start(&self) -> (u64, CancellationToken, Arc<AtomicBool>) {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let cancellation = self.cancellation.child_token();
+        self.inner
+            .active
+            .lock()
+            .expect("actor step registry poisoned")
+            .insert(id, cancellation.clone());
+        self.inner.stats.step_started();
+        (id, cancellation, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn inner(&self) -> Arc<ActorStepsInner> {
+        Arc::clone(&self.inner)
+    }
+
+    fn abort_all(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn outstanding(&self) -> usize {
+        self.inner
+            .active
+            .lock()
+            .expect("actor step registry poisoned")
+            .len()
+    }
+
+    fn change_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.inner.changed)
+    }
+}
+
+impl Drop for ActorSteps {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+struct StepGuard {
+    id: u64,
+    steps: Arc<ActorStepsInner>,
+    finished: Arc<AtomicBool>,
+}
+
+impl Drop for StepGuard {
+    fn drop(&mut self) {
+        if self
+            .steps
+            .active
+            .lock()
+            .expect("actor step registry poisoned")
+            .remove(&self.id)
+            .is_some()
+        {
+            self.steps.stats.step_finished();
+        }
+        self.finished.store(true, Ordering::Release);
+        self.steps.changed.notify_one();
     }
 }
 

@@ -1,0 +1,394 @@
+use std::{
+    future::pending,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use tokio::sync::{Notify, mpsc};
+use tokio_otp::prelude::*;
+
+#[derive(Debug)]
+enum OutcomeMsg {
+    Success(Result<u32, StepDeadline>),
+    Timeout(Result<(), StepDeadline>),
+}
+
+#[derive(Clone)]
+struct Outcomes {
+    observed: mpsc::UnboundedSender<OutcomeMsg>,
+}
+
+impl Actor for Outcomes {
+    type Msg = OutcomeMsg;
+
+    async fn on_start(&mut self, ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        ctx.step(Duration::from_secs(1), async { 42 }, OutcomeMsg::Success);
+        ctx.step(
+            Duration::from_millis(10),
+            pending::<()>(),
+            OutcomeMsg::Timeout,
+        );
+        Ok(())
+    }
+
+    async fn handle(&mut self, message: Self::Msg, _ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        self.observed.send(message).unwrap();
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn step_posts_success_and_total_timeout_outcomes() {
+    let (observed, mut outcomes) = mpsc::unbounded_channel();
+    let mut graph = GraphBuilder::new();
+    graph.add(move || Outcomes {
+        observed: observed.clone(),
+    });
+    let runtime = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+    runtime.wait_started().await.unwrap();
+
+    let first = tokio::time::timeout(Duration::from_secs(1), outcomes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(1), outcomes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let observed = [first, second];
+    assert!(
+        observed
+            .iter()
+            .any(|message| matches!(message, OutcomeMsg::Success(Ok(42))))
+    );
+    assert!(
+        observed
+            .iter()
+            .any(|message| matches!(message, OutcomeMsg::Timeout(Err(StepDeadline))))
+    );
+    runtime.shutdown_and_wait().await.unwrap();
+}
+
+#[derive(Debug)]
+enum StaleMsg {
+    Start,
+    Done,
+}
+
+struct StaleActor {
+    incarnation: usize,
+    release: Arc<Notify>,
+    done: Arc<AtomicUsize>,
+}
+
+impl Actor for StaleActor {
+    type Msg = StaleMsg;
+
+    async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        match message {
+            StaleMsg::Start => {
+                assert_eq!(self.incarnation, 0);
+                let release = self.release.clone();
+                ctx.step(
+                    Duration::from_secs(1),
+                    async move { release.notified().await },
+                    |_| StaleMsg::Done,
+                );
+                return Err(std::io::Error::other("restart after starting step").into());
+            }
+            StaleMsg::Done => {
+                self.done.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn step_is_aborted_and_never_posts_to_a_fresh_incarnation() {
+    let constructed = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+    let done = Arc::new(AtomicUsize::new(0));
+    let mut graph = GraphBuilder::new();
+    let actor = graph.add({
+        let constructed = constructed.clone();
+        let release = release.clone();
+        let done = done.clone();
+        move || StaleActor {
+            incarnation: constructed.fetch_add(1, Ordering::Relaxed),
+            release: release.clone(),
+            done: done.clone(),
+        }
+    });
+    let runtime = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .restart(RestartPolicy::OnFailure)
+        .build()
+        .unwrap()
+        .spawn();
+    runtime.wait_started().await.unwrap();
+    actor.send(StaleMsg::Start).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while constructed.load(Ordering::Relaxed) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(done.load(Ordering::Relaxed), 0);
+    runtime.shutdown_and_wait().await.unwrap();
+}
+
+#[derive(Debug)]
+enum AbortMsg {
+    Start,
+    Done,
+}
+
+#[derive(Clone)]
+struct AbortActor {
+    handle: Arc<Mutex<Option<StepHandle>>>,
+    done: Arc<AtomicUsize>,
+}
+
+impl Actor for AbortActor {
+    type Msg = AbortMsg;
+
+    async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        match message {
+            AbortMsg::Start => {
+                let handle = ctx.step(Duration::from_secs(1), pending::<()>(), |_| AbortMsg::Done);
+                *self.handle.lock().unwrap() = Some(handle);
+            }
+            AbortMsg::Done => {
+                self.done.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn step_handle_aborts_and_updates_the_outstanding_gauge() {
+    let handle_slot = Arc::new(Mutex::new(None));
+    let done = Arc::new(AtomicUsize::new(0));
+    let mut graph = GraphBuilder::new();
+    let actor = graph.add({
+        let handle_slot = handle_slot.clone();
+        let done = done.clone();
+        move || AbortActor {
+            handle: handle_slot.clone(),
+            done: done.clone(),
+        }
+    });
+    let runtime = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+    runtime.wait_started().await.unwrap();
+    actor.send(AbortMsg::Start).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while actor.stats().outstanding_steps != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let step = handle_slot.lock().unwrap().take().unwrap();
+    step.abort();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !step.is_finished() || actor.stats().outstanding_steps != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.load(Ordering::Relaxed), 0);
+    runtime.shutdown_and_wait().await.unwrap();
+}
+
+#[derive(Debug)]
+enum DrainMsg {
+    Start,
+    Queued,
+    Nested,
+    Done,
+}
+
+#[derive(Clone)]
+struct ShutdownActor {
+    policy: DrainPolicy,
+    release: Arc<Notify>,
+    entered: Arc<Notify>,
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl Actor for ShutdownActor {
+    type Msg = DrainMsg;
+
+    async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        match message {
+            DrainMsg::Start => {
+                let release = self.release.clone();
+                let entered = self.entered.clone();
+                ctx.step(
+                    Duration::from_secs(1),
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                    },
+                    |_| DrainMsg::Done,
+                );
+            }
+            DrainMsg::Queued => {
+                self.observed.send("queued").unwrap();
+                ctx.step(Duration::from_secs(1), async {}, |_| DrainMsg::Nested);
+            }
+            DrainMsg::Nested => self.observed.send("nested").unwrap(),
+            DrainMsg::Done => self.observed.send("done").unwrap(),
+        }
+        Ok(())
+    }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        self.policy
+    }
+}
+
+async fn shutdown_case(policy: DrainPolicy) -> Vec<&'static str> {
+    let release = Arc::new(Notify::new());
+    let entered = Arc::new(Notify::new());
+    let (observed, mut receiver) = mpsc::unbounded_channel();
+    let mut graph = GraphBuilder::new();
+    graph.mailbox_capacity(1);
+    let actor = graph.add({
+        let release = release.clone();
+        let entered = entered.clone();
+        move || ShutdownActor {
+            policy,
+            release: release.clone(),
+            entered: entered.clone(),
+            observed: observed.clone(),
+        }
+    });
+    let runtime = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+    runtime.wait_started().await.unwrap();
+    actor.send(DrainMsg::Start).await.unwrap();
+    entered.notified().await;
+    actor.send(DrainMsg::Queued).await.unwrap();
+    let shutdown = tokio::spawn(async move { runtime.shutdown_and_wait().await });
+    tokio::task::yield_now().await;
+    if policy == DrainPolicy::Drain {
+        release.notify_waiters();
+    }
+    shutdown.await.unwrap().unwrap();
+
+    let mut values = Vec::new();
+    while let Ok(value) = receiver.try_recv() {
+        values.push(value);
+    }
+    values
+}
+
+#[tokio::test]
+async fn drain_interleaves_a_full_mailbox_with_step_completion() {
+    let observed = shutdown_case(DrainPolicy::Drain).await;
+    assert_eq!(observed.first(), Some(&"queued"));
+    assert!(observed.contains(&"nested"));
+    assert!(observed.contains(&"done"));
+}
+
+#[tokio::test]
+async fn discard_aborts_steps_at_stop_initiation() {
+    assert!(!shutdown_case(DrainPolicy::Discard).await.contains(&"done"));
+}
+
+#[derive(Debug)]
+enum BackpressureMsg {
+    Start,
+    Fill,
+    Done,
+}
+
+#[derive(Clone)]
+struct BackpressureActor {
+    handler_release: Arc<Notify>,
+    step_release: Arc<Notify>,
+    step_registered: Arc<Notify>,
+    observed: mpsc::UnboundedSender<&'static str>,
+}
+
+impl Actor for BackpressureActor {
+    type Msg = BackpressureMsg;
+
+    async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        match message {
+            BackpressureMsg::Start => {
+                let release = self.step_release.clone();
+                ctx.step(
+                    Duration::from_secs(1),
+                    async move { release.notified().await },
+                    |_| BackpressureMsg::Done,
+                );
+                self.step_registered.notify_one();
+                self.handler_release.notified().await;
+            }
+            BackpressureMsg::Fill => self.observed.send("fill").unwrap(),
+            BackpressureMsg::Done => self.observed.send("done").unwrap(),
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn step_postback_uses_mailbox_backpressure() {
+    let handler_release = Arc::new(Notify::new());
+    let step_release = Arc::new(Notify::new());
+    let step_registered = Arc::new(Notify::new());
+    let (observed, mut receiver) = mpsc::unbounded_channel();
+    let mut graph = GraphBuilder::new();
+    graph.mailbox_capacity(1);
+    let actor = graph.add({
+        let handler_release = handler_release.clone();
+        let step_release = step_release.clone();
+        let step_registered = step_registered.clone();
+        move || BackpressureActor {
+            handler_release: handler_release.clone(),
+            step_release: step_release.clone(),
+            step_registered: step_registered.clone(),
+            observed: observed.clone(),
+        }
+    });
+    let runtime = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+    runtime.wait_started().await.unwrap();
+    actor.send(BackpressureMsg::Start).await.unwrap();
+    step_registered.notified().await;
+    actor.send(BackpressureMsg::Fill).await.unwrap();
+    step_release.notify_one();
+    tokio::task::yield_now().await;
+    let stats = actor.stats();
+    assert_eq!(stats.mailbox_depth, 1);
+    assert_eq!(stats.outstanding_steps, 1);
+    handler_release.notify_one();
+    assert_eq!(receiver.recv().await, Some("fill"));
+    assert_eq!(receiver.recv().await, Some("done"));
+    runtime.shutdown_and_wait().await.unwrap();
+}

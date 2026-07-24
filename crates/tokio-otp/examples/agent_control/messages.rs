@@ -250,7 +250,6 @@ pub enum RouterMsg {
     },
     Removed {
         chat: ChatId,
-        generation: u64,
     },
     PauseChanged {
         paused: bool,
@@ -323,7 +322,6 @@ pub enum ModelError {
 pub enum RunMsg {
     Step,
     ModelResult {
-        turn: u64,
         result: Result<ModelTurn, ModelError>,
     },
     ToolResult {

@@ -209,11 +209,14 @@ impl Session {
 
     fn pipeline_remove(&self, id: String, ctx: &ActorContext<SessionMsg>) {
         let sessions = self.sessions.clone();
-        let myself = ctx.myself();
-        tokio::spawn(async move {
-            let _ = sessions.remove_child(id.clone()).await;
-            let _ = myself.send(SessionMsg::RunRemoved { id }).await;
-        });
+        let message_id = id.clone();
+        ctx.step(
+            PHASE_TIMEOUT,
+            async move {
+                let _ = sessions.remove_child(id.clone()).await;
+            },
+            move |_| SessionMsg::RunRemoved { id: message_id },
+        );
     }
 
     async fn complete_task(

@@ -12,8 +12,8 @@ use tokio_otp::{Actor, ActorContext, ActorRef, ActorResult, DynamicActorOptions,
 
 use crate::{
     messages::{
-        BudgetMsg, ChatId, GuardMsg, JournalMsg, OutboundMsg, PendingInput, ProgressMsg, Proof,
-        RouterMsg, SessionMsg, ToolHostMsg,
+        BudgetMsg, ChatId, GuardMsg, JournalMsg, OutboundMsg, PHASE_TIMEOUT, PendingInput,
+        ProgressMsg, Proof, RouterMsg, SessionMsg, ToolHostMsg,
     },
     model::ModelClient,
     session::SessionFactory,
@@ -25,7 +25,6 @@ enum SessionSlot {
         generation: u64,
     },
     Evicting {
-        generation: u64,
         buffered: Vec<PendingInput>,
     },
 }
@@ -119,16 +118,18 @@ impl Router {
         Ok(actor)
     }
 
-    fn pipeline_remove(&self, chat: ChatId, generation: u64, ctx: &ActorContext<RouterMsg>) {
+    fn pipeline_remove(&self, chat: ChatId, ctx: &ActorContext<RouterMsg>) {
         let sessions = self.sessions_handle.as_ref().expect("router bound").clone();
-        let myself = ctx.myself();
-        tokio::spawn(async move {
-            // Removal is pipelined so an idle eviction never head-of-line
-            // blocks unrelated routing work (the same hazard documented for
-            // the trading example's order router).
-            let _ = sessions.remove_child(format!("session:{chat}")).await;
-            let _ = myself.send(RouterMsg::Removed { chat, generation }).await;
-        });
+        ctx.step(
+            PHASE_TIMEOUT,
+            async move {
+                // Removal is pipelined so an idle eviction never head-of-line
+                // blocks unrelated routing work (the same hazard documented for
+                // the trading example's order router).
+                let _ = sessions.remove_child(format!("session:{chat}")).await;
+            },
+            move |_| RouterMsg::Removed { chat },
+        );
     }
 }
 
@@ -153,7 +154,7 @@ impl Actor for Router {
                             })
                             .await?;
                     }
-                    Some(SessionSlot::Evicting { buffered, .. }) => {
+                    Some(SessionSlot::Evicting { buffered }) => {
                         buffered.push(input);
                         self.proof
                             .lock()
@@ -180,19 +181,15 @@ impl Actor for Router {
                     self.sessions.insert(
                         chat,
                         SessionSlot::Evicting {
-                            generation,
                             buffered: Vec::new(),
                         },
                     );
-                    self.pipeline_remove(chat, generation, ctx);
+                    self.pipeline_remove(chat, ctx);
                 }
             }
-            RouterMsg::Removed { chat, generation } => {
+            RouterMsg::Removed { chat } => {
                 let buffered = match self.sessions.remove(chat) {
-                    Some(SessionSlot::Evicting {
-                        generation: current,
-                        buffered,
-                    }) if current == generation => buffered,
+                    Some(SessionSlot::Evicting { buffered }) => buffered,
                     Some(other) => {
                         self.sessions.insert(chat, other);
                         Vec::new()

@@ -139,6 +139,11 @@ current membership. Stats sampled directly from an `ActorRef`, `RunnableActor`,
 or standalone `Graph` report `None` because those surfaces have no supervisor
 context.
 
+`ActorStats::outstanding_steps` is a point-in-time gauge of bounded futures
+owned by the current actor incarnation. It rises when `ActorContext::step`
+starts work and returns to zero on completion, timeout, or abort, making actors
+with in-flight requests visible without inspecting anonymous Tokio tasks.
+
 `ActorStats::message_bytes_accepted` is then `Some(total)`; ordinary actors
 report `None` and do not sample message sizes. With the `metrics` feature,
 each accepted sized message also updates the `actor.message.size` histogram
