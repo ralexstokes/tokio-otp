@@ -25,6 +25,7 @@ doc-check:
 
 smoke:
     cargo run -p tokio-otp --example trading_engine --features metrics
+    cargo run -p tokio-otp --example agent_control --features metrics
     cargo run -p tokio-otp --example supervised_actors
     cargo run -p tokio-otp --example ref_rebind
     cargo run -p tokio-otp --example drain_policy

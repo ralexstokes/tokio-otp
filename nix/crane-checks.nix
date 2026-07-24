@@ -83,6 +83,7 @@ in
       inherit cargoArtifacts;
       buildPhaseCargoCommand = ''
         cargo run --locked -p tokio-otp --example trading_engine --features metrics
+        cargo run --locked -p tokio-otp --example agent_control --features metrics
         cargo run --locked -p tokio-otp --example supervised_actors
         cargo run --locked -p tokio-otp --example ref_rebind
         cargo run --locked -p tokio-otp --example drain_policy
