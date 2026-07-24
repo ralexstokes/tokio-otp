@@ -25,6 +25,13 @@ use crate::actor::{
 pub struct ActorStats {
     /// Actor id used to correlate these stats with supervisor snapshots.
     pub actor_id: String,
+    /// Identity of the actor's current supervisor membership, when sampled
+    /// through [`RuntimeHandle::actor_stats`](crate::RuntimeHandle::actor_stats).
+    ///
+    /// Pair this with [`actor_id`](Self::actor_id) to distinguish a removed
+    /// actor from a later actor added under the same id. Standalone actor and
+    /// graph stats have no supervisor membership and report `None`.
+    pub membership_epoch: Option<u64>,
     /// Messages removed from the mailbox by the actor for handling.
     ///
     /// This can be lower than [`messages_accepted`](Self::messages_accepted):
@@ -107,6 +114,7 @@ impl ActorStatsCounters {
     ) -> ActorStats {
         ActorStats {
             actor_id: actor_id.to_owned(),
+            membership_epoch: None,
             messages_received: self.messages_received.load(Ordering::Relaxed),
             messages_accepted: self.messages_accepted.load(Ordering::Relaxed),
             messages_conflated: self.messages_conflated.load(Ordering::Relaxed),

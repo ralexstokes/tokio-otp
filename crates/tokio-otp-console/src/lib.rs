@@ -46,6 +46,8 @@ use tokio_supervisor::{SupervisorEvent, SupervisorSnapshot};
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct ActorStatsView {
     pub actor_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership_epoch: Option<u64>,
     pub messages_received: u64,
     pub messages_accepted: u64,
     pub messages_conflated: u64,
@@ -60,6 +62,7 @@ impl From<ActorStats> for ActorStatsView {
     fn from(stats: ActorStats) -> Self {
         Self {
             actor_id: stats.actor_id,
+            membership_epoch: stats.membership_epoch,
             messages_received: stats.messages_received,
             messages_accepted: stats.messages_accepted,
             messages_conflated: stats.messages_conflated,

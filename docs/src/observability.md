@@ -45,6 +45,17 @@ lags, and snapshots carry cumulative counters — the per-child
 restart even when updates are conflated. This is the reliable source to drive
 control logic from.
 
+Every `ChildSnapshot` also carries a `membership_epoch`. A restart increments
+`generation` but retains the membership epoch; removing a child and adding a
+new child under the same id assigns a later epoch even though the replacement
+starts at generation zero. Treat `(id, membership_epoch)` as the identity of a
+direct child membership. Epochs start at zero, include statically configured
+children in declaration order, and are monotonic only within one supervisor
+incarnation. Nested supervisors allocate their own sequences, so identify a
+nested child by its snapshot path, including each parent's membership epoch
+and generation. The `u64` counter saturates at its maximum rather than changing
+supervisor control semantics in the practically unreachable overflow case.
+
 ## Reliable Restart Counting
 
 For control logic that reacts to restart activity — an aggregate restart
@@ -122,6 +133,11 @@ combined, for example with
 `RuntimeHandle::actor_stats()` walks runtime subtrees recursively. A handle
 returned by `RuntimeHandle::subtree` provides the same view scoped to that
 subtree, including actors added dynamically through the scoped handle.
+These runtime-scoped samples set `ActorStats::membership_epoch` from the
+matching supervisor snapshot, allowing actor stats to be joined to the exact
+current membership. Stats sampled directly from an `ActorRef`, `RunnableActor`,
+or standalone `Graph` report `None` because those surfaces have no supervisor
+context.
 
 `ActorStats::message_bytes_accepted` is then `Some(total)`; ordinary actors
 report `None` and do not sample message sizes. With the `metrics` feature,

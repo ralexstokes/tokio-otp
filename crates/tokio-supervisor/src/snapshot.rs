@@ -61,6 +61,16 @@ pub struct SupervisorSnapshot {
 pub struct ChildSnapshot {
     /// The child's unique identifier.
     pub id: String,
+    /// Monotonic identity of this membership within the current supervisor
+    /// incarnation.
+    ///
+    /// Unlike [`generation`](Self::generation), this changes when a child is
+    /// removed and another child is added under the same id. Restarts of the
+    /// same membership retain the epoch. Epochs are scoped to direct children
+    /// of one supervisor incarnation; nested supervisors maintain independent
+    /// sequences. The counter saturates at [`u64::MAX`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub membership_epoch: u64,
     /// Current generation counter. Incremented on each restart.
     pub generation: u64,
     /// Whether this child has reported readiness in its current generation.
@@ -144,6 +154,7 @@ impl ChildSnapshot {
     pub fn new(id: impl Into<String>, generation: u64, state: ChildStateView) -> Self {
         Self {
             id: id.into(),
+            membership_epoch: 0,
             generation,
             started: false,
             startup_aborted: false,
@@ -154,6 +165,13 @@ impl ChildSnapshot {
             next_restart_in: None,
             supervisor: None,
         }
+    }
+
+    /// Sets the identity of this child membership.
+    #[must_use]
+    pub fn membership_epoch(mut self, membership_epoch: u64) -> Self {
+        self.membership_epoch = membership_epoch;
+        self
     }
 
     /// Sets whether the child reported readiness in this generation.

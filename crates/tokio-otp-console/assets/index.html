@@ -558,6 +558,7 @@
     const row = el("span", "node-main");
     row.appendChild(el("span", "node-id", child.id));
     row.appendChild(stateBadge(child.state));
+    row.appendChild(el("span", "chip chip-quiet", "member " + child.membership_epoch));
     row.appendChild(el("span", "chip chip-quiet", "gen " + child.generation));
     if (child.restart_count > 0) {
       row.appendChild(el("span", "chip chip-warn", "restarts " + child.restart_count));
@@ -566,7 +567,10 @@
       row.appendChild(el("span", "chip chip-warn", "removing"));
     }
 
-    const actor = actorStats.find(function (stats) { return stats.actor_id === child.id; });
+    const actor = actorStats.find(function (stats) {
+      return stats.actor_id === child.id &&
+        (stats.membership_epoch == null || stats.membership_epoch === child.membership_epoch);
+    });
     if (actor) {
       row.appendChild(el("span", "chip", "mailbox " + actor.mailbox_depth + "/" + actor.mailbox_capacity));
     }
@@ -688,6 +692,9 @@
 
     const head = el("div", "actor-head");
     head.appendChild(el("span", "actor-id", actor.actor_id));
+    if (actor.membership_epoch != null) {
+      head.appendChild(el("span", "chip chip-quiet", "member " + actor.membership_epoch));
+    }
     head.appendChild(el("span", "actor-mail",
       "mailbox " + actor.mailbox_depth + " / " + actor.mailbox_capacity));
     card.appendChild(head);

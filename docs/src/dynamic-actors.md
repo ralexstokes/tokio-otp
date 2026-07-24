@@ -112,6 +112,11 @@ supervisor, so remove it through the same handle with
 normally, and appear in both `venue.actor_stats()` and the parent handle's
 recursive `actor_stats()` result.
 
+If an id is removed and later reused, compare the snapshot's
+`membership_epoch` (also present in runtime-scoped `ActorStats`) as well as its
+`generation`: restarts keep an epoch and increment the generation, while a new
+membership receives a later epoch and starts again at generation zero.
+
 For a raw nested `Supervisor` that was not built as a runtime subtree, use
 `Graph::dynamic_factory`, `RuntimeHandle::supervisor`, and
 `SupervisorHandleExt` as the lower-level escape hatch. Actors added through

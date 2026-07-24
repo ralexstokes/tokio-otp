@@ -81,6 +81,11 @@ async fn remove_last_child_and_readd_same_id() {
 
     let handle = supervisor.spawn();
     assert_eq!(common::recv_event(&mut starts_rx).await, 0);
+    let initial_epoch = handle
+        .snapshot()
+        .child("dynamic")
+        .expect("initial child visible")
+        .membership_epoch;
 
     handle
         .remove_child("dynamic")
@@ -100,6 +105,15 @@ async fn remove_last_child_and_readd_same_id() {
         .await
         .expect("removed child id should be reusable");
     assert_eq!(common::recv_event(&mut starts_rx).await, 0);
+    let replacement = handle.snapshot();
+    let replacement = replacement
+        .child("dynamic")
+        .expect("replacement child visible");
+    assert_eq!(replacement.generation, 0);
+    assert!(
+        replacement.membership_epoch > initial_epoch,
+        "re-adding an id must create a distinct membership epoch"
+    );
     loop {
         match common::recv_supervisor_event(&mut events).await {
             SupervisorEvent::ChildExited { id, status, .. } if id == "dynamic" => {

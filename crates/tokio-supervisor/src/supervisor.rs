@@ -278,8 +278,10 @@ pub(crate) fn initial_snapshot(config: &SupervisorConfig) -> SupervisorSnapshot 
         children: config
             .children
             .iter()
-            .map(|child| ChildSnapshot {
+            .enumerate()
+            .map(|(membership_epoch, child)| ChildSnapshot {
                 id: child.id.clone(),
+                membership_epoch: membership_epoch as u64,
                 generation: 0,
                 started: false,
                 startup_aborted: false,

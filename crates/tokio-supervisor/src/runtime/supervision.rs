@@ -81,12 +81,14 @@ pub(crate) enum MembershipState {
 /// `instance` is a monotonically increasing identifier that distinguishes
 /// different slab occupants at the same key (e.g. after a child is removed and
 /// a new one is inserted at the recycled key). Combined with `generation`
-/// (which counts restarts of the *same* child spec), this pair uniquely
-/// identifies every task the supervisor has ever spawned.
+/// (which counts restarts of the *same* child spec), this pair identifies every
+/// task the supervisor has spawned unless the counter reaches its saturating
+/// `u64::MAX` limit. The instance is exposed to observers as
+/// [`ChildSnapshot::membership_epoch`].
 pub(crate) struct ChildEntry {
     pub(crate) id: String,
     pub(crate) formatted_path: String,
-    /// Unique instance counter for this slab slot. See struct-level docs.
+    /// Monotonic membership instance. See struct-level docs.
     pub(crate) instance: u64,
     pub(crate) runtime: ChildRuntime,
     last_exit: Option<ExitStatusView>,
@@ -1521,6 +1523,7 @@ impl SupervisorRuntime {
 
             children.push(ChildSnapshot {
                 id: entry.id.clone(),
+                membership_epoch: entry.instance,
                 generation: entry.runtime.generation,
                 started: entry.runtime.has_reported_ready,
                 startup_aborted: entry.runtime.startup_aborted,

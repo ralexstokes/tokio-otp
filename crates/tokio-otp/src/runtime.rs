@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     sync::{
         Arc, Mutex,
@@ -47,6 +47,11 @@ impl ActorRuntimeState {
             .iter()
             .map(|child| child.id.as_str())
             .collect::<HashSet<_>>();
+        let membership_epochs = snapshot
+            .children
+            .iter()
+            .map(|child| (child.id.as_str(), child.membership_epoch))
+            .collect::<HashMap<_, _>>();
 
         self.actors
             .lock()
@@ -62,7 +67,11 @@ impl ActorRuntimeState {
             .lock()
             .expect("actor stats lock poisoned")
             .iter()
-            .map(RunnableActor::stats)
+            .map(|actor| {
+                let mut stats = actor.stats();
+                stats.membership_epoch = membership_epochs.get(actor.label()).copied();
+                stats
+            })
             .collect::<Vec<_>>();
         let subtrees = self
             .subtrees
