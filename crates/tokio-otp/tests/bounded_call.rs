@@ -16,7 +16,7 @@ use tokio_otp::{
 };
 use tokio_util::sync::CancellationToken;
 
-const DEADLINE: Duration = Duration::from_millis(50);
+const CALL_TIMEOUT: Duration = Duration::from_millis(50);
 
 fn actor(graph: &Graph, id: &str) -> RunnableActor {
     graph
@@ -74,14 +74,14 @@ async fn timeout_before_mailbox_binding_drops_the_request() {
     let graph = builder.build().expect("valid graph");
 
     assert!(matches!(
-        rpc.call(DEADLINE, Request::Get).await,
+        rpc.call(CALL_TIMEOUT, Request::Get).await,
         Err(CallError::Timeout { actor_id, .. }) if actor_id == "rpc"
     ));
     assert_eq!(rpc.stats().messages_accepted, 0);
 
     let (stop_token, task) = start(actor(&graph, "rpc"));
     assert_eq!(
-        rpc.call(DEADLINE, Request::Get)
+        rpc.call(CALL_TIMEOUT, Request::Get)
             .await
             .expect("later call succeeds"),
         "ok"
@@ -146,7 +146,7 @@ async fn timeout_under_fifo_backpressure_drops_the_unaccepted_request() {
         .await
         .expect("first message fills the mailbox");
     assert!(matches!(
-        rpc.call(DEADLINE, BackpressuredRequest::Get).await,
+        rpc.call(CALL_TIMEOUT, BackpressuredRequest::Get).await,
         Err(CallError::Timeout { actor_id, .. }) if actor_id == "rpc"
     ));
     assert_eq!(rpc.stats().messages_accepted, 1);
@@ -159,7 +159,7 @@ async fn timeout_under_fifo_backpressure_drops_the_unaccepted_request() {
         Some("occupy")
     );
     assert!(
-        timeout(DEADLINE, observed_rx.recv()).await.is_err(),
+        timeout(CALL_TIMEOUT, observed_rx.recv()).await.is_err(),
         "the timed-out request must not appear later"
     );
     stop(stop_token, task).await;
@@ -210,7 +210,7 @@ async fn timeout_after_acceptance_does_not_cancel_actor_work_or_late_reply() {
 
     let call = tokio::spawn({
         let rpc = rpc.clone();
-        async move { rpc.call(DEADLINE, Request::Get).await }
+        async move { rpc.call(CALL_TIMEOUT, Request::Get).await }
     });
     accepted_rx
         .recv()
@@ -265,7 +265,7 @@ async fn accepted_unread_request_lost_with_incarnation_reports_reply_dropped() {
 
     let call = tokio::spawn({
         let rpc = rpc.clone();
-        async move { rpc.call(DEADLINE, Request::Get).await }
+        async move { rpc.call(CALL_TIMEOUT, Request::Get).await }
     });
     while rpc.stats().messages_accepted == 0 {
         tokio::task::yield_now().await;
@@ -283,7 +283,7 @@ async fn accepted_unread_request_lost_with_incarnation_reports_reply_dropped() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn call_unbounded_waits_past_a_bounded_call_deadline() {
+async fn call_unbounded_waits_past_a_bounded_call_timeout() {
     let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
     let (replied_tx, mut replied_rx) = mpsc::unbounded_channel();
     let release = Arc::new(Notify::new());
@@ -307,10 +307,10 @@ async fn call_unbounded_waits_past_a_bounded_call_deadline() {
         async move { rpc.call_unbounded(Request::Get).await }
     });
     accepted_rx.recv().await.expect("actor accepted request");
-    tokio::time::advance(DEADLINE * 2).await;
+    tokio::time::advance(CALL_TIMEOUT * 2).await;
     assert!(
         !call.is_finished(),
-        "unbounded call has no internal deadline"
+        "unbounded call has no internal timeout"
     );
 
     release.notify_one();
