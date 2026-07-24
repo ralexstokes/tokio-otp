@@ -134,7 +134,10 @@ impl Actor for DrainContinuation {
 
     async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
         self.handled.lock().await.push(message);
-        if message == "hold" {
+        if message == "hold" || message == "hold-and-continue" {
+            if message == "hold-and-continue" {
+                ctx.continue_with("continued-before-shutdown");
+            }
             self.started.notify_one();
             self.release.notified().await;
             while !ctx.shutdown_token().is_cancelled() {
@@ -179,6 +182,36 @@ async fn drain_drops_continuations_queued_by_drained_messages() {
     release.notify_one();
     handle.shutdown_and_wait().await.unwrap();
     assert_eq!(&*handled.lock().await, &["hold", "trigger"]);
+}
+
+#[tokio::test]
+async fn external_shutdown_drops_a_continuation_queued_by_an_in_flight_handler() {
+    let handled = Arc::new(Mutex::new(Vec::new()));
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut graph = GraphBuilder::new();
+    let actor_handled = handled.clone();
+    let actor_started = started.clone();
+    let actor_release = release.clone();
+    let actor = graph.add(move || DrainContinuation {
+        handled: actor_handled.clone(),
+        started: actor_started.clone(),
+        release: actor_release.clone(),
+    });
+    let handle = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+
+    actor.send("hold-and-continue").await.unwrap();
+    started.notified().await;
+    actor.send("mailbox").await.unwrap();
+    handle.shutdown();
+    release.notify_one();
+    handle.shutdown_and_wait().await.unwrap();
+
+    assert_eq!(&*handled.lock().await, &["hold-and-continue", "mailbox"]);
 }
 
 #[derive(Clone)]

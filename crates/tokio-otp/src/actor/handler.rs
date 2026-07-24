@@ -122,6 +122,12 @@ impl<H: Actor> RawActor for H {
 
         let mut stopping = start_flow == Flow::Stop;
         while !stopping {
+            // External shutdown has priority over actor-local continuations.
+            // In particular, a continuation queued by an in-flight handler
+            // must not run after shutdown was requested.
+            if ctx.shutdown.is_cancelled() {
+                break;
+            }
             let message = if let Some(message) = ctx.take_continuation() {
                 Some(message)
             } else {
