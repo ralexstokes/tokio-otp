@@ -1,4 +1,10 @@
 //! Append-only transcript and effect journal, including envelope deduplication.
+//!
+//! This example deliberately serializes appends and every session replay
+//! through one mailbox. For production alternatives, see the book's
+//! [rehydration scaling patterns].
+//!
+//! [rehydration scaling patterns]: https://stokes.io/tokio-otp/ownership-transitions.html#scale-rehydration-without-blocking-appends
 
 use std::collections::HashSet;
 
