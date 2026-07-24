@@ -87,8 +87,20 @@ failed exit, matching OTP temporary-child semantics; other restart policies
 retain a terminal child in the supervisor snapshot by default. Override either
 default with `remove_on_exit(bool)`. Removal only follows an exit the policy
 will not restart, so it never interrupts a restart cycle. Watches still receive
-`Down` followed by `Terminated` before the membership disappears, and the child
-id can then be reused.
+`Down` followed by `Terminated` before the membership disappears. Consequently,
+`Terminated` alone does not mean the child id is reusable: wait for removal to
+complete or use a fresh id rather than immediately re-adding the same one.
+
+With a group strategy, opting a non-`Never` actor into removal makes timing
+observable. If its non-restarted exit is handled before a later group restart,
+removal is permanent and that restart cannot revive it. If the actor exits while
+an already-active group restart is draining it, the exit belongs to that restart
+cycle and the actor is respawned.
+
+These defaults apply only to actors added with `add_actor`. Actors declared in
+the static graph remain registered after terminal exit, even when
+`SupervisedActors::actor_restart` gives them `RestartPolicy::Never`; static
+membership can be recreated from the graph when its supervisor restarts.
 
 `add_actor` returns an actor ref matching the factory's actor message type, and
 the same ref keeps working across restarts of that actor. Its stability ends at

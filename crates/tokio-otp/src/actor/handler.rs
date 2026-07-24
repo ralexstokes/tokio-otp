@@ -86,8 +86,11 @@ pub trait Actor: Send + Sync + 'static {
     /// Runs once before the first message of each actor run.
     ///
     /// This is the place to acquire per-incarnation resources. Returning
-    /// [`Flow::Stop`] stops cleanly without handling a message. An error here
-    /// fails the run like a [`handle`](Self::handle) error, so under
+    /// [`Flow::Stop`] requests a clean stop before the ordinary receive loop.
+    /// [`DrainPolicy::Discard`] drops messages queued during startup, while
+    /// [`DrainPolicy::Drain`] handles the externally accepted mailbox queue;
+    /// actor-local continuations are dropped under either policy. An error
+    /// here fails the run like a [`handle`](Self::handle) error, so under
     /// supervision it is an ordinary restartable failure.
     fn on_start(
         &mut self,
@@ -167,7 +170,7 @@ impl<H: Actor> RawActor for H {
                 // Once stopping begins, flow values do not change the drain
                 // decision. Continuations queued by drain handlers are left
                 // for the context to drop with the incarnation.
-                self.handle(message, &ctx).await?;
+                let _ = self.handle(message, &ctx).await?;
             }
         }
 

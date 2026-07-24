@@ -81,11 +81,11 @@ impl Actor for Guard {
                     self.failures.pop_front();
                 }
                 if self.failures.len() >= GUARD_THRESHOLD {
-                    self.set_paused(true, ctx).await?;
+                    let _ = self.set_paused(true, ctx).await?;
                 }
             }
             GuardMsg::BudgetExceeded => {
-                self.set_paused(true, ctx).await?;
+                let _ = self.set_paused(true, ctx).await?;
             }
             GuardMsg::BridgeRestarts { total } => self.report.bridge_restarts = total,
             GuardMsg::Probe => {
@@ -98,7 +98,7 @@ impl Actor for Guard {
                 .is_ok_and(|result| result.unwrap_or(false));
                 if self.model.probe() && under_cap {
                     self.failures.clear();
-                    self.set_paused(false, ctx).await?;
+                    let _ = self.set_paused(false, ctx).await?;
                 } else {
                     self.report.failed_probes += 1;
                     self.backoff_multiplier = self.backoff_multiplier.saturating_mul(2).min(8);

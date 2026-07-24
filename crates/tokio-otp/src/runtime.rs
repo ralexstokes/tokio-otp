@@ -172,7 +172,10 @@ impl DynamicActorOptions {
     /// Removal happens only when the restart policy declines a restart, never
     /// during a restart cycle. By default, actors using
     /// [`RestartPolicy::Never`] are removed and actors using other policies
-    /// remain visible in supervisor snapshots.
+    /// remain visible in supervisor snapshots. Watchers observe
+    /// [`Terminated`](crate::MonitorEvent::Terminated) before removal completes,
+    /// so that event alone does not mean the child id is reusable; wait for
+    /// removal to complete or use a fresh id.
     #[must_use]
     pub fn remove_on_exit(mut self, remove_on_exit: bool) -> Self {
         self.remove_on_exit = Some(remove_on_exit);

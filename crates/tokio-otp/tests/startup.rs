@@ -219,6 +219,7 @@ struct StopsOnStart {
     started: Arc<Notify>,
     release: Arc<Notify>,
     events: Arc<Mutex<Vec<&'static str>>>,
+    policy: DrainPolicy,
 }
 
 impl Actor for StopsOnStart {
@@ -240,6 +241,10 @@ impl Actor for StopsOnStart {
         self.events.lock().await.push("stopped");
         Ok(())
     }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        self.policy
+    }
 }
 
 #[tokio::test]
@@ -256,6 +261,7 @@ async fn stop_from_on_start_drops_mailbox_and_continuations_then_runs_on_stop() 
             started: started.clone(),
             release: release.clone(),
             events: events.clone(),
+            policy: DrainPolicy::Discard,
         }
     });
     let handle = Runtime::builder()
@@ -281,6 +287,49 @@ async fn stop_from_on_start_drops_mailbox_and_continuations_then_runs_on_stop() 
     .unwrap();
 
     assert_eq!(&*events.lock().await, &["stopped"]);
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_from_on_start_with_drain_handles_the_queued_mailbox_only() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut graph = GraphBuilder::new();
+    let actor = graph.add({
+        let started = started.clone();
+        let release = release.clone();
+        let events = events.clone();
+        move || StopsOnStart {
+            started: started.clone(),
+            release: release.clone(),
+            events: events.clone(),
+            policy: DrainPolicy::Drain,
+        }
+    });
+    let handle = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .restart(RestartPolicy::Never)
+        .build()
+        .unwrap()
+        .spawn();
+
+    started.notified().await;
+    actor.send("mailbox").await.unwrap();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), handle.wait_started())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while events.lock().await.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(&*events.lock().await, &["mailbox", "stopped"]);
     handle.shutdown_and_wait().await.unwrap();
 }
 

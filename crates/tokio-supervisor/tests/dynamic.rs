@@ -158,6 +158,154 @@ async fn temporary_dynamic_child_auto_removes_when_skipped_by_group_restart() {
 }
 
 #[tokio::test]
+async fn opted_in_non_never_exit_before_group_restart_forfeits_revival() {
+    let finish_temporary = Arc::new(Notify::new());
+    let fail_trigger = Arc::new(Notify::new());
+    let (temporary_starts_tx, mut temporary_starts_rx) = mpsc::unbounded_channel();
+    let supervisor = SupervisorBuilder::new()
+        .strategy(tokio_supervisor::Strategy::OneForAll)
+        .build()
+        .expect("empty supervisor builds");
+    let handle = supervisor.spawn();
+    let mut events = handle.subscribe();
+
+    handle
+        .add_child(
+            ChildSpec::new("temporary", {
+                let finish_temporary = finish_temporary.clone();
+                move |ctx| {
+                    let finish_temporary = finish_temporary.clone();
+                    let temporary_starts_tx = temporary_starts_tx.clone();
+                    async move {
+                        temporary_starts_tx
+                            .send(ctx.generation())
+                            .expect("test receiver dropped");
+                        finish_temporary.notified().await;
+                        Ok(())
+                    }
+                }
+            })
+            .restart(RestartPolicy::OnFailure)
+            .remove_on_exit(true),
+        )
+        .await
+        .expect("temporary child added");
+    handle
+        .add_child(
+            ChildSpec::new("trigger", {
+                let fail_trigger = fail_trigger.clone();
+                move |ctx| {
+                    let fail_trigger = fail_trigger.clone();
+                    async move {
+                        if ctx.generation() == 0 {
+                            fail_trigger.notified().await;
+                            return Err(common::test_error("restart group"));
+                        }
+                        ctx.shutdown_token().cancelled().await;
+                        Ok(())
+                    }
+                }
+            })
+            .restart(RestartPolicy::OnFailure),
+        )
+        .await
+        .expect("trigger child added");
+
+    assert_eq!(common::recv_event(&mut temporary_starts_rx).await, 0);
+    finish_temporary.notify_one();
+    loop {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildRemoved { id, .. } if id == "temporary" => break,
+            _ => {}
+        }
+    }
+
+    fail_trigger.notify_one();
+    loop {
+        match common::recv_supervisor_event(&mut events).await {
+            SupervisorEvent::ChildRestarted {
+                id,
+                new_generation: 1,
+                ..
+            } if id == "trigger" => break,
+            _ => {}
+        }
+    }
+    common::assert_no_event(&mut temporary_starts_rx).await;
+    assert!(handle.snapshot().child("temporary").is_none());
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn opted_in_non_never_exit_during_group_drain_is_respawned() {
+    let fail_trigger = Arc::new(Notify::new());
+    let (temporary_starts_tx, mut temporary_starts_rx) = mpsc::unbounded_channel();
+    let supervisor = SupervisorBuilder::new()
+        .strategy(tokio_supervisor::Strategy::OneForAll)
+        .build()
+        .expect("empty supervisor builds");
+    let handle = supervisor.spawn();
+
+    handle
+        .add_child(
+            ChildSpec::new("temporary", move |ctx| {
+                let temporary_starts_tx = temporary_starts_tx.clone();
+                async move {
+                    temporary_starts_tx
+                        .send(ctx.generation())
+                        .expect("test receiver dropped");
+                    ctx.shutdown_token().cancelled().await;
+                    Ok(())
+                }
+            })
+            .restart(RestartPolicy::OnFailure)
+            .remove_on_exit(true),
+        )
+        .await
+        .expect("temporary child added");
+    handle
+        .add_child(
+            ChildSpec::new("trigger", {
+                let fail_trigger = fail_trigger.clone();
+                move |ctx| {
+                    let fail_trigger = fail_trigger.clone();
+                    async move {
+                        if ctx.generation() == 0 {
+                            fail_trigger.notified().await;
+                            return Err(common::test_error("restart group"));
+                        }
+                        ctx.shutdown_token().cancelled().await;
+                        Ok(())
+                    }
+                }
+            })
+            .restart(RestartPolicy::OnFailure),
+        )
+        .await
+        .expect("trigger child added");
+
+    assert_eq!(common::recv_event(&mut temporary_starts_rx).await, 0);
+    fail_trigger.notify_one();
+    assert_eq!(common::recv_event(&mut temporary_starts_rx).await, 1);
+    assert!(
+        handle
+            .snapshot()
+            .child("temporary")
+            .is_some_and(|child| child.generation == 1),
+        "completion during a group drain remains part of the restart cycle"
+    );
+
+    handle
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown should succeed");
+}
+
+#[tokio::test]
 async fn remove_last_child_and_readd_same_id() {
     let (starts_tx, mut starts_rx) = mpsc::unbounded_channel();
     let initial_starts_tx = starts_tx.clone();

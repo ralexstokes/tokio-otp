@@ -146,7 +146,7 @@ impl RawActor for Inbound {
                 biased;
                 message = ctx.recv() => match message {
                     Some(message) => {
-                        self.bridge_message(message).await?;
+                        let _ = self.bridge_message(message).await?;
                     }
                     None => {
                         self.chat.release_session();
@@ -155,10 +155,10 @@ impl RawActor for Inbound {
                 },
                 event = session.recv() => match event {
                     Some(ChatEvent::Delivery(delivery)) => {
-                        self.bridge_message(InboundMsg::Delivery(delivery)).await?;
+                        let _ = self.bridge_message(InboundMsg::Delivery(delivery)).await?;
                     }
                     Some(ChatEvent::Disconnected) | None => {
-                        self.bridge_message(InboundMsg::Disconnected).await?;
+                        let _ = self.bridge_message(InboundMsg::Disconnected).await?;
                     }
                 }
             }
