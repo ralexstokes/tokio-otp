@@ -57,11 +57,14 @@ fn snapshot(child_state: ChildStateView) -> SupervisorSnapshot {
 fn actor_stats() -> Vec<ActorStatsView> {
     vec![ActorStatsView {
         actor_id: "worker".into(),
+        supervisor_path: Some(Vec::new()),
+        membership_epoch: Some(0),
         messages_received: 11,
         messages_accepted: 10,
         messages_conflated: 3,
         message_bytes_accepted: None,
         sends_rejected: 1,
+        outstanding_steps: 0,
         mailbox_depth: 3,
         mailbox_capacity: 32,
     }]
@@ -346,10 +349,13 @@ async fn ws_sends_snapshot_then_stats_on_connect() {
         stats["data"],
         json!([{
             "actor_id": "worker",
+            "supervisor_path": [],
+            "membership_epoch": 0,
             "messages_received": 11,
             "messages_accepted": 10,
             "messages_conflated": 3,
             "sends_rejected": 1,
+            "outstanding_steps": 0,
             "mailbox_depth": 3,
             "mailbox_capacity": 32,
         }])

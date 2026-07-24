@@ -1,13 +1,17 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt,
-    sync::{Arc, Mutex},
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use tokio::{
-    sync::{oneshot, watch},
-    time::{Instant, MissedTickBehavior},
+    sync::{Notify, oneshot, watch},
+    time::{Instant, MissedTickBehavior, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -16,7 +20,7 @@ use crate::actor::{
         ActorStats, ActorStatsCounters, BindingCore, BindingState, MailboxReceiver, MailboxRef,
         MessageSizeObserver, SendOutcome,
     },
-    error::{CallError, SendError, TryRecvError},
+    error::{CallError, SendError, StepDeadline, TryRecvError},
     monitor::{ActorMonitors, MonitorEvent, MonitorHub, MonitorRef},
     observability::{GraphObservability, MessageOperation, SendRejection, trace_actor_message},
 };
@@ -105,11 +109,15 @@ impl<M> ActorRef<M> {
     /// Returns a point-in-time snapshot of this actor's message counters and
     /// current mailbox usage.
     pub fn stats(&self) -> ActorStats {
-        let (depth, capacity) = match &*self.binding.borrow() {
-            BindingState::Bound(mailbox) => mailbox.usage(),
-            BindingState::Unbound | BindingState::Terminated => (0, 0),
+        let (outstanding_steps, depth, capacity) = match &*self.binding.borrow() {
+            BindingState::Bound(mailbox) => {
+                let (depth, capacity) = mailbox.usage();
+                (mailbox.outstanding_steps(), depth, capacity)
+            }
+            BindingState::Unbound | BindingState::Terminated => (0, 0, 0),
         };
-        self.stats.snapshot(&self.actor_id, depth, capacity)
+        self.stats
+            .snapshot(&self.actor_id, outstanding_steps, depth, capacity)
     }
 
     fn current_mailbox(&self) -> Result<MailboxRef<M>, SendError> {
@@ -146,6 +154,14 @@ impl<M> ActorRef<M> {
     /// (acknowledgements, redelivery) are user protocol built with
     /// [`call`](Self::call) and [`Reply`], not transport features.
     pub async fn send(&self, message: M) -> Result<(), SendError> {
+        self.send_to_incarnation(message).await.map(drop)
+    }
+
+    /// Sends a message and returns the incarnation mailbox that accepted it.
+    ///
+    /// This is used by runtime adapters that need to restore cumulative state
+    /// after the target actor moves to a fresh incarnation.
+    pub(crate) async fn send_to_incarnation(&self, message: M) -> Result<MailboxRef<M>, SendError> {
         let mut binding = self.binding.clone();
         let mut message = message;
         let message_size = self
@@ -169,7 +185,7 @@ impl<M> ActorRef<M> {
                     self.stats.record_send(true);
                     self.stats.record_conflated(conflated);
                     self.record_message_size(message_size);
-                    return Ok(());
+                    return Ok(mailbox);
                 }
                 SendOutcome::Closed(returned) => {
                     self.observe_send(MessageOperation::Send, Some(SendRejection::MailboxClosed));
@@ -218,12 +234,11 @@ impl<M> ActorRef<M> {
     /// Sends a request and waits for the actor to answer through the
     /// [`Reply`] carried inside the message.
     ///
-    /// Callers own their deadline. Compose `call` with
-    /// [`tokio::time::timeout`] for a bounded wait:
+    /// The timeout bounds the entire operation, including waiting for a
+    /// mailbox binding, FIFO mailbox capacity, and the reply:
     ///
     /// ```no_run
     /// use std::time::Duration;
-    /// use tokio::time::timeout;
     /// use tokio_otp::{ActorRef, Reply};
     ///
     /// enum Msg {
@@ -231,17 +246,16 @@ impl<M> ActorRef<M> {
     /// }
     ///
     /// # async fn get(actor: &ActorRef<Msg>) -> Result<u64, Box<dyn std::error::Error>> {
-    /// let value = timeout(Duration::from_millis(250), actor.call(Msg::Get)).await??;
+    /// let value = actor.call(Duration::from_millis(250), Msg::Get).await?;
     /// # Ok(value)
     /// # }
     /// ```
     ///
     /// This waits for the same actor binding conditions as [`send`](Self::send),
     /// including FIFO mailbox capacity and expected restart windows. If the
-    /// timeout cancels `call` before the request is accepted, the request is
-    /// dropped. Once the mailbox accepts it, cancelling the caller's wait
-    /// cannot retract it: the actor may still process the request and a late
-    /// reply is discarded.
+    /// timeout expires before the request is accepted, the request is
+    /// dropped. Once the mailbox accepts it, a timeout cannot retract it: the
+    /// actor may still process the request and a late reply is discarded.
     ///
     /// Consequently, a timeout after acceptance has an **unknown outcome**.
     /// In-memory queries are usually harmless, but requests with external
@@ -259,16 +273,40 @@ impl<M> ActorRef<M> {
     /// An actor processes one message at a time, so a handler that awaits
     /// `call` stops its own mailbox for the full round-trip: every queued
     /// message, however urgent or unrelated, waits behind the outstanding
-    /// request for up to the composed deadline. This is the actor-model
+    /// request for up to the call's timeout. This is the actor-model
     /// equivalent of blocking inside an Erlang `gen_server` callback, and in
     /// fan-out or routing actors it turns one slow callee into head-of-line
-    /// blocking for all traffic through the intermediary. Pipeline instead:
-    /// spawn the bounded call onto a task that completes the original
-    /// [`Reply`] and reports any state change back to the actor as an
-    /// ordinary message via [`ActorContext::myself`], or move the slow
+    /// blocking for all traffic through the intermediary. Pipeline the
+    /// bounded call back into an ordinary message with
+    /// [`ActorContext::step`], or move the slow
     /// dependency behind a dedicated child actor. The book's request/reply
     /// chapter covers the pattern.
-    pub async fn call<T>(&self, message: impl FnOnce(Reply<T>) -> M) -> Result<T, CallError> {
+    pub async fn call<T>(
+        &self,
+        timeout: Duration,
+        message: impl FnOnce(Reply<T>) -> M,
+    ) -> Result<T, CallError> {
+        tokio::time::timeout(timeout, self.call_unbounded(message))
+            .await
+            .map_err(|_| CallError::Timeout {
+                actor_id: self.actor_id.to_string(),
+            })?
+    }
+
+    /// Sends a request and waits without a timeout for the actor to answer.
+    ///
+    /// Prefer [`call`](Self::call), whose required timeout bounds mailbox
+    /// backpressure, restart windows, and reply latency. This escape hatch is
+    /// intended only for protocols whose lifetime is deliberately bounded by
+    /// some other mechanism.
+    ///
+    /// As with `call`, cancelling this future after delivery cannot retract
+    /// the request. The actor may still process it, and a late [`Reply`] is a
+    /// silent no-op.
+    pub async fn call_unbounded<T>(
+        &self,
+        message: impl FnOnce(Reply<T>) -> M,
+    ) -> Result<T, CallError> {
         let (sender, receiver) = oneshot::channel();
         self.send(message(Reply { sender })).await?;
         receiver.await.map_err(|_| CallError::ReplyDropped {
@@ -292,6 +330,27 @@ impl<M> ActorRef<M> {
                 .await
                 .map_err(|_| self.actor_terminated())?;
         }
+    }
+
+    pub(crate) async fn wait_terminated(&self) {
+        let mut binding = self.binding.clone();
+        loop {
+            if matches!(&*binding.borrow(), BindingState::Terminated) {
+                return;
+            }
+            if binding.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Waits until `stale` is replaced by another incarnation or the actor
+    /// permanently terminates. Returns whether a fresh incarnation appeared.
+    pub(crate) async fn wait_incarnation_changed(&self, stale: &MailboxRef<M>) -> bool {
+        let mut binding = self.binding.clone();
+        self.wait_for_rebind_or_termination(&mut binding, stale)
+            .await
+            .is_ok()
     }
 
     /// Waits until the stale mailbox is unbound and a fresh one is bound.
@@ -346,6 +405,20 @@ impl<M> ActorRef<M> {
     pub(crate) fn record_received(&self) {
         self.stats.record_received();
     }
+
+    async fn post_to_incarnation(&self, mailbox: MailboxRef<M>, message: M) {
+        let message_size = self
+            .message_size
+            .as_ref()
+            .map(|observer| observer.size_hint(&message));
+        if let SendOutcome::Accepted { conflated } = mailbox.send_internal_retaining(message).await
+        {
+            self.observe_send(MessageOperation::Send, None);
+            self.stats.record_send(true);
+            self.stats.record_conflated(conflated);
+            self.record_message_size(message_size);
+        }
+    }
 }
 
 /// One-shot reply channel carried inside a request message.
@@ -365,6 +438,30 @@ pub struct Reply<T> {
 #[derive(Clone, Debug)]
 pub struct TimerRef {
     cancellation: CancellationToken,
+}
+
+/// Handle for one bounded future started by [`ActorContext::step`].
+///
+/// Dropping the handle does not affect the step. [`abort`](Self::abort)
+/// abandons the future and prevents its continuation message from being
+/// posted. Aborting a request only abandons the local wait: it cannot retract
+/// work that another actor or external service already accepted.
+#[derive(Clone, Debug)]
+pub struct StepHandle {
+    cancellation: CancellationToken,
+    finished: Arc<AtomicBool>,
+}
+
+impl StepHandle {
+    /// Aborts the step and suppresses its continuation message.
+    pub fn abort(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Returns whether the step has finished or its abort has been observed.
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
 }
 
 impl TimerRef {
@@ -404,19 +501,22 @@ impl<T> fmt::Debug for Reply<T> {
 ///
 /// Provides the actor's incoming [`mailbox`](Self::recv), message
 /// [`timers`](Self::send_after), a
+/// bounded [`step`](Self::step) primitive for asynchronous postbacks, a
 /// [`shutdown_token`](Self::shutdown_token) for cooperative shutdown, and
 /// [`run_blocking`](Self::run_blocking) for blocking work.
 pub struct ActorContext<M> {
     pub(crate) id: Arc<str>,
     pub(crate) mailbox: MailboxReceiver<M>,
     pub(crate) myself: ActorRef<M>,
+    pub(crate) incarnation: MailboxRef<M>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) observability: GraphObservability,
     pub(crate) timers: ActorTimers,
     pub(crate) state_timeout: Mutex<Option<TimerRef>>,
-    pub(crate) monitors: ActorMonitors,
+    pub(crate) monitors: Arc<ActorMonitors>,
     pub(crate) ready: Mutex<Option<oneshot::Sender<()>>>,
     pub(crate) continuations: Mutex<VecDeque<M>>,
+    pub(crate) steps: ActorSteps,
 }
 
 impl<M: Send + 'static> ActorContext<M> {
@@ -459,6 +559,86 @@ impl<M: Send + 'static> ActorContext<M> {
             .push_back(message);
     }
 
+    /// Runs a bounded future without blocking this actor's receive loop and
+    /// posts its outcome back as an ordinary message.
+    ///
+    /// The continuation is total: it receives either the future's value or
+    /// [`StepDeadline`] and must produce a message in both cases. Delivery
+    /// uses this actor's normal mailbox policy and FIFO backpressure. It is
+    /// stamped to this exact incarnation, so a completion racing a restart is
+    /// silently dropped rather than delivered to fresh state.
+    ///
+    /// Steps are incarnation-owned. They are aborted when the incarnation
+    /// fails, restarts, or uses [`DrainPolicy::Discard`](crate::DrainPolicy).
+    /// A draining handler actor keeps processing queued messages and step
+    /// completions until both are exhausted; the required deadline bounds
+    /// every step's future during that drain.
+    ///
+    /// Aborting or timing out a step is not undo. If the future sent a request
+    /// before being dropped, the receiver may still perform it and the outcome
+    /// is unknown. Put effects behind actors and use idempotency keys plus
+    /// reconciliation; step futures should initiate requests, not mutate
+    /// untracked local state directly. Domain cancellation can still be
+    /// captured explicitly in `future`.
+    ///
+    /// `step` lives on the shared context type, but its drain integration is
+    /// provided by the framework-owned [`Actor`](crate::Actor) loop. A custom
+    /// [`RawActor`](crate::RawActor) remains responsible for its own shutdown
+    /// and draining protocol.
+    pub fn step<F, T, C>(&self, deadline: Duration, future: F, continuation: C) -> StepHandle
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+        C: FnOnce(Result<T, StepDeadline>) -> M + Send + 'static,
+    {
+        let (id, cancellation, finished) = self.steps.start();
+        let handle = StepHandle {
+            cancellation: cancellation.clone(),
+            finished: Arc::clone(&finished),
+        };
+        let steps = self.steps.inner();
+        let myself = self.myself.clone();
+        let incarnation = self.incarnation.clone();
+        let guard = StepGuard {
+            id,
+            steps,
+            finished,
+        };
+        tokio::spawn(async move {
+            // Constructed before spawning so dropping an unpolled task still
+            // unregisters the step and marks its handle finished.
+            let _guard = guard;
+            let outcome = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return,
+                outcome = timeout(deadline, future) => outcome.map_err(|_| StepDeadline),
+            };
+            let message = continuation(outcome);
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {}
+                () = myself.post_to_incarnation(incarnation, message) => {}
+            }
+        });
+        handle
+    }
+
+    pub(crate) fn close_external_intake(&mut self) {
+        self.mailbox.close_external();
+    }
+
+    pub(crate) fn abort_steps(&self) {
+        self.steps.abort_all();
+    }
+
+    pub(crate) fn outstanding_steps(&self) -> usize {
+        self.steps.outstanding()
+    }
+
+    pub(crate) fn step_change_notify(&self) -> Arc<Notify> {
+        self.steps.change_notify()
+    }
+
     /// Returns the actor's unique identifier within the graph.
     pub fn id(&self) -> &str {
         &self.id
@@ -488,9 +668,23 @@ impl<M: Send + 'static> ActorContext<M> {
     /// [`MonitorEvent::Terminated`] when the target is permanently gone. A
     /// target that is already running delivers an immediate `Up` for the
     /// current incarnation; a target between incarnations stays silent until
-    /// the next start, so a watch never races a supervisor restart. Watches
-    /// are automatically cancelled when this observer incarnation stops or
-    /// restarts, so register them on start.
+    /// the next start, so a watch never races a supervisor restart.
+    ///
+    /// A watch belongs to the observing and watched actor memberships, not
+    /// either current incarnation. It survives restarts on both sides and is
+    /// delivered to whichever observer incarnation is running next. Calling
+    /// `watch` again for the same pair, even within one incarnation, returns
+    /// an alias of the existing watch without replacing its original `map`
+    /// closure or emitting another immediate `Up`. Cancelling any alias
+    /// cancels the pair. Explicit cancellation or permanent removal of either
+    /// membership ends it.
+    ///
+    /// A replacement observer does not receive a fresh snapshot of the
+    /// target. It must durably persist any observed state that it needs after
+    /// a crash. To request a fresh snapshot instead, cancel the existing watch
+    /// and register a new one: a running or terminated target responds
+    /// immediately, at the cost of discarding any transitions still staged on
+    /// the old watch.
     ///
     /// Delivery uses the observer's ordinary mailbox policy. A conflating
     /// mailbox may replace an unread event with a later one, so use a FIFO
@@ -505,11 +699,15 @@ impl<M: Send + 'static> ActorContext<M> {
         T: Send + 'static,
         F: FnMut(MonitorEvent) -> M + Send + 'static,
     {
-        let cancellation = self.monitors.child_token();
+        let (cancellation, install) = self.monitors.register(&target.monitors);
         let monitor = MonitorRef {
             cancellation: cancellation.clone(),
         };
+        if !install {
+            return monitor;
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            cancellation.cancel();
             return monitor;
         };
         // The guard closes the queue on drop, so the hub stops staging events
@@ -788,6 +986,99 @@ impl<M: Send + 'static> ActorContext<M> {
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             Err(error) => panic!("blocking task was cancelled: {error}"),
         }
+    }
+}
+
+pub(crate) struct ActorSteps {
+    inner: Arc<ActorStepsInner>,
+    cancellation: CancellationToken,
+}
+
+struct ActorStepsInner {
+    next_id: AtomicU64,
+    active: Mutex<HashMap<u64, CancellationToken>>,
+    changed: Arc<Notify>,
+    outstanding: Arc<AtomicU64>,
+}
+
+impl ActorSteps {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(ActorStepsInner {
+                next_id: AtomicU64::new(0),
+                active: Mutex::new(HashMap::new()),
+                changed: Arc::new(Notify::new()),
+                outstanding: Arc::new(AtomicU64::new(0)),
+            }),
+            // Unlike timers, this token is independent from graph shutdown:
+            // Drain actors keep their steps until their own deadlines.
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    fn start(&self) -> (u64, CancellationToken, Arc<AtomicBool>) {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let cancellation = self.cancellation.child_token();
+        self.inner
+            .active
+            .lock()
+            .expect("actor step registry poisoned")
+            .insert(id, cancellation.clone());
+        self.inner.outstanding.fetch_add(1, Ordering::Relaxed);
+        (id, cancellation, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn inner(&self) -> Arc<ActorStepsInner> {
+        Arc::clone(&self.inner)
+    }
+
+    pub(crate) fn gauge(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.inner.outstanding)
+    }
+
+    fn abort_all(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn outstanding(&self) -> usize {
+        self.inner
+            .active
+            .lock()
+            .expect("actor step registry poisoned")
+            .len()
+    }
+
+    fn change_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.inner.changed)
+    }
+}
+
+impl Drop for ActorSteps {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+struct StepGuard {
+    id: u64,
+    steps: Arc<ActorStepsInner>,
+    finished: Arc<AtomicBool>,
+}
+
+impl Drop for StepGuard {
+    fn drop(&mut self) {
+        if self
+            .steps
+            .active
+            .lock()
+            .expect("actor step registry poisoned")
+            .remove(&self.id)
+            .is_some()
+        {
+            self.steps.outstanding.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.finished.store(true, Ordering::Release);
+        self.steps.changed.notify_one();
     }
 }
 

@@ -25,6 +25,7 @@ captured from the same closure:
 
 ```rust,no_run
 use tokio_otp::prelude::Continue;
+use std::time::Duration;
 use tokio_otp::{ActorContext, ActorRef, ActorResult, Actor, GraphBuilder, Reply, Runtime, Topology};
 
 struct Order(String);
@@ -121,7 +122,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     orders.send(Order("business cards x100".into())).await?;
     orders.send(Order("flyers x500".into())).await?;
 
-    let shipped = shipping.call(ShippingMsg::Total).await?;
+    let shipped = shipping
+        .call(Duration::from_secs(1), ShippingMsg::Total)
+        .await?;
     println!("shipped {shipped} jobs");
 
     handle.shutdown_and_wait().await?;
@@ -329,7 +332,8 @@ newer message replaces a request before it is handled, the caller receives
 |--------|----------|
 | `send` | Waits for a bound mailbox and retries across expected restart windows; FIFO queues wait for capacity, while conflating mailboxes replace stale state. |
 | `try_send` | Returns immediately; FIFO queues report full capacity, while conflating mailboxes replace stale state. |
-| `call` | Sends a message carrying `Reply<T>` and awaits the reply; compose it with `tokio::time::timeout` for a caller-owned deadline. |
+| `call` | Sends a message carrying `Reply<T>` and awaits the reply until its required caller-owned timeout expires. |
+| `call_unbounded` | Sends a request without a local timeout; use only when another mechanism bounds the protocol lifetime. |
 
 Refs are bound to long-lived mailbox bindings, not one actor incarnation. A
 ref minted at wiring time keeps working across per-actor supervised

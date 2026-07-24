@@ -90,12 +90,11 @@ impl Actor for Guard {
             GuardMsg::BridgeRestarts { total } => self.report.bridge_restarts = total,
             GuardMsg::Probe => {
                 self.report.probes += 1;
-                let under_cap = tokio::time::timeout(
-                    PHASE_TIMEOUT,
-                    self.budget.call(|reply| BudgetMsg::UnderCap { reply }),
-                )
-                .await
-                .is_ok_and(|result| result.unwrap_or(false));
+                let under_cap = self
+                    .budget
+                    .call(PHASE_TIMEOUT, |reply| BudgetMsg::UnderCap { reply })
+                    .await
+                    .unwrap_or(false);
                 if self.model.probe() && under_cap {
                     self.failures.clear();
                     let _ = self.set_paused(false, ctx).await?;

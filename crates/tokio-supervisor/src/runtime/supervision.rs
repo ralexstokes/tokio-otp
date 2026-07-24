@@ -81,12 +81,14 @@ pub(crate) enum MembershipState {
 /// `instance` is a monotonically increasing identifier that distinguishes
 /// different slab occupants at the same key (e.g. after a child is removed and
 /// a new one is inserted at the recycled key). Combined with `generation`
-/// (which counts restarts of the *same* child spec), this pair uniquely
-/// identifies every task the supervisor has ever spawned.
+/// (which counts restarts of the *same* child spec), this pair identifies every
+/// task the supervisor has spawned unless the counter reaches its saturating
+/// `u64::MAX` limit. The instance is exposed to observers as
+/// [`ChildSnapshot::membership_epoch`].
 pub(crate) struct ChildEntry {
     pub(crate) id: String,
     pub(crate) formatted_path: String,
-    /// Unique instance counter for this slab slot. See struct-level docs.
+    /// Monotonic membership instance. See struct-level docs.
     pub(crate) instance: u64,
     pub(crate) runtime: ChildRuntime,
     last_exit: Option<ExitStatusView>,
@@ -596,7 +598,7 @@ impl SupervisorRuntime {
         }
     }
 
-    async fn add_child(&mut self, child: crate::child::ChildSpec) -> Result<(), ControlError> {
+    async fn add_child(&mut self, child: crate::child::ChildSpec) -> Result<u64, ControlError> {
         if self.state == SupervisorState::Stopping {
             return Err(ControlError::SupervisorStopping);
         }
@@ -628,13 +630,14 @@ impl SupervisorRuntime {
 
         let formatted_path = format_child_path(&self.meta.path_prefix, &id);
         let definition = Arc::new(child.into_definition());
+        let membership_epoch = self.next_child_instance;
         let key = self.children.insert(ChildEntry::new(
             id.clone(),
             formatted_path,
             definition,
             None,
             self.meta.default_restart_intensity,
-            self.next_child_instance,
+            membership_epoch,
         ));
         self.next_child_instance = self.next_child_instance.saturating_add(1);
         self.children_by_id.insert(id.clone(), key);
@@ -645,7 +648,7 @@ impl SupervisorRuntime {
             return Err(map_supervisor_error_to_control(error));
         }
 
-        Ok(())
+        Ok(membership_epoch)
     }
 
     async fn add_supervisor(
@@ -1538,6 +1541,7 @@ impl SupervisorRuntime {
 
             children.push(ChildSnapshot {
                 id: entry.id.clone(),
+                membership_epoch: entry.instance,
                 generation: entry.runtime.generation,
                 started: entry.runtime.has_reported_ready,
                 startup_aborted: entry.runtime.startup_aborted,

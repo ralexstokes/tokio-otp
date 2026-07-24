@@ -248,13 +248,20 @@ Children can also be added and removed while the supervisor is running,
 through the handle:
 
 ```rust,ignore
-handle.add_child(ChildSpec::new("night-shift-press", factory)).await?;
+let membership_epoch = handle
+    .add_child(ChildSpec::new("night-shift-press", factory))
+    .await?;
 handle.remove_child("night-shift-press").await?;
 
 // Control a nested supervisor through its restart-stable handle:
 let pressroom = handle.supervisor("pressroom").expect("configured above");
 pressroom.add_child(child).await?;
 ```
+
+`add_child` returns the membership epoch allocated atomically for that
+insertion. It is the same value published in the child's snapshot and remains
+the identity of that membership if the id is removed and reused before the
+caller next samples the tree.
 
 Supervisors can start empty or have their last child removed. At zero children
 they keep serving control commands and wait for the next `add_child` or an

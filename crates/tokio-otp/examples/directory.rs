@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error};
+use std::{collections::HashMap, error::Error, time::Duration};
 
 use tokio::sync::mpsc;
 use tokio_otp::{
@@ -78,7 +78,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     let receipts = directory
-        .call(|reply| DirectoryMsg::Get("receipts".to_owned(), reply))
+        .call(Duration::from_secs(1), |reply| {
+            DirectoryMsg::Get("receipts".to_owned(), reply)
+        })
         .await?
         .expect("receipts printer registered");
     receipts.send("order #42".to_owned()).await?;

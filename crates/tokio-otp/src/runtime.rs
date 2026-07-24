@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     future::Future,
     sync::{
         Arc, Mutex,
@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     ActorFactory, ActorOptions, ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor,
-    RunnableActorFactory,
+    RunnableActorFactory, SupervisorPathSegment,
 };
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{
@@ -17,14 +17,29 @@ use tokio_supervisor::{
     RestartWatch, ShutdownPolicy, Supervisor, SupervisorError, SupervisorEvent, SupervisorHandle,
     SupervisorSnapshot, SupervisorSpec,
 };
+use tokio_util::sync::CancellationToken;
 
 pub(crate) type ActorSubtrees = Vec<(String, Arc<ActorRuntimeState>)>;
 
 #[derive(Clone, Debug)]
+struct TrackedActor {
+    actor: RunnableActor,
+    membership_epoch: Option<u64>,
+    registration_path: Option<Vec<SupervisorPathSegment>>,
+}
+
+#[derive(Clone, Debug)]
+struct TrackedSubtree {
+    id: String,
+    state: Arc<ActorRuntimeState>,
+    membership_epoch: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ActorRuntimeState {
     actor_factory: RunnableActorFactory,
-    actors: Arc<Mutex<Vec<RunnableActor>>>,
-    subtrees: Arc<Mutex<ActorSubtrees>>,
+    actors: Arc<Mutex<Vec<TrackedActor>>>,
+    subtrees: Arc<Mutex<Vec<TrackedSubtree>>>,
 }
 
 impl ActorRuntimeState {
@@ -35,77 +50,186 @@ impl ActorRuntimeState {
     ) -> Self {
         Self {
             actor_factory,
-            actors: Arc::new(Mutex::new(actors)),
-            subtrees: Arc::new(Mutex::new(subtrees)),
+            actors: Arc::new(Mutex::new(
+                actors
+                    .into_iter()
+                    .map(|actor| TrackedActor {
+                        actor,
+                        membership_epoch: None,
+                        registration_path: None,
+                    })
+                    .collect(),
+            )),
+            subtrees: Arc::new(Mutex::new(
+                subtrees
+                    .into_iter()
+                    .map(|(id, state)| TrackedSubtree {
+                        id,
+                        state,
+                        membership_epoch: None,
+                    })
+                    .collect(),
+            )),
         }
     }
 
-    fn actor_stats(&self, supervisor: &SupervisorHandle) -> Vec<ActorStats> {
+    fn bind_initial_memberships(&self, supervisor: &SupervisorHandle) {
         let snapshot = supervisor.snapshot();
-        let child_ids = snapshot
+        let membership_epochs = snapshot
             .children
             .iter()
-            .map(|child| child.id.as_str())
-            .collect::<HashSet<_>>();
+            .map(|child| (child.id.as_str(), child.membership_epoch))
+            .collect::<HashMap<_, _>>();
 
         self.actors
             .lock()
             .expect("actor stats lock poisoned")
-            .retain(|actor| child_ids.contains(actor.label()));
-        self.subtrees
+            .iter_mut()
+            .filter(|entry| entry.membership_epoch.is_none())
+            .for_each(|entry| {
+                entry.membership_epoch = membership_epochs.get(entry.actor.label()).copied();
+            });
+        let subtrees = self
+            .subtrees
             .lock()
             .expect("actor subtree lock poisoned")
-            .retain(|(id, _)| child_ids.contains(id.as_str()));
+            .iter_mut()
+            .filter_map(|entry| {
+                if entry.membership_epoch.is_none() {
+                    entry.membership_epoch = membership_epochs.get(entry.id.as_str()).copied();
+                }
+                entry
+                    .membership_epoch
+                    .map(|_| (entry.id.clone(), Arc::clone(&entry.state)))
+            })
+            .collect::<Vec<_>>();
+        for (id, subtree) in subtrees {
+            if let Some(supervisor) = supervisor.supervisor(&id) {
+                subtree.bind_initial_memberships(&supervisor);
+            }
+        }
+    }
+
+    fn actor_stats(
+        &self,
+        supervisor: &SupervisorHandle,
+        supervisor_path: &[SupervisorPathSegment],
+        registration_path: &[SupervisorPathSegment],
+    ) -> Vec<ActorStats> {
+        let snapshot = supervisor.snapshot();
+        let child_identities = snapshot
+            .children
+            .iter()
+            .map(|child| {
+                (
+                    child.id.as_str(),
+                    (child.membership_epoch, child.generation),
+                )
+            })
+            .collect::<HashMap<_, _>>();
 
         let mut stats = self
             .actors
             .lock()
             .expect("actor stats lock poisoned")
             .iter()
-            .map(RunnableActor::stats)
+            .filter_map(|entry| {
+                let membership_epoch = entry.membership_epoch?;
+                let (current_epoch, _) = child_identities.get(entry.actor.label())?;
+                if membership_epoch != *current_epoch {
+                    return None;
+                }
+                if entry
+                    .registration_path
+                    .as_ref()
+                    .is_some_and(|path| path != registration_path)
+                {
+                    return None;
+                }
+                let mut stats = entry.actor.stats();
+                stats.supervisor_path = Some(supervisor_path.to_vec());
+                stats.membership_epoch = Some(membership_epoch);
+                Some(stats)
+            })
             .collect::<Vec<_>>();
         let subtrees = self
             .subtrees
             .lock()
             .expect("actor subtree lock poisoned")
             .iter()
-            .map(|(id, subtree)| (id.clone(), Arc::clone(subtree)))
+            .filter_map(|entry| {
+                let membership_epoch = entry.membership_epoch?;
+                let (current_epoch, generation) = child_identities.get(entry.id.as_str())?;
+                (membership_epoch == *current_epoch).then(|| {
+                    (
+                        entry.id.clone(),
+                        Arc::clone(&entry.state),
+                        membership_epoch,
+                        *generation,
+                    )
+                })
+            })
             .collect::<Vec<_>>();
-        for (id, subtree) in subtrees {
-            if let Some(supervisor) = supervisor.supervisor(&id) {
-                stats.extend(subtree.actor_stats(&supervisor));
+        for (id, subtree, membership_epoch, generation) in subtrees {
+            if let Some(nested_supervisor) = supervisor.supervisor(&id) {
+                let mut path = supervisor_path.to_vec();
+                let segment = SupervisorPathSegment {
+                    id: id.clone(),
+                    membership_epoch,
+                    generation,
+                };
+                path.push(segment.clone());
+                let mut nested_registration_path = registration_path.to_vec();
+                nested_registration_path.push(segment);
+                let subtree_stats =
+                    subtree.actor_stats(&nested_supervisor, &path, &nested_registration_path);
+                let parent_unchanged = supervisor.snapshot().child(&id).is_some_and(|child| {
+                    (child.membership_epoch, child.generation) == (membership_epoch, generation)
+                });
+                if parent_unchanged {
+                    stats.extend(subtree_stats);
+                }
             }
         }
         stats
     }
 
-    fn record_actor(&self, actor: RunnableActor) {
+    fn record_actor(
+        &self,
+        actor: RunnableActor,
+        membership_epoch: u64,
+        registration_path: Vec<SupervisorPathSegment>,
+    ) {
         let mut actors = self.actors.lock().expect("actor stats lock poisoned");
-        actors.retain(|existing| existing.label() != actor.label());
-        actors.push(actor);
+        actors.retain(|existing| existing.actor.label() != actor.label());
+        actors.push(TrackedActor {
+            actor,
+            membership_epoch: Some(membership_epoch),
+            registration_path: Some(registration_path),
+        });
     }
 
     fn forget_actor(&self, label: &str) {
         self.actors
             .lock()
             .expect("actor stats lock poisoned")
-            .retain(|actor| actor.label() != label);
+            .retain(|entry| entry.actor.label() != label);
     }
 
-    fn subtree(&self, id: &str) -> Option<Arc<ActorRuntimeState>> {
+    fn subtree(&self, id: &str, membership_epoch: u64) -> Option<Arc<ActorRuntimeState>> {
         self.subtrees
             .lock()
             .expect("actor subtree lock poisoned")
             .iter()
-            .find(|(subtree_id, _)| subtree_id == id)
-            .map(|(_, subtree)| Arc::clone(subtree))
+            .find(|entry| entry.id == id && entry.membership_epoch == Some(membership_epoch))
+            .map(|entry| Arc::clone(&entry.state))
     }
 
     fn forget_subtree(&self, id: &str) {
         self.subtrees
             .lock()
             .expect("actor subtree lock poisoned")
-            .retain(|(subtree_id, _)| subtree_id != id);
+            .retain(|entry| entry.id != id);
     }
 
     fn forget_child(&self, id: &str) {
@@ -197,9 +321,11 @@ mod sealed {
 /// Actor-aware extensions for any supervisor handle, including handles for
 /// nested supervisors.
 ///
-/// Import this trait to add a [`RunnableActor`] minted by
+/// Import this trait to connect actor-aware behavior to a raw supervisor
+/// handle. It can add a [`RunnableActor`] minted by
 /// [`Graph::dynamic_factory`](crate::Graph::dynamic_factory) directly to a
-/// running supervisor subtree.
+/// running supervisor subtree, or pump reliable restart counts into an actor
+/// mailbox with [`watch_restarts_to`](Self::watch_restarts_to).
 ///
 /// This trait is sealed and cannot be implemented outside `tokio-otp`.
 pub trait SupervisorHandleExt: sealed::Sealed {
@@ -223,6 +349,25 @@ pub trait SupervisorHandleExt: sealed::Sealed {
         actor: RunnableActor,
         options: DynamicActorOptions,
     ) -> impl Future<Output = Result<(), ControlError>> + Send;
+
+    /// Pumps this supervisor's cumulative restart count into `target`.
+    ///
+    /// This is the actor-mailbox form of [`SupervisorHandle::watch_restarts`].
+    /// Each observation is the cumulative number of restarts since this watch
+    /// was created. It is passed to `map` and delivered with the target's
+    /// ordinary mailbox policy. Cumulative values make latest-wins conflation
+    /// safe, and the latest value is sent again after a target restart so a
+    /// fresh incarnation can restore its state. Consumers should therefore
+    /// treat observations as idempotent totals, not additive deltas.
+    ///
+    /// The pump stops when the returned [`RestartWatchRef`] is dropped or
+    /// cancelled, when the watched supervisor reaches a terminal state, or
+    /// when the target actor permanently terminates. It follows the target
+    /// through ordinary actor restarts.
+    fn watch_restarts_to<M, F>(&self, target: &ActorRef<M>, map: F) -> RestartWatchRef
+    where
+        M: Send + 'static,
+        F: FnMut(u64) -> M + Send + 'static;
 }
 
 impl SupervisorHandleExt for SupervisorHandle {
@@ -240,12 +385,123 @@ impl SupervisorHandleExt for SupervisorHandle {
         );
 
         async move {
-            let result = self.add_child(child).await;
+            let result = self.add_child(child).await.map(|_| ());
             if result.is_err() {
                 termination.disarm();
             }
             result
         }
+    }
+
+    fn watch_restarts_to<M, F>(&self, target: &ActorRef<M>, map: F) -> RestartWatchRef
+    where
+        M: Send + 'static,
+        F: FnMut(u64) -> M + Send + 'static,
+    {
+        spawn_restart_watch_to(self.watch_restarts(), target.clone(), map)
+    }
+}
+
+/// Cancellation guard for a restart-count mailbox pump.
+///
+/// Created by [`RuntimeHandle::watch_restarts_to`] or
+/// [`SupervisorHandleExt::watch_restarts_to`]. Dropping the guard cancels the
+/// pump. It also stops automatically when the watched supervisor can no longer
+/// restart a child or when the target actor permanently terminates.
+#[must_use = "dropping the guard immediately cancels the restart watch"]
+pub struct RestartWatchRef {
+    cancellation: CancellationToken,
+}
+
+impl RestartWatchRef {
+    /// Cancels the restart-count pump.
+    ///
+    /// Cancellation is idempotent. A message already accepted by the target
+    /// mailbox cannot be retracted.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Returns whether the restart-count pump has been cancelled or stopped.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+}
+
+impl std::fmt::Debug for RestartWatchRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestartWatchRef")
+            .field("is_cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl Drop for RestartWatchRef {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn spawn_restart_watch_to<M, F>(
+    mut restarts: RestartWatch,
+    target: ActorRef<M>,
+    mut map: F,
+) -> RestartWatchRef
+where
+    M: Send + 'static,
+    F: FnMut(u64) -> M + Send + 'static,
+{
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+
+    tokio::spawn(async move {
+        let _cancel_on_exit = CancelRestartWatchOnDrop(task_cancellation.clone());
+        let Some(mut total) = (tokio::select! {
+            biased;
+            () = task_cancellation.cancelled() => None,
+            () = target.wait_terminated() => None,
+            count = restarts.next() => count,
+        }) else {
+            return;
+        };
+
+        loop {
+            let accepted_by = tokio::select! {
+                biased;
+                () = task_cancellation.cancelled() => break,
+                sent = target.send_to_incarnation(map(total)) => match sent {
+                    Ok(mailbox) => mailbox,
+                    Err(_) => break,
+                },
+                () = restarts.closed() => break,
+                () = target.wait_terminated() => break,
+            };
+
+            tokio::select! {
+                biased;
+                () = task_cancellation.cancelled() => break,
+                restarted = target.wait_incarnation_changed(&accepted_by) => {
+                    if !restarted {
+                        break;
+                    }
+                    // Re-send the cumulative total to the fresh incarnation.
+                }
+                count = restarts.next() => match count {
+                    Some(count) => total = total.saturating_add(count),
+                    None => break,
+                },
+            }
+        }
+    });
+
+    RestartWatchRef { cancellation }
+}
+
+struct CancelRestartWatchOnDrop(CancellationToken);
+
+impl Drop for CancelRestartWatchOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 
@@ -316,7 +572,9 @@ impl Runtime {
 
     /// Spawns the supervisor in the background and returns a combined handle.
     pub fn spawn(self) -> RuntimeHandle {
-        RuntimeHandle::new(self.supervisor.spawn(), self.actors)
+        let supervisor = self.supervisor.spawn();
+        self.actors.bind_initial_memberships(&supervisor);
+        RuntimeHandle::new(supervisor, self.actors)
     }
 }
 
@@ -335,11 +593,43 @@ impl std::fmt::Debug for Runtime {
 pub struct RuntimeHandle {
     supervisor: SupervisorHandle,
     actors: Arc<ActorRuntimeState>,
+    ancestors: Vec<(SupervisorHandle, String)>,
 }
 
 impl RuntimeHandle {
     fn new(supervisor: SupervisorHandle, actors: Arc<ActorRuntimeState>) -> Self {
-        Self { supervisor, actors }
+        Self {
+            supervisor,
+            actors,
+            ancestors: Vec::new(),
+        }
+    }
+
+    fn current_supervisor_path(&self) -> Option<Vec<SupervisorPathSegment>> {
+        let path = self
+            .ancestors
+            .iter()
+            .map(|(supervisor, id)| {
+                supervisor
+                    .snapshot()
+                    .child(id)
+                    .map(|child| SupervisorPathSegment {
+                        id: id.clone(),
+                        membership_epoch: child.membership_epoch,
+                        generation: child.generation,
+                    })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        self.ancestors
+            .iter()
+            .zip(&path)
+            .all(|((supervisor, id), expected)| {
+                supervisor.snapshot().child(id).is_some_and(|child| {
+                    child.membership_epoch == expected.membership_epoch
+                        && child.generation == expected.generation
+                })
+            })
+            .then_some(path)
     }
 
     /// Returns a clone of the underlying supervisor handle.
@@ -359,7 +649,7 @@ impl RuntimeHandle {
 
     /// Adds a new child to the supervisor at runtime.
     pub async fn add_child(&self, child: ChildSpec) -> Result<(), ControlError> {
-        self.supervisor.add_child(child).await
+        self.supervisor.add_child(child).await.map(|_| ())
     }
 
     /// Adds a nested supervisor at runtime.
@@ -383,8 +673,19 @@ impl RuntimeHandle {
     /// that were added through the raw supervisor APIs.
     pub fn subtree(&self, id: &str) -> Option<RuntimeHandle> {
         let supervisor = self.supervisor.supervisor(id)?;
-        let actors = self.actors.subtree(id)?;
-        Some(Self::new(supervisor, actors))
+        let membership_epoch = self
+            .supervisor
+            .snapshot()
+            .child(id)
+            .map(|child| child.membership_epoch)?;
+        let actors = self.actors.subtree(id, membership_epoch)?;
+        let mut ancestors = self.ancestors.clone();
+        ancestors.push((self.supervisor.clone(), id.to_owned()));
+        Some(Self {
+            supervisor,
+            actors,
+            ancestors,
+        })
     }
 
     /// Adds a supervised runtime actor from an incarnation factory and returns
@@ -432,6 +733,7 @@ impl RuntimeHandle {
         (actor, actor_ref): (RunnableActor, ActorRef<M>),
         options: DynamicActorOptions,
     ) -> Result<ActorRef<M>, ControlError> {
+        let registration_path = self.current_supervisor_path();
         let child = actor_child_spec(
             actor.clone(),
             options.restart,
@@ -439,8 +741,13 @@ impl RuntimeHandle {
             options.restart_intensity,
             options.resolved_remove_on_exit(),
         );
-        self.supervisor.add_child(child).await?;
-        self.actors.record_actor(actor);
+        let membership_epoch = self.supervisor.add_child(child).await?;
+        if let Some(registration_path) =
+            registration_path.filter(|path| self.current_supervisor_path().as_ref() == Some(path))
+        {
+            self.actors
+                .record_actor(actor, membership_epoch, registration_path);
+        }
 
         Ok(actor_ref)
     }
@@ -502,6 +809,28 @@ impl RuntimeHandle {
         self.supervisor.watch_restarts()
     }
 
+    /// Pumps the cumulative restart count into `target`.
+    ///
+    /// This is the actor-mailbox form of [`watch_restarts`](Self::watch_restarts).
+    /// Each observation is the cumulative number of restarts since this watch
+    /// was created. It is passed to `map` and delivered with the target's
+    /// ordinary mailbox policy. Cumulative values make latest-wins conflation
+    /// safe, and the latest value is sent again after a target restart so a
+    /// fresh incarnation can restore its state. Consumers should therefore
+    /// treat observations as idempotent totals, not additive deltas.
+    ///
+    /// The pump stops when the returned [`RestartWatchRef`] is dropped or
+    /// cancelled, when this runtime reaches a terminal state, or when the
+    /// target actor permanently terminates. It follows the target through
+    /// ordinary actor restarts.
+    pub fn watch_restarts_to<M, F>(&self, target: &ActorRef<M>, map: F) -> RestartWatchRef
+    where
+        M: Send + 'static,
+        F: FnMut(u64) -> M + Send + 'static,
+    {
+        spawn_restart_watch_to(self.watch_restarts(), target.clone(), map)
+    }
+
     /// Returns a clone of the latest supervisor snapshot.
     pub fn snapshot(&self) -> SupervisorSnapshot {
         self.supervisor.snapshot()
@@ -511,12 +840,16 @@ impl RuntimeHandle {
     /// subtrees. This runtime's actors come first, followed recursively by each
     /// subtree in declaration order.
     ///
-    /// Before sampling, tracked actors and subtrees are reconciled against the
-    /// current supervisor snapshot. This removes stale entries after raw child
-    /// removal or when a restarted subtree drops incarnation-local dynamic
-    /// children.
+    /// Samples are validated against the membership identity retained by each
+    /// registry entry. This excludes stale entries after raw child removal,
+    /// same-id replacement, or a subtree restart that drops incarnation-local
+    /// dynamic children.
     pub fn actor_stats(&self) -> Vec<ActorStats> {
-        self.actors.actor_stats(&self.supervisor)
+        let Some(registration_path) = self.current_supervisor_path() else {
+            return Vec::new();
+        };
+        self.actors
+            .actor_stats(&self.supervisor, &[], &registration_path)
     }
 
     /// Returns a watch receiver that updates when the snapshot changes.

@@ -100,9 +100,9 @@
 //! incarnation starts, `Down` when it exits, a final `Terminated` when the
 //! actor is permanently gone, and `Lagged` if a stalled observer misses
 //! transitions under overload — is mapped into the observer's message type and
-//! delivered through the ordinary mailbox. [`MonitorRef::cancel`] suppresses
-//! future delivery, and all watches are cancelled automatically when the
-//! observing actor stops or restarts.
+//! delivered through the ordinary mailbox. Watches survive restarts of both
+//! actors, [`MonitorRef::cancel`] suppresses future delivery, and permanent
+//! removal of either actor membership ends the watch.
 //!
 //! # Static topologies
 //!
@@ -166,7 +166,12 @@
 //!
 //! counter.send(CounterMsg::Add(2)).await.expect("send succeeded");
 //! counter.send(CounterMsg::Add(3)).await.expect("send succeeded");
-//! assert_eq!(counter.call(CounterMsg::Total).await?, 5);
+//! assert_eq!(
+//!     counter
+//!         .call(std::time::Duration::from_secs(1), CounterMsg::Total)
+//!         .await?,
+//!     5
+//! );
 //!
 //! stop.cancel();
 //! run.await??;
@@ -255,7 +260,8 @@ pub mod prelude {
         CallError, CancellationToken, Down, DownReason, DrainPolicy, Flow,
         Flow::{Continue, Stop},
         Graph, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply,
-        Runtime, RuntimeBuilder, RuntimeHandle, SendError, TimerRef,
+        RestartWatchRef, Runtime, RuntimeBuilder, RuntimeHandle, SendError, StepDeadline,
+        StepHandle, TimerRef,
     };
     pub use tokio_supervisor::{
         AutoShutdown, BackoffPolicy, ChildMembershipView, ChildSnapshot, ChildStateView,
@@ -272,10 +278,13 @@ pub use actor::{
     Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, ActorRunError,
     ActorSlot, ActorStats, BoxError, CallError, Down, DownReason, DrainPolicy, Flow, Graph,
     GraphBuildError, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor,
-    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, TimerRef, TryRecvError,
+    RebindPolicy, Reply, RunnableActor, RunnableActorFactory, SendError, StepDeadline, StepHandle,
+    SupervisorPathSegment, TimerRef, TryRecvError,
 };
 pub use builder::RuntimeBuilder;
-pub use runtime::{DynamicActorOptions, Runtime, RuntimeHandle, SupervisorHandleExt};
+pub use runtime::{
+    DynamicActorOptions, RestartWatchRef, Runtime, RuntimeHandle, SupervisorHandleExt,
+};
 pub use supervised_actors::SupervisedActors;
 pub use tokio_supervisor::{
     AutoShutdown, BackoffPolicy, ChildContext, ChildMembershipView, ChildResult, ChildSnapshot,

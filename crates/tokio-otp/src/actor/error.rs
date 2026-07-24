@@ -1,5 +1,11 @@
 use thiserror::Error;
 
+/// Indicates that an [`ActorContext::step`](crate::ActorContext::step)
+/// future did not complete before its required deadline.
+#[derive(Debug, Error, Clone, Copy, Eq, PartialEq)]
+#[error("actor step deadline elapsed")]
+pub struct StepDeadline;
+
 /// Errors returned by [`ActorContext::try_recv`](crate::ActorContext::try_recv).
 ///
 /// This crate-owned type keeps the actor mailbox API independent of Tokio's
@@ -84,6 +90,13 @@ pub enum CallError {
     /// The request message could not be delivered.
     #[error(transparent)]
     Send(#[from] SendError),
+    /// The timeout expired before the actor replied.
+    #[error("call to actor `{actor_id}` timed out")]
+    #[non_exhaustive]
+    Timeout {
+        /// Target actor id.
+        actor_id: String,
+    },
     /// The actor dropped the [`Reply`](crate::Reply) without answering.
     #[error("actor `{actor_id}` dropped the reply")]
     #[non_exhaustive]
