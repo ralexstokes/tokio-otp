@@ -63,26 +63,41 @@ the returned value rather than performing a later id-based snapshot lookup.
 ## Reliable Restart Counting
 
 For control logic that reacts to restart activity — an aggregate restart
-breaker, for example — use `watch_restarts()` instead of counting events:
+breaker, for example — pump the reliable counts directly into its actor:
 
 ```rust,ignore
-let mut restarts = handle.supervisor("venues").unwrap().watch_restarts();
-tokio::spawn(async move {
-    while let Some(newly_recorded) = restarts.next().await {
-        // Feed `newly_recorded` into a sliding-window breaker. A single
-        // observation may cover several restarts when snapshot updates
-        // were conflated; none are ever silently dropped.
-        breaker.send(HealthMsg::RestartsObserved { count: newly_recorded }).await?;
-    }
-});
+use tokio_otp::SupervisorHandleExt as _;
+
+let restart_watch = handle
+    .supervisor("venues")
+    .unwrap()
+    .watch_restarts_to(&breaker, |total| {
+        HealthMsg::RestartsObserved { total }
+    });
 ```
 
-`RestartWatch` tracks the monotonic `total_restarts` counter over the lossless
-snapshot channel, so unlike an event subscriber it cannot lose restarts to
-backpressure. Its scope is the watched supervisor's **direct children**: to
-cover a nested subtree, watch each nested supervisor's own handle
-(`handle.supervisor(id)`) — `total_restarts` does not aggregate across depth,
-whereas an event subscription forwards nested events (lossily).
+`watch_restarts_to` drives a `RestartWatch` over the monotonic
+`total_restarts` counter and sends a cumulative total (starting at zero when
+the pump is created) through the target's ordinary mailbox policy. Treat the
+value as idempotent state, not an additive delta. That contract survives both
+snapshot conflation and a latest-wins target mailbox: a newer message already
+contains every restart represented by the older one. After a target restart,
+the pump sends the latest total again so the fresh incarnation can restore its
+state. As with every actor send, acceptance is not an acknowledgement that the
+handler processed the message; use an application-level acknowledgement when
+processing itself must be confirmed.
+
+Keep the returned `RestartWatchRef` alive for as long as the pump is needed.
+Dropping or cancelling it stops the pump; it also stops when the target
+permanently terminates or the watched supervisor reaches a terminal state,
+even if delivery is currently waiting for mailbox capacity. An actor restart
+is not terminal, so the pump follows the stable ref into the next incarnation.
+
+Its scope is the watched supervisor's **direct children**: to cover a nested
+subtree, watch each nested supervisor's own handle (`handle.supervisor(id)`) —
+`total_restarts` does not aggregate across depth, whereas an event subscription
+forwards nested events (lossily). Call `watch_restarts()` directly when a
+non-actor consumer needs to await the counts itself.
 Nested supervisors carry the counter across their own incarnations, so a watch
 on a restart-stable handle keeps working through restarts of the watched
 supervisor itself, and `next()` returns `None` once the supervisor can never

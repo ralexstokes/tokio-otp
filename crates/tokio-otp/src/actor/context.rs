@@ -154,6 +154,14 @@ impl<M> ActorRef<M> {
     /// (acknowledgements, redelivery) are user protocol built with
     /// [`call`](Self::call) and [`Reply`], not transport features.
     pub async fn send(&self, message: M) -> Result<(), SendError> {
+        self.send_to_incarnation(message).await.map(drop)
+    }
+
+    /// Sends a message and returns the incarnation mailbox that accepted it.
+    ///
+    /// This is used by runtime adapters that need to restore cumulative state
+    /// after the target actor moves to a fresh incarnation.
+    pub(crate) async fn send_to_incarnation(&self, message: M) -> Result<MailboxRef<M>, SendError> {
         let mut binding = self.binding.clone();
         let mut message = message;
         let message_size = self
@@ -177,7 +185,7 @@ impl<M> ActorRef<M> {
                     self.stats.record_send(true);
                     self.stats.record_conflated(conflated);
                     self.record_message_size(message_size);
-                    return Ok(());
+                    return Ok(mailbox);
                 }
                 SendOutcome::Closed(returned) => {
                     self.observe_send(MessageOperation::Send, Some(SendRejection::MailboxClosed));
@@ -322,6 +330,27 @@ impl<M> ActorRef<M> {
                 .await
                 .map_err(|_| self.actor_terminated())?;
         }
+    }
+
+    pub(crate) async fn wait_terminated(&self) {
+        let mut binding = self.binding.clone();
+        loop {
+            if matches!(&*binding.borrow(), BindingState::Terminated) {
+                return;
+            }
+            if binding.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Waits until `stale` is replaced by another incarnation or the actor
+    /// permanently terminates. Returns whether a fresh incarnation appeared.
+    pub(crate) async fn wait_incarnation_changed(&self, stale: &MailboxRef<M>) -> bool {
+        let mut binding = self.binding.clone();
+        self.wait_for_rebind_or_termination(&mut binding, stale)
+            .await
+            .is_ok()
     }
 
     /// Waits until the stale mailbox is unbound and a fresh one is bound.

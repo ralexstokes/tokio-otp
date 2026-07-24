@@ -127,7 +127,7 @@ use std::{
 
 use metrics_util::debugging::Snapshotter;
 use tokio::time::Instant;
-use tokio_otp::prelude::*;
+use tokio_otp::{SupervisorHandleExt as _, prelude::*};
 
 use control::Control;
 use health::Health;
@@ -169,7 +169,7 @@ struct App {
     intake_gate: Arc<AtomicBool>,
     background_stop: CancellationToken,
     sampler: tokio::task::JoinHandle<()>,
-    event_pump: tokio::task::JoinHandle<()>,
+    restart_watch: RestartWatchRef,
 }
 
 #[tokio::main]
@@ -328,27 +328,10 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
     // the flat venue actor set built above. If venues ever gains nested
     // per-venue supervisors, watch each nested handle as well:
     // `total_restarts` does not aggregate across depth.
-    let mut venue_restarts = handle
+    let restart_watch = handle
         .supervisor("venues")
         .expect("venues supervisor")
-        .watch_restarts();
-    let event_health = health.clone();
-    let event_stop = background_stop.clone();
-    let event_pump = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = event_stop.cancelled() => break,
-                observed = venue_restarts.next() => match observed {
-                    Some(count) => {
-                        let _ = event_health
-                            .send(HealthMsg::RestartsObserved { count })
-                            .await;
-                    }
-                    None => break,
-                }
-            }
-        }
-    });
+        .watch_restarts_to(&health, |total| HealthMsg::RestartsObserved { total });
 
     Ok(App {
         handle,
@@ -364,7 +347,7 @@ async fn build_app(latency: LatencyRecorder) -> Result<App, AnyError> {
         intake_gate,
         background_stop,
         sampler,
-        event_pump,
+        restart_watch,
     })
 }
 
@@ -706,7 +689,7 @@ async fn phase_8(app: App, latency: LatencyRecorder, metrics: Snapshotter) -> Re
     // and support actors stopped. DrainPolicy alone does not order siblings.
     app.background_stop.cancel();
     app.sampler.await?;
-    app.event_pump.await?;
+    drop(app.restart_watch);
     tokio::time::timeout(Duration::from_secs(5), app.handle.shutdown_and_wait()).await??;
 
     let latency = latency.snapshot();
