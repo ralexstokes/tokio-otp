@@ -358,6 +358,9 @@ impl<M> MailboxRef<M> {
                     return SendOutcome::Closed(message);
                 }
                 match sender.reserve().await {
+                    // This narrows the close race after reserving capacity;
+                    // close_external is an intake signal, not a linearizable
+                    // fence against a sender already in this operation.
                     Ok(permit) if accepting_external.load(Ordering::Acquire) => {
                         permit.send(message);
                         SendOutcome::Accepted { conflated: 0 }

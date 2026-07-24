@@ -432,3 +432,112 @@ async fn step_postback_uses_mailbox_backpressure() {
     assert_eq!(receiver.recv().await, Some("done"));
     runtime.shutdown_and_wait().await.unwrap();
 }
+
+#[tokio::test]
+async fn step_postback_uses_conflating_mailbox_policy() {
+    let handler_release = Arc::new(Notify::new());
+    let step_release = Arc::new(Notify::new());
+    let step_registered = Arc::new(Notify::new());
+    let (observed, mut receiver) = mpsc::unbounded_channel();
+    let mut graph = GraphBuilder::new();
+    let actor = graph.actor_with_options(
+        "conflating-step",
+        {
+            let handler_release = handler_release.clone();
+            let step_release = step_release.clone();
+            let step_registered = step_registered.clone();
+            move || BackpressureActor {
+                handler_release: handler_release.clone(),
+                step_release: step_release.clone(),
+                step_registered: step_registered.clone(),
+                observed: observed.clone(),
+            }
+        },
+        ActorOptions::new().mailbox(MailboxMode::Conflate),
+    );
+    let runtime = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+    runtime.wait_started().await.unwrap();
+    actor.send(BackpressureMsg::Start).await.unwrap();
+    step_registered.notified().await;
+    actor.send(BackpressureMsg::Fill).await.unwrap();
+    step_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while actor.stats().messages_conflated != 1 || actor.stats().outstanding_steps != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    handler_release.notify_one();
+    assert_eq!(receiver.recv().await, Some("done"));
+    assert!(receiver.try_recv().is_err());
+    runtime.shutdown_and_wait().await.unwrap();
+}
+
+#[derive(Debug)]
+enum DeadlineDrainMsg {
+    Start,
+    Done(Result<(), StepDeadline>),
+}
+
+#[derive(Clone)]
+struct DeadlineDrainActor {
+    registered: Arc<Notify>,
+    observed: mpsc::UnboundedSender<Result<(), StepDeadline>>,
+}
+
+impl Actor for DeadlineDrainActor {
+    type Msg = DeadlineDrainMsg;
+
+    async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
+        match message {
+            DeadlineDrainMsg::Start => {
+                ctx.step(
+                    Duration::from_millis(100),
+                    pending::<()>(),
+                    DeadlineDrainMsg::Done,
+                );
+                self.registered.notify_one();
+            }
+            DeadlineDrainMsg::Done(outcome) => self.observed.send(outcome).unwrap(),
+        }
+        Ok(())
+    }
+
+    fn drain_policy(&self) -> DrainPolicy {
+        DrainPolicy::Drain
+    }
+}
+
+#[tokio::test]
+async fn drain_waits_for_step_deadline_and_handles_its_postback() {
+    let registered = Arc::new(Notify::new());
+    let (observed, mut receiver) = mpsc::unbounded_channel();
+    let mut graph = GraphBuilder::new();
+    let actor = graph.add({
+        let registered = registered.clone();
+        move || DeadlineDrainActor {
+            registered: registered.clone(),
+            observed: observed.clone(),
+        }
+    });
+    let runtime = Runtime::builder()
+        .graph(graph.build().unwrap())
+        .build()
+        .unwrap()
+        .spawn();
+    runtime.wait_started().await.unwrap();
+    actor.send(DeadlineDrainMsg::Start).await.unwrap();
+    registered.notified().await;
+    let shutdown = tokio::spawn(async move { runtime.shutdown_and_wait().await });
+    let outcome = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome, Err(StepDeadline)));
+    shutdown.await.unwrap().unwrap();
+}

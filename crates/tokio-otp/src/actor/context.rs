@@ -570,12 +570,15 @@ impl<M: Send + 'static> ActorContext<M> {
         let steps = self.steps.inner();
         let myself = self.myself.clone();
         let incarnation = self.incarnation.clone();
+        let guard = StepGuard {
+            id,
+            steps,
+            finished,
+        };
         tokio::spawn(async move {
-            let _guard = StepGuard {
-                id,
-                steps,
-                finished,
-            };
+            // Constructed before spawning so dropping an unpolled task still
+            // unregisters the step and marks its handle finished.
+            let _guard = guard;
             let outcome = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return,

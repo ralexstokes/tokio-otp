@@ -136,7 +136,12 @@ impl<H: Actor> RawActor for H {
                                         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
                                             if ctx.outstanding_steps() == 0 =>
                                         {
-                                            None
+                                            // A final step can enqueue its postback after the
+                                            // first poll and then deregister before the gauge
+                                            // check. Deregistration synchronizes through the
+                                            // step registry, so re-poll after observing zero
+                                            // before declaring the mailbox quiescent.
+                                            ctx.mailbox.try_recv().ok()
                                         }
                                         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                                             let changed = ctx.step_change_notify();
