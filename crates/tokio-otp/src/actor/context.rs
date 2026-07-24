@@ -294,6 +294,18 @@ impl<M> ActorRef<M> {
         }
     }
 
+    pub(crate) async fn wait_terminated(&self) {
+        let mut binding = self.binding.clone();
+        loop {
+            if matches!(&*binding.borrow(), BindingState::Terminated) {
+                return;
+            }
+            if binding.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
     /// Waits until the stale mailbox is unbound and a fresh one is bound.
     ///
     /// Waiting for the stale mailbox to clear first avoids busy-looping in

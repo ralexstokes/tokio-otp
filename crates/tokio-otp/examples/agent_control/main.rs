@@ -156,8 +156,7 @@ struct App {
     tool_host: ActorRef<ToolHostMsg>,
     proof: Proof,
     gate: Arc<AtomicBool>,
-    background_stop: CancellationToken,
-    restart_pump: tokio::task::JoinHandle<()>,
+    restart_watch: RestartWatchRef,
 }
 
 #[tokio::main]
@@ -298,24 +297,8 @@ async fn build_app() -> Result<App, AnyError> {
         })
         .await?;
 
-    let background_stop = CancellationToken::new();
-    let mut restarts = gateway.watch_restarts();
-    let restart_guard = guard.clone();
-    let restart_stop = background_stop.clone();
-    let restart_pump = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                () = restart_stop.cancelled() => break,
-                total = restarts.next() => match total {
-                    Some(total) => {
-                        let _ = restart_guard.send(GuardMsg::BridgeRestarts { total }).await;
-                    }
-                    None => break,
-                }
-            }
-        }
-    });
+    let restart_watch =
+        gateway.watch_restarts_to(&guard, |total| GuardMsg::BridgeRestarts { total });
 
     Ok(App {
         handle,
@@ -331,8 +314,7 @@ async fn build_app() -> Result<App, AnyError> {
         tool_host,
         proof,
         gate,
-        background_stop,
-        restart_pump,
+        restart_watch,
     })
 }
 
@@ -773,8 +755,7 @@ async fn phase_8(app: App, latency: LatencyRecorder) -> Result<(), AnyError> {
     let recursive_stats = app.handle.actor_stats();
     let session_stats = app.sessions.actor_stats();
     let final_snapshot = app.handle.snapshot();
-    app.background_stop.cancel();
-    app.restart_pump.await?;
+    drop(app.restart_watch);
     tokio::time::timeout(Duration::from_secs(5), app.handle.shutdown_and_wait()).await??;
     let latency = latency.snapshot();
     assert!(
