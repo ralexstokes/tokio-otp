@@ -145,6 +145,14 @@ The [`Strategy`] decides who is affected when a child fails:
   it are stopped, then eligible children in that suffix restart in declaration
   order. Earlier children remain running. Use this for ordered pipelines.
 
+For `RestForOne`, declaration order is therefore part of the fault model. If
+children are declared as `outbound`, `progress`, `inbound`, an `inbound`
+failure restarts only `inbound`: the last child has no later siblings. If a
+failing bridge must take its delivery pair down with it, declare the bridge
+first so the pair follows it, or use `OneForAll` when a failure in any member
+must restart the whole group. Phase 3 of the runnable [`agent_control`
+example] pins the last-child behavior with per-child restart-count assertions.
+
 ## Shutdown policies
 
 When a child must stop — on supervisor shutdown, removal, or a group restart —
@@ -276,3 +284,4 @@ actors](dynamic-actors.md) chapter.
 [`Strategy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.Strategy.html
 [`ShutdownPolicy`]: https://stokes.io/tokio-otp/api/tokio_supervisor/struct.ShutdownPolicy.html
 [`AutoShutdown`]: https://stokes.io/tokio-otp/api/tokio_supervisor/enum.AutoShutdown.html
+[`agent_control` example]: https://github.com/ralexstokes/tokio-otp/tree/main/crates/tokio-otp/examples/agent_control

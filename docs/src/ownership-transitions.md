@@ -65,6 +65,32 @@ envelopes. Consumers should deduplicate stable envelope or effect keys. The
 `agent_control` chat simulator, journal, and tool host demonstrate those three
 pieces.
 
+## Scale rehydration without blocking appends
+
+The example keeps appends, reports, and every session `Replay` request in one
+journal actor. That makes ordering straightforward, but it also makes the
+mailbox the serialization point: a cold-start or restart storm queues all
+rehydration reads behind earlier appends and replays. Watch the journal's
+mailbox depth and message-processing latency so this pressure is visible before
+it stretches recovery time or delays acknowledgements.
+
+At production scale, separate or reduce the replay work while preserving an
+explicit consistency boundary:
+
+- **Partition by session or tenant.** Route appends and replays for the same key
+  to the same journal shard, allowing unrelated sessions to recover in
+  parallel.
+- **Snapshot state.** Periodically persist a compact session snapshot and replay
+  only the journal tail after its sequence number.
+- **Add a read-only replay path.** Keep appends serialized through the writer,
+  but serve replay from a database read connection, replica, or immutable log
+  segments that do not share the writer's mailbox. Define which committed
+  sequence a reader must observe before a recovered session accepts traffic.
+
+These are application storage choices, not actor-runtime guarantees. Splitting
+reads from writes without a sequence or snapshot boundary can make recovery
+fast but stale.
+
 `remove_child` deliberately does not return undelivered `Vec<M>` values. The
 supervisor handle is untyped, such a return would require downcasting, and it
 would not cover crashes or already-executed effects. Delivery guarantees belong

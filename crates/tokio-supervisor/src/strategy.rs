@@ -16,5 +16,11 @@ pub enum Strategy {
     /// The exited child and every child declared after it are stopped and
     /// restarted. Children declared before it are unaffected. Use this for
     /// ordered pipelines where downstream state depends on upstream output.
+    ///
+    /// Declaration order defines the restart group: a failure in the last
+    /// child restarts only that child. Put a component before every dependent
+    /// sibling if its failure must restart them too, or use
+    /// [`OneForAll`](Self::OneForAll) when the whole group must restart after
+    /// any member fails.
     RestForOne,
 }
