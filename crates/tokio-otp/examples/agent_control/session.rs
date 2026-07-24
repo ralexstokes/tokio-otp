@@ -302,13 +302,6 @@ impl Actor for Session {
     async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
         match message {
             SessionMsg::Rehydrate => {
-                // Deliberate cut: a restarted incarnation cannot re-watch a
-                // still-live run child, because watches die with the observer
-                // and RuntimeHandle offers no typed-ref lookup by child id —
-                // the ActorRef<RunMsg> is only minted by add_actor itself. In
-                // this example the gap is unobservable (sessions never restart
-                // while a run is live); a production owner would need to park
-                // run refs outside the incarnation or a library-side lookup.
                 let replay = self
                     .journal
                     .call(PHASE_TIMEOUT, |reply| JournalMsg::Replay {

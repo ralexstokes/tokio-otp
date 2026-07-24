@@ -27,7 +27,7 @@ use crate::actor::{
     builder::{ActorOptions, DEFAULT_ACTOR_SHUTDOWN_TIMEOUT, DEFAULT_MAILBOX_CAPACITY},
     context::{ActorContext, ActorRef, ActorSteps, ActorTimers},
     factory::ActorFactory,
-    monitor::{ActorMonitors, DownReason, MonitorExitGuard},
+    monitor::{DownReason, MonitorExitGuard},
     observability::{ActorExitStatus, GraphObservability, anonymous_graph_name},
     raw::{ActorResult, BoxError, RawActor},
 };
@@ -69,7 +69,7 @@ where
         Box::pin(async move {
             let actor_shutdown = start.shutdown;
             let timers = ActorTimers::new(&actor_shutdown);
-            let monitors = ActorMonitors::new(&actor_shutdown);
+            let monitors = binding.outbound_monitors();
             let observability = start.observability;
             let (sender, mailbox) = mailbox(&mailbox_mode, start.mailbox_capacity);
             let actor_id = binding.actor_id().clone();
