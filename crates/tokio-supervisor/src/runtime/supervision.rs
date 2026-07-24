@@ -655,7 +655,7 @@ impl SupervisorRuntime {
         &mut self,
         id: String,
         supervisor: SupervisorSpec,
-    ) -> Result<(), ControlError> {
+    ) -> Result<u64, ControlError> {
         if self.state == SupervisorState::Stopping {
             return Err(ControlError::SupervisorStopping);
         }
@@ -684,13 +684,14 @@ impl SupervisorRuntime {
         let stable = supervisor.supervisor.stable_channels(false);
         let definition = Arc::new(ChildDefinition::supervisor(id.clone(), supervisor));
         let formatted_path = format_child_path(&self.meta.path_prefix, &id);
+        let membership_epoch = self.next_child_instance;
         let key = self.children.insert(ChildEntry::new(
             id.clone(),
             formatted_path,
             definition,
             Some(Arc::clone(&stable)),
             self.meta.default_restart_intensity,
-            self.next_child_instance,
+            membership_epoch,
         ));
         self.next_child_instance = self.next_child_instance.saturating_add(1);
         self.children_by_id.insert(id.clone(), key);
@@ -709,7 +710,7 @@ impl SupervisorRuntime {
             return Err(map_supervisor_error_to_control(error));
         }
 
-        Ok(())
+        Ok(membership_epoch)
     }
 
     pub(crate) fn finish(&mut self) {

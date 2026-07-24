@@ -256,8 +256,8 @@ pub mod prelude {
     #[cfg(feature = "derive")]
     pub use crate::Topology;
     pub use crate::{
-        Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, BoxError,
-        CallError, CancellationToken, Down, DownReason, DrainPolicy, Flow,
+        Actor, ActorContext, ActorFactory, ActorOptions, ActorRef, ActorResult, AddSubtreeError,
+        BoxError, CallError, CancellationToken, Down, DownReason, DrainPolicy, Flow,
         Flow::{Continue, Stop},
         Graph, GraphBuilder, MailboxMode, MessageSize, MonitorEvent, MonitorRef, RawActor, Reply,
         RestartWatchRef, Runtime, RuntimeBuilder, RuntimeHandle, SendError, StepDeadline,
@@ -283,7 +283,8 @@ pub use actor::{
 };
 pub use builder::RuntimeBuilder;
 pub use runtime::{
-    DynamicActorOptions, RestartWatchRef, Runtime, RuntimeHandle, SupervisorHandleExt,
+    AddSubtreeError, DynamicActorOptions, RestartWatchRef, Runtime, RuntimeHandle,
+    SupervisorHandleExt,
 };
 pub use supervised_actors::SupervisedActors;
 pub use tokio_supervisor::{

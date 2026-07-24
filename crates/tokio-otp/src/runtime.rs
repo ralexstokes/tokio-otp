@@ -11,6 +11,7 @@ use crate::{
     ActorFactory, ActorOptions, ActorRef, ActorStats, RawActor, RebindPolicy, RunnableActor,
     RunnableActorFactory, SupervisorPathSegment,
 };
+use thiserror::Error;
 use tokio::sync::{broadcast, watch};
 use tokio_supervisor::{
     ChildSpec, ControlError, RestartIntensity, RestartMonitor, RestartMonitorError, RestartPolicy,
@@ -48,7 +49,7 @@ impl ActorRuntimeState {
         actors: Vec<RunnableActor>,
         subtrees: ActorSubtrees,
     ) -> Self {
-        Self {
+        let state = Self {
             actor_factory,
             actors: Arc::new(Mutex::new(
                 actors
@@ -60,17 +61,12 @@ impl ActorRuntimeState {
                     })
                     .collect(),
             )),
-            subtrees: Arc::new(Mutex::new(
-                subtrees
-                    .into_iter()
-                    .map(|(id, state)| TrackedSubtree {
-                        id,
-                        state,
-                        membership_epoch: None,
-                    })
-                    .collect(),
-            )),
+            subtrees: Arc::new(Mutex::new(Vec::with_capacity(subtrees.len()))),
+        };
+        for (id, subtree) in subtrees {
+            state.record_subtree(id, subtree, None);
         }
+        state
     }
 
     fn bind_initial_memberships(&self, supervisor: &SupervisorHandle) {
@@ -206,6 +202,21 @@ impl ActorRuntimeState {
             actor,
             membership_epoch: Some(membership_epoch),
             registration_path: Some(registration_path),
+        });
+    }
+
+    pub(crate) fn record_subtree(
+        &self,
+        id: String,
+        state: Arc<ActorRuntimeState>,
+        membership_epoch: impl Into<Option<u64>>,
+    ) {
+        let mut subtrees = self.subtrees.lock().expect("actor subtree lock poisoned");
+        subtrees.retain(|existing| existing.id != id);
+        subtrees.push(TrackedSubtree {
+            id,
+            state,
+            membership_epoch: membership_epoch.into(),
         });
     }
 
@@ -596,6 +607,18 @@ pub struct RuntimeHandle {
     ancestors: Vec<(SupervisorHandle, String)>,
 }
 
+/// Errors returned when adding an actor-aware runtime subtree dynamically.
+#[derive(Debug, Error, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AddSubtreeError {
+    /// The runtime builder contains an invalid supervisor configuration.
+    #[error("failed to build runtime subtree: {0}")]
+    Build(#[from] tokio_supervisor::SupervisorBuildError),
+    /// The parent supervisor rejected the dynamic child operation.
+    #[error("failed to add runtime subtree: {0}")]
+    Control(#[from] ControlError),
+}
+
 impl RuntimeHandle {
     fn new(supervisor: SupervisorHandle, actors: Arc<ActorRuntimeState>) -> Self {
         Self {
@@ -652,13 +675,61 @@ impl RuntimeHandle {
         self.supervisor.add_child(child).await.map(|_| ())
     }
 
-    /// Adds a nested supervisor at runtime.
+    /// Adds a raw nested supervisor at runtime.
+    ///
+    /// On success, returns the membership epoch assigned atomically with the
+    /// insertion. Use [`add_subtree`](Self::add_subtree) when the nested
+    /// supervisor should participate in runtime actor discovery and stats.
     pub async fn add_supervisor(
         &self,
         id: impl Into<String>,
         supervisor: impl Into<SupervisorSpec>,
-    ) -> Result<(), ControlError> {
+    ) -> Result<u64, ControlError> {
         self.supervisor.add_supervisor(id, supervisor).await
+    }
+
+    /// Builds and adds an actor-aware runtime subtree dynamically.
+    ///
+    /// The returned handle can add actors or further subtrees, and recursive
+    /// [`actor_stats`](Self::actor_stats) include the new subtree. Removing the
+    /// child from this handle forgets its registry node; retained subtree
+    /// handles then fail control operations with [`ControlError::Unavailable`].
+    ///
+    /// If the subtree itself restarts, the static graph supplied by `builder`
+    /// is recreated, while children added later through the returned handle
+    /// are lost and must be replayed by the application. If this handle's
+    /// supervisor restarts, the dynamically added subtree is not recreated.
+    ///
+    /// Restart intensity remains tracked per child across this boundary.
+    /// Shutdown keeps the existing concurrent teardown behavior under the
+    /// parent's shared deadline.
+    pub async fn add_subtree(
+        &self,
+        id: impl Into<String>,
+        builder: crate::RuntimeBuilder,
+    ) -> Result<RuntimeHandle, AddSubtreeError> {
+        let id = id.into();
+        let (nested_supervisor, nested_actors) = builder.build()?.into_parts();
+        let membership_epoch = self
+            .supervisor
+            .add_supervisor(id.clone(), nested_supervisor)
+            .await?;
+        self.actors
+            .record_subtree(id.clone(), Arc::clone(&nested_actors), membership_epoch);
+
+        let nested_handle = self
+            .supervisor
+            .supervisor(&id)
+            .ok_or(ControlError::Unavailable)?;
+        nested_actors.bind_initial_memberships(&nested_handle);
+
+        let mut ancestors = self.ancestors.clone();
+        ancestors.push((self.supervisor.clone(), id));
+        Ok(Self {
+            supervisor: nested_handle,
+            actors: nested_actors,
+            ancestors,
+        })
     }
 
     /// Returns the stable handle for a direct nested supervisor.

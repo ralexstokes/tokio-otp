@@ -180,10 +180,18 @@ async fn dynamically_added_nested_supervisor_can_be_removed() {
     let handle = outer.spawn();
     let mut events = handle.subscribe();
 
-    handle
+    let membership_epoch = handle
         .add_supervisor("nested", nested)
         .await
         .expect("dynamic nested child should be accepted");
+    assert_eq!(
+        handle
+            .snapshot()
+            .child("nested")
+            .expect("dynamic nested child is visible")
+            .membership_epoch,
+        membership_epoch
+    );
     common::recv_event(&mut started_rx).await;
 
     handle
