@@ -116,7 +116,7 @@ impl Actor for OrderRouter {
                             SubmitDisposition::Confirmed,
                             SubmitResult::Placed(key.clone()),
                         ),
-                        Err(CallError::Timeout { .. }) => (
+                        Err(CallError::Timeout { .. } | CallError::ReplyDropped { .. }) => (
                             SubmitDisposition::Unknown,
                             SubmitResult::Unknown(key.clone()),
                         ),
