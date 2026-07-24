@@ -84,7 +84,7 @@ pub enum CallError {
     /// The request message could not be delivered.
     #[error(transparent)]
     Send(#[from] SendError),
-    /// The deadline expired before the actor replied.
+    /// The timeout expired before the actor replied.
     #[error("call to actor `{actor_id}` timed out")]
     #[non_exhaustive]
     Timeout {

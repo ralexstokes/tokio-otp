@@ -7,7 +7,7 @@ use std::{
 
 use tokio::{
     sync::{oneshot, watch},
-    time::{Instant, MissedTickBehavior, timeout},
+    time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -218,7 +218,7 @@ impl<M> ActorRef<M> {
     /// Sends a request and waits for the actor to answer through the
     /// [`Reply`] carried inside the message.
     ///
-    /// The deadline bounds the entire operation, including waiting for a
+    /// The timeout bounds the entire operation, including waiting for a
     /// mailbox binding, FIFO mailbox capacity, and the reply:
     ///
     /// ```no_run
@@ -237,7 +237,7 @@ impl<M> ActorRef<M> {
     ///
     /// This waits for the same actor binding conditions as [`send`](Self::send),
     /// including FIFO mailbox capacity and expected restart windows. If the
-    /// deadline expires before the request is accepted, the request is
+    /// timeout expires before the request is accepted, the request is
     /// dropped. Once the mailbox accepts it, a timeout cannot retract it: the
     /// actor may still process the request and a late reply is discarded.
     ///
@@ -257,7 +257,7 @@ impl<M> ActorRef<M> {
     /// An actor processes one message at a time, so a handler that awaits
     /// `call` stops its own mailbox for the full round-trip: every queued
     /// message, however urgent or unrelated, waits behind the outstanding
-    /// request for up to the call's deadline. This is the actor-model
+    /// request for up to the call's timeout. This is the actor-model
     /// equivalent of blocking inside an Erlang `gen_server` callback, and in
     /// fan-out or routing actors it turns one slow callee into head-of-line
     /// blocking for all traffic through the intermediary. Pipeline instead:
@@ -268,19 +268,19 @@ impl<M> ActorRef<M> {
     /// chapter covers the pattern.
     pub async fn call<T>(
         &self,
-        deadline: Duration,
+        timeout: Duration,
         message: impl FnOnce(Reply<T>) -> M,
     ) -> Result<T, CallError> {
-        timeout(deadline, self.call_unbounded(message))
+        tokio::time::timeout(timeout, self.call_unbounded(message))
             .await
             .map_err(|_| CallError::Timeout {
                 actor_id: self.actor_id.to_string(),
             })?
     }
 
-    /// Sends a request and waits without a deadline for the actor to answer.
+    /// Sends a request and waits without a timeout for the actor to answer.
     ///
-    /// Prefer [`call`](Self::call), whose required deadline bounds mailbox
+    /// Prefer [`call`](Self::call), whose required timeout bounds mailbox
     /// backpressure, restart windows, and reply latency. This escape hatch is
     /// intended only for protocols whose lifetime is deliberately bounded by
     /// some other mechanism.
