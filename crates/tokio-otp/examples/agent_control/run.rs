@@ -111,12 +111,13 @@ impl AgentRun {
     async fn start_tool(&self, index: usize, ctx: &ActorContext<RunMsg>) -> ActorResult {
         let call = self.tools[index].clone();
         let key = format!("{}:{}:{index}", self.chat, self.task);
-        self.append(JournalEntry::ToolIntent {
-            task: self.task,
-            key: key.clone(),
-            call: call.name.clone(),
-        })
-        .await?;
+        let _ = self
+            .append(JournalEntry::ToolIntent {
+                task: self.task,
+                key: key.clone(),
+                call: call.name.clone(),
+            })
+            .await?;
         let tool_host = self.tool_host.clone();
         let myself = ctx.myself();
         tokio::spawn(async move {
@@ -192,20 +193,22 @@ impl Actor for AgentRun {
                 let turn = match result {
                     Ok(turn) => turn,
                     Err(ModelError::Cancelled) => {
-                        self.append(JournalEntry::Checkpoint {
-                            task: self.task,
-                            state: "model step cancelled".into(),
-                        })
-                        .await?;
+                        let _ = self
+                            .append(JournalEntry::Checkpoint {
+                                task: self.task,
+                                state: "model step cancelled".into(),
+                            })
+                            .await?;
                         return self.finish(RunOutput::Cancelled).await;
                     }
                     Err(ModelError::RateLimited | ModelError::Deadline) => {
-                        self.append(JournalEntry::Checkpoint {
-                            task: self.task,
-                            state: "retryable model failure".into(),
-                        })
-                        .await?;
-                        self.finish(RunOutput::RetryableFailure).await?;
+                        let _ = self
+                            .append(JournalEntry::Checkpoint {
+                                task: self.task,
+                                state: "retryable model failure".into(),
+                            })
+                            .await?;
+                        let _ = self.finish(RunOutput::RetryableFailure).await?;
                         return Err(std::io::Error::other("model provider unavailable").into());
                     }
                 };
@@ -223,37 +226,40 @@ impl Actor for AgentRun {
                     .await?;
                 match turn.action {
                     ModelAction::Plan(plan) => {
-                        self.append(JournalEntry::Plan {
-                            task: self.task,
-                            text: plan.clone(),
-                        })
-                        .await?;
+                        let _ = self
+                            .append(JournalEntry::Plan {
+                                task: self.task,
+                                text: plan.clone(),
+                            })
+                            .await?;
                         return self.finish(RunOutput::Planned(plan)).await;
                     }
                     ModelAction::Tools(tools) => {
                         self.tools = tools;
-                        self.start_tool(0, ctx).await?;
+                        let _ = self.start_tool(0, ctx).await?;
                     }
                     ModelAction::Complete(output) => {
                         return self.finish(RunOutput::Engineered(output)).await;
                     }
                     ModelAction::Review(approved) => {
-                        self.append(JournalEntry::Review {
-                            task: self.task,
-                            approved,
-                        })
-                        .await?;
+                        let _ = self
+                            .append(JournalEntry::Review {
+                                task: self.task,
+                                approved,
+                            })
+                            .await?;
                         return self.finish(RunOutput::Reviewed(approved)).await;
                     }
                 }
             }
             RunMsg::ToolResult { index, key, result } => {
-                self.append(JournalEntry::ToolEffect {
-                    task: self.task,
-                    key,
-                    outcome: result,
-                })
-                .await?;
+                let _ = self
+                    .append(JournalEntry::ToolEffect {
+                        task: self.task,
+                        key,
+                        outcome: result,
+                    })
+                    .await?;
                 if self.user_text.contains("PANIC-MIDRUN")
                     && self.role == Role::Engineer
                     && self.attempt == 0
@@ -263,7 +269,7 @@ impl Actor for AgentRun {
                 }
                 let next = index + 1;
                 if next < self.tools.len() {
-                    self.start_tool(next, ctx).await?;
+                    let _ = self.start_tool(next, ctx).await?;
                 } else {
                     self.turn += 1;
                     ctx.continue_with(RunMsg::Step);

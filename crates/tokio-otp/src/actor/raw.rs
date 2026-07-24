@@ -9,6 +9,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Controls whether a handler actor continues receiving messages or stops
 /// cleanly.
+#[must_use = "a Stop flow must be propagated or discarded explicitly"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Flow {
