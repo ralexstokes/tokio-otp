@@ -47,6 +47,8 @@ use tokio_supervisor::{SupervisorEvent, SupervisorSnapshot};
 pub struct ActorStatsView {
     pub actor_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor_path: Option<Vec<SupervisorPathSegmentView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub membership_epoch: Option<u64>,
     pub messages_received: u64,
     pub messages_accepted: u64,
@@ -58,10 +60,27 @@ pub struct ActorStatsView {
     pub mailbox_capacity: usize,
 }
 
+/// Identity of one nested supervisor containing an actor stats sample.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct SupervisorPathSegmentView {
+    pub id: String,
+    pub membership_epoch: u64,
+    pub generation: u64,
+}
+
 impl From<ActorStats> for ActorStatsView {
     fn from(stats: ActorStats) -> Self {
         Self {
             actor_id: stats.actor_id,
+            supervisor_path: stats.supervisor_path.map(|path| {
+                path.into_iter()
+                    .map(|segment| SupervisorPathSegmentView {
+                        id: segment.id,
+                        membership_epoch: segment.membership_epoch,
+                        generation: segment.generation,
+                    })
+                    .collect()
+            }),
             membership_epoch: stats.membership_epoch,
             messages_received: stats.messages_received,
             messages_accepted: stats.messages_accepted,

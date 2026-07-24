@@ -25,11 +25,22 @@ use crate::actor::{
 pub struct ActorStats {
     /// Actor id used to correlate these stats with supervisor snapshots.
     pub actor_id: String,
+    /// Identity path of the supervisors containing this actor when sampled
+    /// through [`RuntimeHandle::actor_stats`](crate::RuntimeHandle::actor_stats).
+    ///
+    /// A direct child of the sampled runtime has an empty path. Each nested
+    /// segment includes the supervisor child's membership epoch and generation
+    /// so identical actor ids and local epochs in sibling or restarted
+    /// subtrees remain distinguishable. Standalone actor and graph stats have
+    /// no supervisor context and report `None`.
+    pub supervisor_path: Option<Vec<SupervisorPathSegment>>,
     /// Identity of the actor's current supervisor membership, when sampled
     /// through [`RuntimeHandle::actor_stats`](crate::RuntimeHandle::actor_stats).
     ///
-    /// Pair this with [`actor_id`](Self::actor_id) to distinguish a removed
-    /// actor from a later actor added under the same id. Standalone actor and
+    /// Pair this with [`actor_id`](Self::actor_id) and
+    /// [`supervisor_path`](Self::supervisor_path) to distinguish a removed
+    /// actor from a later actor added under the same id, including actors with
+    /// identical local identities in different subtrees. Standalone actor and
     /// graph stats have no supervisor membership and report `None`.
     pub membership_epoch: Option<u64>,
     /// Messages removed from the mailbox by the actor for handling.
@@ -59,6 +70,18 @@ pub struct ActorStats {
     pub mailbox_depth: usize,
     /// Maximum capacity of the currently bound mailbox.
     pub mailbox_capacity: usize,
+}
+
+/// Identity of one nested supervisor on an actor stats path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SupervisorPathSegment {
+    /// Child id under which the nested supervisor is mounted.
+    pub id: String,
+    /// Membership identity of that child in its parent supervisor.
+    pub membership_epoch: u64,
+    /// Current generation of the nested supervisor child.
+    pub generation: u64,
 }
 
 #[derive(Debug)]
@@ -114,6 +137,7 @@ impl ActorStatsCounters {
     ) -> ActorStats {
         ActorStats {
             actor_id: actor_id.to_owned(),
+            supervisor_path: None,
             membership_epoch: None,
             messages_received: self.messages_received.load(Ordering::Relaxed),
             messages_accepted: self.messages_accepted.load(Ordering::Relaxed),

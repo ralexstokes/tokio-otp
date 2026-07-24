@@ -134,10 +134,14 @@ combined, for example with
 returned by `RuntimeHandle::subtree` provides the same view scoped to that
 subtree, including actors added dynamically through the scoped handle.
 These runtime-scoped samples set `ActorStats::membership_epoch` from the
-matching supervisor snapshot, allowing actor stats to be joined to the exact
-current membership. Stats sampled directly from an `ActorRef`, `RunnableActor`,
-or standalone `Graph` report `None` because those surfaces have no supervisor
-context.
+membership identity retained when the actor was registered. They also carry
+`ActorStats::supervisor_path`: each containing nested supervisor is identified
+by id, membership epoch, and generation. Use the full supervisor path together
+with `(actor_id, membership_epoch)` to join a flattened recursive sample to the
+exact current tree node; local epochs can repeat in sibling subtrees. A direct
+child has an empty path. Stats sampled directly from an `ActorRef`,
+`RunnableActor`, or standalone `Graph` report `None` for both runtime-scoped
+identity fields because those surfaces have no supervisor context.
 
 `ActorStats::message_bytes_accepted` is then `Some(total)`; ordinary actors
 report `None` and do not sample message sizes. With the `metrics` feature,

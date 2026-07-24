@@ -140,6 +140,7 @@ async fn runtime_handle_enumerates_actor_stats() {
     let stats = handle.actor_stats();
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].actor_id, worker_ref.id());
+    assert_eq!(stats[0].supervisor_path, Some(Vec::new()));
     assert_eq!(
         stats[0].membership_epoch,
         Some(
@@ -295,6 +296,112 @@ async fn runtime_builder_composes_subtrees_with_recursive_actor_stats() {
 }
 
 #[tokio::test]
+async fn recursive_stats_distinguish_duplicate_actor_ids_in_sibling_subtrees() {
+    let mut left_graph = GraphBuilder::new();
+    left_graph.actor("worker", Drain::<()>::new);
+    let mut right_graph = GraphBuilder::new();
+    right_graph.actor("worker", Drain::<()>::new);
+
+    let handle = Runtime::builder()
+        .subtree(
+            "left",
+            Runtime::builder().graph(left_graph.build().expect("left graph builds")),
+        )
+        .subtree(
+            "right",
+            Runtime::builder().graph(right_graph.build().expect("right graph builds")),
+        )
+        .build()
+        .expect("runtime builds")
+        .spawn();
+    handle.wait_started().await.expect("runtime started");
+
+    let stats = handle.actor_stats();
+    assert_eq!(stats.len(), 2);
+    assert!(stats.iter().all(|stats| stats.actor_id == "worker"));
+    assert!(stats.iter().all(|stats| stats.membership_epoch == Some(0)));
+
+    let paths = stats
+        .iter()
+        .map(|stats| {
+            let path = stats
+                .supervisor_path
+                .as_ref()
+                .expect("runtime stats carry a supervisor path");
+            assert_eq!(path.len(), 1);
+            (
+                path[0].id.as_str(),
+                path[0].membership_epoch,
+                path[0].generation,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(paths, [("left", 0, 0), ("right", 1, 0)]);
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_same_id_replacement_cannot_inherit_tracked_actor_stats() {
+    let handle = Runtime::builder().build().expect("runtime builds").spawn();
+    let tracked = handle
+        .add_actor("worker", Drain::<()>::new, DynamicActorOptions::default())
+        .await
+        .expect("tracked actor added");
+    tracked.send(()).await.expect("tracked actor receives");
+    let tracked_epoch = handle
+        .actor_stats()
+        .into_iter()
+        .find(|stats| stats.actor_id == "worker")
+        .and_then(|stats| stats.membership_epoch)
+        .expect("tracked membership epoch available");
+
+    let sampler_handle = handle.clone();
+    let sampler = tokio::spawn(async move {
+        for _ in 0..1_000 {
+            for stats in sampler_handle.actor_stats() {
+                if stats.actor_id == "worker" {
+                    assert_eq!(
+                        stats.membership_epoch,
+                        Some(tracked_epoch),
+                        "a replacement membership must never receive the old actor's counters"
+                    );
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    handle
+        .supervisor_handle()
+        .remove_child("worker")
+        .await
+        .expect("tracked actor removed through raw handle");
+    let mut factory_graph = GraphBuilder::new();
+    factory_graph.actor("anchor", Drain::<()>::new);
+    let factory_graph = factory_graph.build().expect("factory graph builds");
+    let (replacement, _replacement_ref) = factory_graph
+        .dynamic_factory()
+        .actor("worker", Drain::<()>::new);
+    handle
+        .supervisor_handle()
+        .add_actor(replacement, DynamicActorOptions::default())
+        .await
+        .expect("untracked replacement added");
+
+    sampler.await.expect("sampler completed");
+    assert!(
+        handle
+            .actor_stats()
+            .iter()
+            .all(|stats| stats.actor_id != "worker"),
+        "the stale registry entry is filtered by its retained membership epoch"
+    );
+
+    handle.shutdown_and_wait().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn recursive_stats_prune_dynamic_actors_lost_on_subtree_restart() {
     let mut nested_graph = GraphBuilder::new();
     let static_ref = nested_graph.actor("static-worker", || FailOnMessage);
@@ -342,6 +449,25 @@ async fn recursive_stats_prune_dynamic_actors_lost_on_subtree_restart() {
         dynamic_ref.send(()).await,
         Err(SendError::ActorTerminated { .. })
     ));
+
+    let mut factory_graph = GraphBuilder::new();
+    factory_graph.actor("anchor", Drain::<()>::new);
+    let factory_graph = factory_graph.build().expect("factory graph builds");
+    let (replacement, _replacement_ref) = factory_graph
+        .dynamic_factory()
+        .actor("dynamic-worker", Drain::<()>::new);
+    subtree
+        .supervisor_handle()
+        .add_actor(replacement, DynamicActorOptions::default())
+        .await
+        .expect("same-id raw actor added in replacement subtree incarnation");
+    assert!(
+        handle
+            .actor_stats()
+            .iter()
+            .all(|stats| stats.actor_id != "dynamic-worker"),
+        "the old dynamic registry entry must not attach to a reused local epoch"
+    );
 
     handle
         .shutdown_and_wait()

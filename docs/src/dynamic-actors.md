@@ -115,7 +115,9 @@ recursive `actor_stats()` result.
 If an id is removed and later reused, compare the snapshot's
 `membership_epoch` (also present in runtime-scoped `ActorStats`) as well as its
 `generation`: restarts keep an epoch and increment the generation, while a new
-membership receives a later epoch and starts again at generation zero.
+membership receives a later epoch and starts again at generation zero. For
+recursive stats, also compare `ActorStats::supervisor_path`; it distinguishes
+otherwise identical local ids and epochs in sibling or restarted subtrees.
 
 For a raw nested `Supervisor` that was not built as a runtime subtree, use
 `Graph::dynamic_factory`, `RuntimeHandle::supervisor`, and
