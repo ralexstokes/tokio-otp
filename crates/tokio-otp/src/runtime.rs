@@ -321,12 +321,12 @@ where
             let accepted_by = tokio::select! {
                 biased;
                 () = task_cancellation.cancelled() => break,
-                () = restarts.closed() => break,
-                () = target.wait_terminated() => break,
                 sent = target.send_to_incarnation(map(total)) => match sent {
                     Ok(mailbox) => mailbox,
                     Err(_) => break,
                 },
+                () = restarts.closed() => break,
+                () = target.wait_terminated() => break,
             };
 
             tokio::select! {
