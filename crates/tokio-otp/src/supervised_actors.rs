@@ -55,6 +55,11 @@ impl SupervisedActors {
     }
 
     /// Overrides the restart policy for the actor identified by this typed ref.
+    ///
+    /// Graph-declared actors remain registered after a terminal exit, including
+    /// actors configured with [`RestartPolicy::Never`]. Automatic terminal
+    /// removal is scoped to actors added at runtime with
+    /// [`DynamicActorOptions`](crate::DynamicActorOptions).
     #[must_use]
     pub fn actor_restart<M>(mut self, actor: &ActorRef<M>, restart: RestartPolicy) -> Self {
         self.overrides

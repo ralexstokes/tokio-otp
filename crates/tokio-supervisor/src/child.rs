@@ -212,6 +212,21 @@ impl ChildSpec {
     /// snapshots. It is primarily useful for children added at runtime, where
     /// removal also makes the child id available for reuse. Restarted exits do
     /// not remove the child.
+    ///
+    /// Under [`Strategy::OneForAll`](crate::Strategy::OneForAll) and
+    /// [`Strategy::RestForOne`](crate::Strategy::RestForOne), opting a
+    /// non-[`RestartPolicy::Never`] child into removal makes a non-restarted
+    /// exit permanent: a later group restart cannot revive the removed child.
+    /// If the exit is instead observed while a group restart is already
+    /// draining that child, it is part of the restart cycle and the child is
+    /// respawned rather than removed.
+    ///
+    /// Removing a significant child also removes its exit status from
+    /// supervisor snapshots and from
+    /// [`AutoShutdown::AllSignificant`](crate::AutoShutdown::AllSignificant)
+    /// accounting. In particular, a removed significant child's failed exit
+    /// cannot block auto-shutdown after the remaining significant children
+    /// complete.
     #[must_use]
     pub fn remove_on_exit(self, remove_on_exit: bool) -> Self {
         self.map_inner(|inner| inner.remove_on_exit = remove_on_exit)
