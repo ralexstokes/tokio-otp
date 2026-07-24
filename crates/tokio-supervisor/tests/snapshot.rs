@@ -51,6 +51,8 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
 
     assert_eq!(snapshot.state, SupervisorStateView::Running);
     assert_eq!(child_ids(&snapshot), vec!["alpha", "beta"]);
+    assert_eq!(snapshot.children[0].membership_epoch, 0);
+    assert_eq!(snapshot.children[1].membership_epoch, 1);
     for entry in &snapshot.children {
         assert_eq!(entry.membership, ChildMembershipView::Active);
         assert_eq!(entry.last_exit, None);
@@ -58,13 +60,14 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
         assert_eq!(entry.next_restart_in, None);
     }
 
-    handle
+    let assigned_epoch = handle
         .add_child(ChildSpec::new("gamma", |ctx| async move {
             ctx.shutdown_token().cancelled().await;
             Ok(())
         }))
         .await
         .expect("dynamic child should be accepted");
+    assert_eq!(assigned_epoch, 2);
 
     let mut snapshots = handle.subscribe_snapshots();
     let updated = wait_for_snapshot(&mut snapshots, |snapshot| {
@@ -72,6 +75,71 @@ async fn initial_snapshot_is_immediately_available_and_preserves_child_order() {
     })
     .await;
     assert_eq!(child_ids(&updated), vec!["alpha", "beta", "gamma"]);
+    assert_eq!(
+        child(&updated, "gamma").unwrap().membership_epoch,
+        assigned_epoch
+    );
+
+    handle.shutdown();
+    handle.wait().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn nested_supervisors_allocate_membership_epochs_independently() {
+    let nested = SupervisorBuilder::new()
+        .child(ChildSpec::new("seed", |ctx| async move {
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }))
+        .build()
+        .expect("valid nested supervisor");
+    let outer = SupervisorBuilder::new()
+        .child(ChildSpec::new("anchor", |ctx| async move {
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }))
+        .build()
+        .expect("valid outer supervisor");
+    let handle = outer.spawn();
+
+    handle
+        .add_supervisor("nested", nested)
+        .await
+        .expect("nested supervisor added");
+    let nested_handle = handle
+        .supervisor("nested")
+        .expect("nested handle available");
+    nested_handle
+        .add_child(ChildSpec::new("late", |ctx| async move {
+            ctx.shutdown_token().cancelled().await;
+            Ok(())
+        }))
+        .await
+        .expect("nested dynamic child added");
+
+    let outer_snapshot = handle.snapshot();
+    assert_eq!(
+        outer_snapshot
+            .child("nested")
+            .expect("nested supervisor visible")
+            .membership_epoch,
+        1
+    );
+    let nested_snapshot = nested_handle.snapshot();
+    assert_eq!(
+        nested_snapshot
+            .child("seed")
+            .expect("nested seed visible")
+            .membership_epoch,
+        0
+    );
+    assert_eq!(
+        nested_snapshot
+            .child("late")
+            .expect("nested dynamic child visible")
+            .membership_epoch,
+        1
+    );
 
     handle.shutdown();
     handle.wait().await.expect("shutdown should succeed");
@@ -126,6 +194,7 @@ async fn snapshot_shows_restart_state_and_last_exit() {
     })
     .await;
     let flaky = child(&restarting, "flaky").expect("flaky child should exist");
+    let membership_epoch = flaky.membership_epoch;
     assert!(
         flaky
             .next_restart_in
@@ -150,6 +219,13 @@ async fn snapshot_shows_restart_state_and_last_exit() {
             .as_ref(),
         Some(ExitStatusView::Failed(message)) if message.contains("boom")
     ));
+    assert_eq!(
+        child(&running_again, "flaky")
+            .expect("flaky child should exist")
+            .membership_epoch,
+        membership_epoch,
+        "restarting the same membership must retain its epoch"
+    );
 
     handle.shutdown();
     handle.wait().await.expect("shutdown should succeed");

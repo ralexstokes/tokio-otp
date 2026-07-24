@@ -74,15 +74,13 @@ impl tokio_otp::ActorFactory for AgentRunFactory {
 
 impl AgentRun {
     async fn append(&self, entry: JournalEntry) -> ActorResult {
-        tokio::time::timeout(
-            PHASE_TIMEOUT,
-            self.journal.call(|reply| JournalMsg::Append {
+        self.journal
+            .call(PHASE_TIMEOUT, |reply| JournalMsg::Append {
                 chat: self.chat,
                 entry,
                 reply,
-            }),
-        )
-        .await??;
+            })
+            .await?;
         Ok(Continue)
     }
 
@@ -98,13 +96,10 @@ impl AgentRun {
         };
         let model = self.model.clone();
         let cancel = self.cancel.clone();
-        let myself = ctx.myself();
-        let turn = self.turn;
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(MODEL_DEADLINE, model.turn(request, cancel))
-                .await
-                .unwrap_or(Err(ModelError::Deadline));
-            let _ = myself.send(RunMsg::ModelResult { turn, result }).await;
+        ctx.step(MODEL_DEADLINE, model.turn(request, cancel), |outcome| {
+            RunMsg::ModelResult {
+                result: outcome.unwrap_or(Err(ModelError::Deadline)),
+            }
         });
     }
 
@@ -119,47 +114,46 @@ impl AgentRun {
             })
             .await?;
         let tool_host = self.tool_host.clone();
-        let myself = ctx.myself();
-        tokio::spawn(async move {
-            let execute = tokio::time::timeout(
-                TOOL_DEADLINE,
-                tool_host.call(|reply| ToolHostMsg::Execute {
-                    key: key.clone(),
-                    call,
-                    reply,
-                }),
-            )
-            .await;
-            let outcome = match execute {
-                Ok(Ok(outcome)) => outcome,
-                _ => {
-                    // A timeout is an unknown outcome. Querying is ordered
-                    // behind the in-flight Execute in the tool-host mailbox,
-                    // so this deterministically reconciles the completed key.
-                    match tokio::time::timeout(
-                        PHASE_TIMEOUT,
-                        tool_host.call(|reply| ToolHostMsg::Query {
-                            key: key.clone(),
-                            reply,
-                        }),
-                    )
-                    .await
-                    {
-                        Ok(Ok(EffectStatus::Found(outcome))) => outcome,
-                        _ => ToolOutcome {
-                            output: "tool outcome remained unknown".into(),
-                        },
+        let step_key = key.clone();
+        ctx.step(
+            TOOL_DEADLINE + PHASE_TIMEOUT,
+            async move {
+                let execute = tool_host
+                    .call(TOOL_DEADLINE, |reply| ToolHostMsg::Execute {
+                        key: step_key.clone(),
+                        call,
+                        reply,
+                    })
+                    .await;
+                match execute {
+                    Ok(outcome) => outcome,
+                    _ => {
+                        // A timeout is an unknown outcome. Querying is ordered
+                        // behind the in-flight Execute in the tool-host mailbox,
+                        // so this deterministically reconciles the completed key.
+                        match tool_host
+                            .call(PHASE_TIMEOUT, |reply| ToolHostMsg::Query {
+                                key: step_key,
+                                reply,
+                            })
+                            .await
+                        {
+                            Ok(EffectStatus::Found(outcome)) => outcome,
+                            _ => ToolOutcome {
+                                output: "tool outcome remained unknown".into(),
+                            },
+                        }
                     }
                 }
-            };
-            let _ = myself
-                .send(RunMsg::ToolResult {
-                    index,
-                    key,
-                    result: outcome,
-                })
-                .await;
-        });
+            },
+            move |outcome| RunMsg::ToolResult {
+                index,
+                key,
+                result: outcome.unwrap_or(ToolOutcome {
+                    output: "tool outcome remained unknown".into(),
+                }),
+            },
+        );
         Ok(Continue)
     }
 
@@ -186,10 +180,7 @@ impl Actor for AgentRun {
     async fn handle(&mut self, message: Self::Msg, ctx: &ActorContext<Self::Msg>) -> ActorResult {
         match message {
             RunMsg::Step => self.start_model(ctx),
-            RunMsg::ModelResult { turn, result } => {
-                if turn != self.turn {
-                    return Ok(Continue);
-                }
+            RunMsg::ModelResult { result } => {
                 let turn = match result {
                     Ok(turn) => turn,
                     Err(ModelError::Cancelled) => {

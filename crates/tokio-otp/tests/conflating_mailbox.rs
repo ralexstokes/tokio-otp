@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use tokio::sync::{Notify, mpsc};
@@ -276,7 +277,11 @@ async fn replaced_call_reports_reply_dropped() {
 
     let call = tokio::spawn({
         let actor_ref = actor_ref.clone();
-        async move { actor_ref.call(RequestMsg::Get).await }
+        async move {
+            actor_ref
+                .call(Duration::from_secs(1), RequestMsg::Get)
+                .await
+        }
     });
     while actor_ref.stats().messages_accepted == 0 {
         tokio::task::yield_now().await;

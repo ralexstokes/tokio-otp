@@ -162,9 +162,36 @@ impl<H: Actor> RawActor for H {
             stopping = self.handle(message, &ctx).await? == Flow::Stop;
         }
 
+        ctx.close_external_intake();
         if self.drain_policy() == DrainPolicy::Drain {
-            ctx.mailbox.close();
-            while let Some(message) = ctx.mailbox.recv().await {
+            // Waiting for every step before receiving would deadlock when a
+            // full FIFO mailbox backpressures a completion. Drain externally
+            // accepted messages and incarnation-local step completions
+            // together until both sources are quiescent. Continuations are
+            // deliberately ignored once stopping begins.
+            loop {
+                let message = match ctx.mailbox.try_recv() {
+                    Ok(message) => Some(message),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                        if ctx.outstanding_steps() == 0 =>
+                    {
+                        // A final step can enqueue its postback after the
+                        // first poll and then deregister before the gauge
+                        // check. Deregistration synchronizes through the step
+                        // registry, so re-poll after observing zero before
+                        // declaring the mailbox quiescent.
+                        ctx.mailbox.try_recv().ok()
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        let changed = ctx.step_change_notify();
+                        tokio::select! {
+                            message = ctx.mailbox.recv() => message,
+                            () = changed.notified() => continue,
+                        }
+                    }
+                };
+                let Some(message) = message else { break };
                 ctx.myself.record_received();
                 ctx.observability.emit_message_received(&ctx.id);
                 // Once stopping begins, flow values do not change the drain
@@ -172,6 +199,8 @@ impl<H: Actor> RawActor for H {
                 // for the context to drop with the incarnation.
                 let _ = self.handle(message, &ctx).await?;
             }
+        } else {
+            ctx.abort_steps();
         }
 
         self.on_stop(&ctx).await?;

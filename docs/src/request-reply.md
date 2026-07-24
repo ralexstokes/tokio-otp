@@ -2,12 +2,11 @@
 
 `ActorRef::call` builds request/reply on the ordinary actor mailbox: it creates
 a one-shot `Reply<T>`, puts that reply handle in your message, sends the
-message, and waits for the actor to answer. Deadlines are caller-owned, so
-bound the whole operation with `tokio::time::timeout`:
+message, and waits for the actor to answer. Every `call` takes an explicit
+timeout so the whole operation is bounded:
 
 ```rust,no_run
 use std::time::Duration;
-use tokio::time::timeout;
 use tokio_otp::{ActorRef, Reply};
 
 enum AccountMsg {
@@ -17,11 +16,9 @@ enum AccountMsg {
 async fn balance(
     account: &ActorRef<AccountMsg>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let balance = timeout(
-        Duration::from_millis(250),
-        account.call(AccountMsg::Balance),
-    )
-    .await??;
+    let balance = account
+        .call(Duration::from_millis(250), AccountMsg::Balance)
+        .await?;
     Ok(balance)
 }
 ```
@@ -30,16 +27,18 @@ The timeout covers both phases of a call:
 
 1. **Delivery:** `call` waits for the same conditions as `send`. Before the
    actor starts, or during an expected restart, it waits for a mailbox to bind.
-   With a full FIFO mailbox, it waits for capacity. If the deadline expires in
-   this phase, cancelling the future drops the request before acceptance.
+   With a full FIFO mailbox, it waits for capacity. If the timeout expires in
+   this phase, the call returns `CallError::Timeout` and drops the request
+   before acceptance.
 2. **Reply:** after the mailbox accepts the request, `call` waits on its
-   one-shot reply channel. If the deadline expires now, only the caller's wait
-   is cancelled. The accepted request remains in the mailbox, the actor may
-   still process it, and `Reply::send` silently discards a late result.
+   one-shot reply channel. If the timeout expires now, the call returns
+   `CallError::Timeout`, but only the caller's wait is cancelled. The accepted
+   request remains in the mailbox, the actor may still process it, and
+   `Reply::send` silently discards a late result.
 
 This boundary means that a timed-out call can have an **unknown outcome**. The
 caller cannot generally tell whether the request never reached the actor, is
-still queued, is currently running, or completed after the deadline.
+still queued, is currently running, or completed after the timeout.
 
 ## Side effects and retries
 
@@ -51,20 +50,23 @@ system persist, or provide a reconciliation query that lets the caller learn
 the final status. Retry with the same key rather than creating a second
 logical operation.
 
-Cancellation of the `call` future is not a cancellation signal for actor work.
-If a protocol needs cooperative cancellation, model it explicitly in the
-message type and define what happens when cancellation races with completion.
+Neither `CallError::Timeout` nor cancellation of the `call` future is a
+cancellation signal for actor work. If a protocol needs cooperative
+cancellation, model it explicitly in the message type and define what happens
+when cancellation races with completion.
 
 ## Backpressure and restarts
 
-The composed timeout deliberately includes mailbox backpressure and restart
-backoff. Choose a deadline that covers the queueing delay your service is
-willing to tolerate:
+The timeout deliberately includes mailbox backpressure and restart backoff.
+Choose one that covers the queueing delay your service is willing to tolerate:
 
 - Use `try_send` for fire-and-forget messages when failing fast on a full
   mailbox beats waiting. There is no fail-fast variant of `call`.
-- Use `timeout(..., actor.call(...))` when the caller can wait for capacity or
-  a short restart window, but needs a firm end-to-end deadline.
+- Use `call(timeout, ...)` when the caller can wait for capacity or a short
+  restart window, but needs a firm end-to-end bound.
+- Use `call_unbounded(...)` only when another mechanism deliberately bounds
+  the protocol lifetime. Its conspicuous name makes the missing local timeout
+  easy to find in review.
 - Do not use `call` with a conflating mailbox. A newer value can replace the
   request, causing `CallError::ReplyDropped`.
 
@@ -79,21 +81,20 @@ that incarnation, in which case the reply channel closes with
 An actor processes one message at a time. When a handler awaits a `call` to
 another actor, the calling actor's mailbox stops for the full round-trip:
 every queued message — a cancel bound for a healthy peer, an urgent status
-query — waits behind the outstanding request for up to the composed
-deadline. This is the natural way to write a request-routing actor, and it
+query — waits behind the outstanding request for up to the call's timeout.
+This is the natural way to write a request-routing actor, and it
 is the actor-model equivalent of blocking inside an Erlang `gen_server`
 callback: one slow callee becomes head-of-line blocking for everything
 routed through the intermediary.
 
-For fan-out and routing actors, pipeline the request instead of awaiting
-it. The handler validates and records intent, then spawns the bounded call
-onto a task. The task completes the original caller's `Reply` and sends the
-outcome back to the actor as an ordinary message, so state updates still
-happen on the actor's serial handle loop:
+For fan-out and routing actors, pipeline the request instead of awaiting it.
+The handler validates and records intent, then starts a bounded
+`ActorContext::step`. Its continuation maps the outcome back to an ordinary
+message, so state updates and the original caller's reply still happen on the
+actor's serial handle loop:
 
 ```rust,no_run
 use std::{collections::HashMap, time::Duration};
-use tokio::time::timeout;
 use tokio_otp::prelude::*;
 
 enum VenueMsg {
@@ -106,10 +107,11 @@ enum RouterMsg {
         order: u64,
         reply: Reply<bool>,
     },
-    // Internal: the pipelined call's outcome, sent by the spawned task.
+    // Internal: the pipelined call's outcome.
     Resolved {
         order: u64,
         accepted: bool,
+        reply: Reply<bool>,
     },
 }
 
@@ -131,29 +133,33 @@ impl Actor for Router {
                 // Validate and record intent on the handle loop...
                 self.in_flight.insert(order, venue);
                 let gateway = self.venues[venue].clone();
-                let myself = ctx.myself();
                 // ...then move the slow call off it.
-                tokio::spawn(async move {
-                    let accepted = matches!(
-                        timeout(
-                            Duration::from_millis(250),
-                            gateway.call(|reply| VenueMsg::Place { order, reply }),
+                ctx.step(
+                    Duration::from_millis(250),
+                    async move {
+                        matches!(
+                            gateway
+                                .call(Duration::from_millis(250), |reply| {
+                                    VenueMsg::Place { order, reply }
+                                })
+                                .await,
+                            Ok(true)
                         )
-                        .await,
-                        Ok(Ok(true))
-                    );
-                    // Update the router first, then release the caller, so a
-                    // follow-up message is ordered after the resolution.
-                    let _ = myself.send(RouterMsg::Resolved { order, accepted }).await;
-                    reply.send(accepted);
-                });
+                    },
+                    move |outcome| RouterMsg::Resolved {
+                        order,
+                        accepted: outcome.unwrap_or(false),
+                        reply,
+                    },
+                );
             }
-            RouterMsg::Resolved { order, accepted } => {
+            RouterMsg::Resolved { order, accepted, reply } => {
                 // Back on the handle loop: apply the outcome to actor state.
                 self.in_flight.remove(&order);
                 if !accepted {
                     // schedule reconciliation, raise an alert, ...
                 }
+                reply.send(accepted);
             }
         }
         Ok(tokio_otp::prelude::Continue)
@@ -161,32 +167,23 @@ impl Actor for Router {
 }
 ```
 
-Two properties make the pattern work:
+Three properties make the pattern work:
 
-- **Reply ownership.** `Reply` is a one-shot handle that can move into the
-  spawned task, so the original caller is answered without another pass
-  through the router.
-- **Mailbox ordering.** The task sends the resolution message and waits for
-  the mailbox to accept it *before* completing the caller's reply. Anything
-  the caller sends after seeing the reply is queued behind the resolution in
-  the actor's FIFO mailbox, so within a single actor incarnation a
-  follow-up is never processed before the outcome it follows.
+- **Reply ownership.** `Reply` moves into the continuation message, so the
+  actor applies its state update before answering. A caller follow-up is
+  therefore ordered after that update in the actor's FIFO mailbox.
+- **Incarnation ownership.** A step is aborted when its actor incarnation
+  dies, and a racing postback is dropped instead of reaching a fresh
+  incarnation through the restart-stable ref.
+- **Same-incarnation correlation.** The order id still identifies which of
+  several concurrent steps completed. `step` removes the need for a separate
+  hand-written restart generation; it does not replace domain request ids.
 
-The spawned task is not bound to the actor's lifecycle, and the ordering
-above is a same-incarnation guarantee. If the actor restarts while a call
-is in flight, the task keeps running, but its resolution message is subject
-to the at-most-once contract described above: accepted by the old
-incarnation's mailbox and not yet handled, it is lost with that
-incarnation; sent after the restart, it is delivered to the new
-incarnation, which has no matching in-flight state. Two rules keep this
-safe. Correlation keys must be unique across incarnations — drawn from
-restart-stable state, not from a counter that resets with the actor — so a
-stale resolution can never alias a new request's state and an unmatched one
-can simply be dropped. And an outcome that must survive the actor needs
-durable state or a reconciliation path; otherwise a lost resolution leaves
-the request unknown forever. When per-callee state outgrows what a
-resolution message can carry, promote the callee to a dedicated child actor
-and let supervision manage its lifecycle instead.
+An outcome that must survive the actor still needs durable state or a
+reconciliation path: abort and timeout abandon the wait, not a remote request
+already accepted. When per-callee state outgrows what a resolution message can
+carry, promote the callee to a dedicated child actor and let supervision
+manage its lifecycle instead.
 
 Not every handler needs this treatment. A serial batch operation that
 mutates actor state between calls — a reconciliation sweep run while
@@ -195,4 +192,4 @@ blocking the mailbox for its duration is an explicit, accepted trade-off.
 
 The `trading_engine` example's order router demonstrates the full pattern,
 including a phase that proves an order for a healthy venue completes while
-another venue's call is still waiting out its deadline.
+another venue's call is still waiting out its timeout.

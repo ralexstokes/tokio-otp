@@ -55,8 +55,11 @@ impl Actor for Coordinator {
 }
 ```
 
-A watch survives restarts of the watched actor, so it never needs to be
-re-registered while the target lives. Events arrive in lifecycle order:
+A watch belongs to the observing and watched actor memberships. It survives
+restarts on both sides, so it never needs to be re-registered while both
+memberships live. Events that arrive while the observer is between
+incarnations wait for its next mailbox binding. Events arrive in lifecycle
+order:
 
 - `MonitorEvent::Up` — an incarnation started. The first actor run is
   generation `0`, and each restart increments the generation. Registering a
@@ -82,10 +85,28 @@ races from a graph: there is never a reason to retry registration.
 
 `ActorContext::watch` returns a cloneable `MonitorRef`. Calling `cancel` on
 any clone suppresses future delivery. Cancellation cannot retract an event
-already accepted by the mailbox. All watches are also cancelled when the
-observing actor stops or restarts, so an old observer incarnation cannot
-inject messages into its replacement; register watches in `on_start` so each
-observer incarnation holds its own.
+already accepted by the mailbox. Permanently removing either actor membership
+also ends the watch; a watched actor's final `Terminated` event is queued
+before its membership removal completes.
+
+Calling `watch` again for the same observer/subject pair is idempotent. This
+keeps the common pattern of registering in `on_start` safe when the observer
+restarts: the replacement incarnation gets the existing watch rather than a
+duplicate immediate `Up`. The mapping closure from the first registration is
+membership-owned and remains in use until cancellation, so it should capture
+durable configuration rather than incarnation-local state. This also applies
+to repeated calls within one incarnation: every returned `MonitorRef` aliases
+the same watch, the later mapping closures are unused, and cancelling any alias
+cancels the pair.
+
+A replacement observer does not receive a fresh snapshot when it re-registers.
+Events that a previous incarnation accepted and then lost in a crash are not
+replayed, so an observer that needs its last known target state after restart
+must persist that state durably. To trade staged transition history for a fresh
+snapshot, cancel the existing `MonitorRef` and call `watch` again. A running
+target then emits an immediate `Up`, a terminated target emits an immediate
+`Terminated`, and a target between incarnations remains silent until its next
+`Up`.
 
 Watch notifications use the observer's ordinary mailbox. FIFO mailboxes wait
 for capacity and preserve every accepted notification. A conflating mailbox

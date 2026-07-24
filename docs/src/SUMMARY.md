@@ -8,6 +8,7 @@
 - [Supervision fundamentals](supervision.md)
 - [Actor graphs](actor-graphs.md)
 - [Bounded request/reply](request-reply.md)
+- [Bounded actor steps](actor-steps.md)
 - [Supervised actors](supervised-actors.md)
 - [Actor timers](actor-timers.md)
 - [Watching actors](actor-monitors.md)
